@@ -60,6 +60,13 @@ def list_zones() -> list[dict]:
 
 
 def active_tunnel_id() -> str | None:
+    """This Space's tunnel. SHIMPZ_CF_TUNNEL_ID pins it explicitly — REQUIRED on a host that hosts more
+    than one tunnel (the account's `cfd_tunnel` list order is arbitrary, so 'the first' can be a SIBLING
+    Space's tunnel, which is how a publish once landed on the wrong tunnel). Unset → the first (single
+    -tunnel host, unchanged)."""
+    pinned = os.environ.get("SHIMPZ_CF_TUNNEL_ID", "").strip()
+    if pinned:
+        return pinned
     result = _call("GET", f"/accounts/{ACCOUNT}/cfd_tunnel?is_deleted=false")["result"]
     return result[0]["id"] if result else None
 

@@ -28,6 +28,8 @@ class AppSpec:
     db: bool = True  # provision a scoped per-(capsule, app) Postgres DB via pg-driver
     egress: tuple[str, ...] = ()  # external HTTPS hosts, reached ONLY via the token-gated app-egress-proxy
     first_party: bool = True  # False = a marketplace app → the install REQUIRES a verified Shimpz account
+    archs: tuple[str, ...] = ("amd64", "arm64")  # CPU archs the image supports; an amd64-only Shimpz
+    # (e.g. the Chrome browser) can't deploy onto an arm64 Capsule — mirrors the storefront's `archs`.
 
 
 APPS: dict[str, AppSpec] = {
