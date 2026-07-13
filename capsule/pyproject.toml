@@ -1,0 +1,12 @@
+[project]
+name = "capsule-driver"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    # Pinned EXACT — SECURITY_ENGINEERING_PLAN.md item 6: an open range lets any future release install
+    # silently on the next rebuild. Must match the literal `uv pip install docker==...` in Dockerfile.
+    "docker==7.1.0",
+]
+
+[tool.uv]
+package = false
