@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import ipaddress
 import json
 import os
 import select
 import socket
 import socketserver
 import sys
+import threading
 from pathlib import Path
 
 import audit
@@ -35,6 +37,16 @@ ALLOWED_PORTS = {443}  # HTTPS only — every legitimate app destination is TLS
 CONNECT_TIMEOUT = 15
 IDLE_TIMEOUT = 300
 BUFSIZE = 65536
+MAX_CONCURRENCY = int(os.environ.get("SHIMPZ_APP_EGRESS_MAX_CONCURRENCY", "64"))
+MAX_SOURCE_CONCURRENCY = int(os.environ.get("SHIMPZ_APP_EGRESS_MAX_SOURCE_CONCURRENCY", "8"))
+LISTEN_BACKLOG = int(os.environ.get("SHIMPZ_APP_EGRESS_LISTEN_BACKLOG", "16"))
+if (
+    not 1 <= MAX_CONCURRENCY <= 64
+    or not 1 <= MAX_SOURCE_CONCURRENCY <= 8
+    or MAX_SOURCE_CONCURRENCY > MAX_CONCURRENCY
+    or not 1 <= LISTEN_BACKLOG <= 16
+):
+    raise ValueError("app egress proxy concurrency/backlog must stay inside the shipping resource envelope")
 _STATUS = {
     200: "Connection established",
     400: "Bad Request",
@@ -42,6 +54,7 @@ _STATUS = {
     405: "Method Not Allowed",
     407: "Proxy Authentication Required",
     502: "Bad Gateway",
+    503: "Service Unavailable",
 }
 
 
@@ -58,7 +71,7 @@ def load_policy(policy_dir: Path) -> dict[str, frozenset[str]]:
         token = f.stem
         try:
             hosts = json.loads(f.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue  # a bad policy file denies that app's egress — never opens another's
         if isinstance(hosts, list) and all(isinstance(h, str) for h in hosts):
             policy[token] = frozenset(h.lower().rstrip(".") for h in hosts)
@@ -80,6 +93,29 @@ def permitted(token: str, host: str, port: int, policy: dict[str, frozenset[str]
     return host.lower().rstrip(".") in allow
 
 
+def resolve_public(host: str, port: int) -> tuple[int, tuple] | None:
+    """Resolve once and return a public sockaddr; any non-public answer denies the whole target.
+
+    Connecting to the returned sockaddr rather than the hostname closes the resolve/connect DNS
+    rebinding window. Refusing a mixed public/private answer prevents an attacker from influencing
+    address ordering to pivot this multi-homed proxy into another app network or the host.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return None
+    public: list[tuple[int, tuple]] = []
+    for family, _socktype, _proto, _canonname, sockaddr in infos:
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            return None
+        if not address.is_global:
+            return None
+        public.append((family, sockaddr))
+    return public[0] if public else None
+
+
 def extract_token(headers: str) -> str | None:
     """Pull the per-app token out of a `Proxy-Authorization: Basic base64(token:)` header (or None).
 
@@ -94,7 +130,7 @@ def extract_token(headers: str) -> str | None:
                 return None
             try:
                 decoded = base64.b64decode(creds, validate=True).decode("latin1")
-            except (ValueError, UnicodeDecodeError):
+            except ValueError, UnicodeDecodeError:
                 return None
             return decoded.split(":", 1)[0] or None
     return None
@@ -128,9 +164,28 @@ class Handler(socketserver.BaseRequestHandler):
             self._reply(cli, 403)
             audit.log("connect", f"{host}:{port}", result="denied", level="warn", code=403, app=token[:12])
             return
+        resolved = resolve_public(host, port)
+        if resolved is None:
+            self._reply(cli, 403)
+            audit.log(
+                "connect",
+                f"{host}:{port}",
+                result="denied",
+                level="warn",
+                code=403,
+                reason="internal or unresolvable destination",
+                app=token[:12],
+            )
+            return
+        family, sockaddr = resolved
+        upstream: socket.socket | None = None
         try:
-            upstream = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+            upstream = socket.socket(family, socket.SOCK_STREAM)
+            upstream.settimeout(CONNECT_TIMEOUT)
+            upstream.connect(sockaddr)
         except OSError as exc:
+            if upstream is not None:
+                upstream.close()
             self._reply(cli, 502)
             audit.log("connect", f"{host}:{port}", result="error", reason=str(exc), app=token[:12])
             return
@@ -192,12 +247,77 @@ class Handler(socketserver.BaseRequestHandler):
 
 
 class Server(socketserver.ThreadingTCPServer):
+    """Threaded CONNECT server with admission enforced before worker creation."""
+
     allow_reuse_address = True
     daemon_threads = True
+    request_queue_size = LISTEN_BACKLOG
+
+    def __init__(
+        self,
+        *args,
+        max_concurrency: int = MAX_CONCURRENCY,
+        max_source_concurrency: int = MAX_SOURCE_CONCURRENCY,
+        **kwargs,
+    ) -> None:
+        if not 1 <= max_source_concurrency <= max_concurrency <= MAX_CONCURRENCY:
+            raise ValueError("invalid App egress proxy concurrency")
+        self._request_slots = threading.BoundedSemaphore(max_concurrency)
+        self._max_source_concurrency = max_source_concurrency
+        self._source_guard = threading.Lock()
+        self._source_counts: dict[str, int] = {}
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(CONNECT_TIMEOUT)
+        return request, client_address
+
+    def _acquire_request_slot(self, client_address) -> bool:
+        if not self._request_slots.acquire(blocking=False):
+            return False
+        source = str(client_address[0])
+        with self._source_guard:
+            current = self._source_counts.get(source, 0)
+            if current >= self._max_source_concurrency:
+                self._request_slots.release()
+                return False
+            self._source_counts[source] = current + 1
+        return True
+
+    def _release_request_slot(self, client_address) -> None:
+        source = str(client_address[0])
+        with self._source_guard:
+            remaining = self._source_counts[source] - 1
+            if remaining:
+                self._source_counts[source] = remaining
+            else:
+                self._source_counts.pop(source)
+        self._request_slots.release()
+
+    def process_request(self, request, client_address) -> None:
+        if not self._acquire_request_slot(client_address):
+            with contextlib.suppress(OSError):
+                request.settimeout(1)
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._release_request_slot(client_address)
+            self.shutdown_request(request)
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._release_request_slot(client_address)
 
 
 def main() -> None:
-    server = Server(("0.0.0.0", LISTEN_PORT), Handler)  # noqa: S104 — proxy-net-only by design (internal)
+    server = Server((str(ipaddress.IPv4Address(0)), LISTEN_PORT), Handler)
     print(f"app-egress-proxy listening on :{LISTEN_PORT}; policy_dir={POLICY_DIR}", file=sys.stderr)
     server.serve_forever()
 

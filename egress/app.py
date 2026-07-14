@@ -1,17 +1,16 @@
 #!/usr/local/bin/python3
-"""egress-proxy — the ONLY internet route for the `shimpz-brain` brain (SECURITY_ENGINEERING_PLAN.md item 8).
+"""egress-proxy — the ONLY internet route for platform and Capsule Brains (security-plan items 8/12).
 
-The brain is off the `edge` bridge; its ONLY egress is `HTTPS_PROXY=http://egress-proxy:8888`, reached
-over the 2-member internal `egress_net`. Two things this ALWAYS gives, regardless of the allowlist:
-the internal datastores stay unreachable (this proxy has no route to postgres/redpanda), and EVERY
-outbound destination is audited (the full egress trail — how the Meta-Ads breakage was found in seconds).
-`SHIMPZ_EGRESS_ALLOW` picks the posture: `*` (the default) = BROAD+AUDIT — forward any host, audit all — the
-right fit for a GENERAL agent that reaches whatever host a task needs; a comma-list = a tight allowlist
-(only those hosts, :443 only) for a narrow-purpose deployment. See `permitted()`.
+The platform Brain reaches this proxy over its internal `egress_net`. Each Capsule Brain reaches it over
+that Capsule's separate internal Brain-egress network. The proxy is never attached to a Capsule's
+core/App/data plane, so installed Apps cannot bypass their token-scoped app-egress-proxy. The proxy's own
+`egress_out` network is its only internet route; internal datastores remain unreachable, and every outbound
+destination is audited. `SHIMPZ_EGRESS_ALLOW=*` (the default) is BROAD+AUDIT for general-purpose Brains; a
+comma-list is a tight :443 allowlist for a narrow-purpose deployment. See `permitted()`.
 
 Design (deliberately minimal — no bearer, no TLS termination):
-  * network-gated, not token-gated: only `shimpz-brain` shares `egress_net`, same doctrine as the per-pair
-    driver nets. `egress_out` (single-member) is the sidecar's own route to the internet.
+  * network-gated, not token-gated: only Brains share its dedicated egress networks. No Capsule App,
+    Postgres, or other core/data member is attached. `egress_out` is its own route to the internet.
   * CONNECT-only: a plain-HTTP forward request is refused (405) so `http://` exfil is impossible; the
     tunnel is opaque TLS end-to-end (no CA injection, the proxy never sees plaintext).
   * allowlist by HOSTNAME (the proxy resolves the name), so it survives Anthropic/Telegram CDN-IP
@@ -29,6 +28,7 @@ import select
 import socket
 import socketserver
 import sys
+import threading
 
 import audit
 
@@ -38,12 +38,23 @@ ALLOWED_PORTS = {443}  # HTTPS only — every legitimate brain destination is TL
 CONNECT_TIMEOUT = 15
 IDLE_TIMEOUT = 300  # tear down a tunnel idle this long
 BUFSIZE = 65536
+MAX_CONCURRENCY = int(os.environ.get("SHIMPZ_EGRESS_MAX_CONCURRENCY", "64"))
+MAX_SOURCE_CONCURRENCY = int(os.environ.get("SHIMPZ_EGRESS_MAX_SOURCE_CONCURRENCY", "8"))
+LISTEN_BACKLOG = int(os.environ.get("SHIMPZ_EGRESS_LISTEN_BACKLOG", "16"))
+if (
+    not 1 <= MAX_CONCURRENCY <= 64
+    or not 1 <= MAX_SOURCE_CONCURRENCY <= 8
+    or MAX_SOURCE_CONCURRENCY > MAX_CONCURRENCY
+    or not 1 <= LISTEN_BACKLOG <= 16
+):
+    raise ValueError("egress proxy concurrency/backlog must stay inside the shipping resource envelope")
 _STATUS = {
     200: "Connection established",
     400: "Bad Request",
     403: "Forbidden",
     405: "Method Not Allowed",
     502: "Bad Gateway",
+    503: "Service Unavailable",
 }
 
 
@@ -75,33 +86,26 @@ def permitted(host: str, port: int) -> bool:
 def _resolve_public(host: str, port: int) -> tuple[int, tuple] | None:
     """Resolve host:port to a verified-PUBLIC address, or None if it resolves to an internal IP.
 
-    The confused-deputy guard. This proxy is (with Capsules) multi-homed onto many internal nets, so a
-    caller could otherwise `CONNECT shimpz-brain:3000` / `CONNECT capsule_<other>:<port>` / a datastore
-    and have this proxy tunnel to it. So `*` must mean "any PUBLIC host", NEVER an in-cluster peer: a
-    CONNECT to an internal NAME or a literal RFC1918/loopback/link-local/reserved IP is refused. We then
-    connect to the EXACT verified address (never a re-resolve), closing the resolve→connect TOCTOU and
-    any split-horizon fall-through to an internal address.
+    Defense in depth for authorized Brain callers. The proxy is multi-homed across Brain-only egress
+    networks, so `*` must mean "any PUBLIC host", never an in-cluster peer. A CONNECT to an internal name
+    or literal non-global address is refused, and mixed public/private answers fail closed. We connect to
+    the exact verified address (never a re-resolve), closing resolve→connect TOCTOU. Network separation,
+    not this destination guard, is what prevents Apps from reaching the broad proxy.
     """
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError:
         return None
+    public: list[tuple[int, tuple]] = []
     for family, _stype, _proto, _canon, sockaddr in infos:
         try:
             addr = ipaddress.ip_address(sockaddr[0])
         except ValueError:
-            continue
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_reserved
-            or addr.is_multicast
-            or addr.is_unspecified
-        ):
+            return None
+        if not addr.is_global:
             return None  # any internal resolution → refuse the whole CONNECT (no partial trust)
-        return family, sockaddr
-    return None
+        public.append((family, sockaddr))
+    return public[0] if public else None
 
 
 class Handler(socketserver.BaseRequestHandler):
@@ -209,8 +213,75 @@ class Handler(socketserver.BaseRequestHandler):
 
 
 class Server(socketserver.ThreadingTCPServer):
+    """Threaded CONNECT server with admission enforced before worker creation."""
+
     allow_reuse_address = True
     daemon_threads = True
+    request_queue_size = LISTEN_BACKLOG
+
+    def __init__(
+        self,
+        *args,
+        max_concurrency: int = MAX_CONCURRENCY,
+        max_source_concurrency: int = MAX_SOURCE_CONCURRENCY,
+        **kwargs,
+    ) -> None:
+        if not 1 <= max_source_concurrency <= max_concurrency <= MAX_CONCURRENCY:
+            raise ValueError("invalid egress proxy concurrency")
+        self._request_slots = threading.BoundedSemaphore(max_concurrency)
+        self._max_source_concurrency = max_source_concurrency
+        self._source_guard = threading.Lock()
+        self._source_counts: dict[str, int] = {}
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(CONNECT_TIMEOUT)
+        return request, client_address
+
+    def _acquire_request_slot(self, client_address) -> bool:
+        if not self._request_slots.acquire(blocking=False):
+            return False
+        source = str(client_address[0])
+        with self._source_guard:
+            current = self._source_counts.get(source, 0)
+            if current >= self._max_source_concurrency:
+                self._request_slots.release()
+                return False
+            self._source_counts[source] = current + 1
+        return True
+
+    def _release_request_slot(self, client_address) -> None:
+        source = str(client_address[0])
+        with self._source_guard:
+            remaining = self._source_counts[source] - 1
+            if remaining:
+                self._source_counts[source] = remaining
+            else:
+                self._source_counts.pop(source)
+        self._request_slots.release()
+
+    def process_request(self, request, client_address) -> None:
+        if not self._acquire_request_slot(client_address):
+            # Do not create a thread or wait behind a 300-second tunnel. The accepted socket already
+            # has a short timeout; best-effort overload signaling is bounded and then it is closed.
+            with contextlib.suppress(OSError):
+                request.settimeout(1)
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._release_request_slot(client_address)
+            self.shutdown_request(request)
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._release_request_slot(client_address)
 
 
 def main() -> None:
@@ -219,7 +290,7 @@ def main() -> None:
         # so the misconfiguration is loud, not a mysterious total outage. (fail-fast doctrine.)
         print("egress-proxy: SHIMPZ_EGRESS_ALLOW is empty — refusing to start", file=sys.stderr)
         sys.exit(1)
-    server = Server(("0.0.0.0", LISTEN_PORT), Handler)  # noqa: S104 — egress_net-only by design (2-member internal)
+    server = Server((str(ipaddress.IPv4Address(0)), LISTEN_PORT), Handler)
     print(f"egress-proxy listening on :{LISTEN_PORT}; allow={ALLOW}", file=sys.stderr)
     server.serve_forever()
 

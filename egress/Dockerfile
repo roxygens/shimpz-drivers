@@ -1,12 +1,13 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 #
-# egress-proxy — the brain's ONLY internet route (SECURITY_ENGINEERING_PLAN.md item 8). A CONNECT-only
-# forward proxy that forwards ONLY allowlisted hosts (.anthropic.com, api.telegram.org) and refuses
-# everything else. Holds NO credential and NO docker.sock; a compromise here can, at worst, reach the
-# two hosts already on the allowlist. stdlib-only (socket/select) — zero third-party deps, no uv/venv.
+# egress-proxy — the platform Brain's and Capsule Brains' ONLY internet route (security-plan item 8/12).
+# A CONNECT-only, broad+audited-by-default proxy, optionally narrowed by SHIMPZ_EGRESS_ALLOW. It joins
+# only Brain-egress networks, never a Capsule core/App/data plane; Apps use the separate token-gated
+# app-egress-proxy. Holds no credential or docker.sock. stdlib-only — zero third-party dependencies.
 # Pinned by digest (not the movable `3.14-slim` tag) — SECURITY_ENGINEERING_PLAN.md item 6. Same digest
 # as the other driver sidecars; bump all together.
 FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
+ARG SOURCE_DATE_EPOCH=0
 
 # IPv6 egress is broken on this host (see the main Dockerfile) → prefer IPv4 so an outbound CONNECT to a
 # dual-stack allowlisted host (e.g. api.telegram.org) doesn't stall on an unreachable AAAA. Same fix as

@@ -16,7 +16,7 @@ try:
     sock.sendall(b"GET / HTTP/1.1\r\nHost: healthcheck\r\n\r\n")
     resp = sock.recv(128)
     sock.close()
-except Exception:  # noqa: BLE001 — any connection failure (refused, timeout) is unhealthy
+except OSError:
     sys.exit(1)
 else:
     sys.exit(0 if b" 405 " in resp else 1)  # 405 = CONNECT-only enforcement is live
