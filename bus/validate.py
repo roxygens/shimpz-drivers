@@ -23,8 +23,8 @@ class ValidationError(Exception):
 def sanitize_proj(name: str) -> str:
     """Port of shimpzdetect.sh's _sanitize_proj.
 
-    MUST match every other driver's own sanitize_proj exactly (shimpz-db/shimpz-bus/shimpz-app/the
-    driver all independently agree).
+    MUST match every other driver's own sanitize_proj exactly (shimpz-bus/shimpz-app and the app/PG
+    drivers all independently agree).
     """
     lowered = re.sub(r"[^a-z0-9_]+", "_", str(name).lower())
     return lowered.strip("_")

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 # check=skip=SecretsUsedInArgOrEnv ; false positive: the *_TOKEN_GID/*_TOKEN_* ARGs here hold numeric group IDs and file paths, never secret values
 #
 # bus-driver — the ONLY container that holds SHIMPZ_BUS_ADMIN_* (the Redpanda cluster superuser).
@@ -11,6 +11,7 @@
 # Pinned by digest (not just the `3.14-slim` tag, which can move) — SECURITY_ENGINEERING_PLAN.md
 # item 6. `docker pull python:3.14-slim` resolved to this exact digest; bump both together.
 FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
+ARG SOURCE_DATE_EPOCH=0
 
 # Fixed GID for the token-sharing group — MUST match the same groupadd in the main Dockerfile
 # (shimpz-brain's `abc` user joins it there). Distinct from every other sidecar's own GID so no
@@ -20,8 +21,11 @@ ARG SHIMPZ_BUSDRIVER_TOKEN_GID=10005
 RUN groupadd -g "${SHIMPZ_BUSDRIVER_TOKEN_GID}" shimpzbusdriver-token \
     && useradd -u 10001 -G shimpzbusdriver-token -M -s /usr/sbin/nologin busdriver
 
+COPY requirements.lock /tmp/requirements.lock
 RUN python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir confluent-kafka==2.14.2 \
+    && /opt/venv/bin/pip install --no-cache-dir --require-hashes --requirement /tmp/requirements.lock \
+    && rm -f /tmp/requirements.lock \
+    && rm -rf /root/.cache/pip \
     && /opt/venv/bin/python -c 'import confluent_kafka'
 
 WORKDIR /app
