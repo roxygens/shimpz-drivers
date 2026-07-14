@@ -10,10 +10,10 @@ import urllib.error
 import urllib.request
 
 try:
-    urllib.request.urlopen("http://127.0.0.1:7072/v1/db/list", timeout=3)
+    urllib.request.urlopen("http://127.0.0.1:7072/v1/capsules/provision", timeout=3)
 except urllib.error.HTTPError as exc:
     sys.exit(0 if exc.code == 403 else 1)
-except Exception:  # noqa: BLE001 — any other failure (connection refused, timeout) is unhealthy
+except OSError, ValueError:
     sys.exit(1)
 else:
     sys.exit(1)  # a 2xx with no auth would mean the bearer-token gate isn't enforced at all

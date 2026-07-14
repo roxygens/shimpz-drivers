@@ -1,6 +1,6 @@
-"""The local, single-scope bearer token `shimpz-brain` uses to call this driver.
+"""The local provisioner bearer token capsule-driver uses to call this driver.
 
-Generated once on first boot, on a volume shared only between `shimpz-brain` and this sidecar; never stored in .env.
+Generated once on first boot, on a volume shared only between capsule-driver and this sidecar; never stored in .env.
 """
 
 from __future__ import annotations

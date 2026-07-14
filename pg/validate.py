@@ -7,10 +7,15 @@ validate.py modules — the actual security boundary, not the client that acts o
 
 from __future__ import annotations
 
+import hashlib
 import re
+import secrets
 
 # Postgres identifier limit is 63 bytes; dbname/role are "proj_" + this, so leave room for the prefix.
 PROJECT_NAME_RE = re.compile(r"^[a-z0-9_]{1,58}$")
+CAPSULE_ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
+APP_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+PRINCIPAL_TOKEN_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
 class ValidationError(Exception):
@@ -20,8 +25,8 @@ class ValidationError(Exception):
 def sanitize_proj(name: str) -> str:
     """Port of shimpzdetect.sh's _sanitize_proj / drivers/apps/validate.py's sanitize_proj.
 
-    MUST match both exactly — shimpz-db, shimpz-app, and the driver all independently derive the
-    same proj_<name> identity from a raw project name.
+    MUST match both exactly — shimpz-app and the server-side drivers independently derive the same
+    proj_<name> identity from a raw project name.
     """
     lowered = re.sub(r"[^a-z0-9_]+", "_", str(name).lower())
     return lowered.strip("_")
@@ -36,20 +41,34 @@ def validate_project(name: object) -> str:
     return sanitized
 
 
-MAX_SQL_LEN = 20000
+def validate_capsule_id(value: object) -> str:
+    if not isinstance(value, str) or not CAPSULE_ID_RE.fullmatch(value):
+        raise ValidationError("capsule_id must match [a-z0-9_]{1,40}")
+    return value
 
 
-def validate_sql(sql: object) -> str:
-    """Shape-check a read-only query — bound its type + size only.
+def validate_app_id(value: object) -> str:
+    if not isinstance(value, str) or not APP_ID_RE.fullmatch(value):
+        raise ValidationError("app_id must match [a-z0-9][a-z0-9-]{0,39}")
+    return value
 
-    Read-only is ENFORCED by the RO role's privileges (it has no write grant), NOT by parsing this string,
-    so the SQL itself is passed through as-is.
-    """
-    if not isinstance(sql, str):
-        raise ValidationError(f"sql must be a string: {sql!r}")
-    sql = sql.strip()
-    if not sql:
-        raise ValidationError("sql must be non-empty")
-    if len(sql) > MAX_SQL_LEN:
-        raise ValidationError(f"sql too long (> {MAX_SQL_LEN} chars)")
-    return sql
+
+def validate_principal_token(value: object) -> str:
+    if not isinstance(value, str) or not PRINCIPAL_TOKEN_RE.fullmatch(value):
+        raise ValidationError("principal_token must be a 256-bit lowercase hex token")
+    return value
+
+
+def capsule_project(capsule_id: str) -> str:
+    return f"capsule_{validate_capsule_id(capsule_id)}"
+
+
+def capsule_app_project(capsule_id: str, app_id: str) -> str:
+    digest = hashlib.sha256(validate_capsule_id(capsule_id).encode()).hexdigest()[:10]
+    app = validate_app_id(app_id).replace("-", "_")
+    return f"cap_{digest}_{app}"
+
+
+def tokens_equal(left: str, right: str) -> bool:
+    """Constant-time comparison for the control-plane bearer."""
+    return secrets.compare_digest(left, right)
