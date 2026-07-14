@@ -32,6 +32,34 @@ EDGE_NETWORK = os.environ.get("SHIMPZ_EDGE_NETWORK", "shimpz_edge")
 CADDY_NETWORK = os.environ.get("SHIMPZ_CADDY_NETWORK", "shimpz_caddy_net")  # item 8: the brain's shimpz-caddy path
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
+# Public responses share one conservative browser policy. SvelteKit's prerendered output includes
+# inline hydration scripts and the storefront uses inline style attributes, so those two sources are
+# explicitly allowed; eval remains forbidden. Keep shimpz-caddy/Caddyfile in lockstep with this tuple.
+SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
+    ("Strict-Transport-Security", "max-age=31536000; includeSubDomains"),
+    (
+        "Content-Security-Policy",
+        "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+        "form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; "
+        "worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests",
+    ),
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "strict-origin-when-cross-origin"),
+    (
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    ),
+)
+
+
+def _security_header_lines(indent: str = "\t\t") -> list[str]:
+    lines = [f"{indent}header {{"]
+    lines.extend(f'{indent}\t{name} "{value}"' for name, value in SECURITY_HEADERS)
+    lines.append(f"{indent}}}")
+    return lines
+
 
 def _safe_filename(fqdn: str) -> str:
     return _UNSAFE.sub("_", fqdn)
@@ -79,6 +107,8 @@ def render(req: RouteRequest, allowed_cidrs: str) -> str:
     lines = [
         f"http://{req.fqdn}:8080 {{",
         "\troute {",
+        *_security_header_lines(),
+        "",
         f"\t\t@not_edge not remote_ip {allowed_cidrs}",
         "\t\trespond @not_edge 403",
         "",
