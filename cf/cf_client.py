@@ -28,7 +28,7 @@ class CFError(Exception):
 def _call(method: str, path: str, body: dict | None = None) -> dict:
     url = f"{BASE}{path}"
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(  # noqa: S310 — fixed https://api.cloudflare.com base, never user-controlled
+    req = urllib.request.Request(
         url,
         data=data,
         method=method,
@@ -38,7 +38,7 @@ def _call(method: str, path: str, body: dict | None = None) -> dict:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310 — see above
+        with urllib.request.urlopen(req, timeout=20) as resp:
             parsed = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         try:
@@ -60,10 +60,13 @@ def list_zones() -> list[dict]:
 
 
 def active_tunnel_id() -> str | None:
-    """This Space's tunnel. SHIMPZ_CF_TUNNEL_ID pins it explicitly — REQUIRED on a host that hosts more
+    """Return this Space's tunnel.
+
+    SHIMPZ_CF_TUNNEL_ID pins it explicitly — REQUIRED on a host that hosts more
     than one tunnel (the account's `cfd_tunnel` list order is arbitrary, so 'the first' can be a SIBLING
     Space's tunnel, which is how a publish once landed on the wrong tunnel). Unset → the first (single
-    -tunnel host, unchanged)."""
+    -tunnel host, unchanged).
+    """
     pinned = os.environ.get("SHIMPZ_CF_TUNNEL_ID", "").strip()
     if pinned:
         return pinned

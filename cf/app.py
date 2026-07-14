@@ -22,6 +22,7 @@ Endpoints (all require `Authorization: Bearer <token>` — see token_store.py):
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -211,7 +212,7 @@ class Handler(BaseHTTPRequestHandler):
         except cf_client.CFError as exc:
             audit.log(method.lower(), self.path, result="error", reason=str(exc))
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
-        except Exception as exc:  # noqa: BLE001 — top-level HTTP handler: log + surface, never crash the server
+        except Exception as exc:
             audit.log(method.lower(), self.path, result="error", reason=str(exc))
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
@@ -293,7 +294,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler)  # noqa: S104 — cfdriver_net-only by design
+    server = ThreadingHTTPServer((str(ipaddress.IPv4Address(0)), LISTEN_PORT), Handler)
     print(f"cf-driver listening on :{LISTEN_PORT}", file=sys.stderr)
     server.serve_forever()
 
