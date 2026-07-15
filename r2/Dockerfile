@@ -54,8 +54,10 @@ RUN set -eu; \
 # `abc` user joins it there). DISTINCT from every other sidecar's token GID (10002-10006) so no
 # sidecar's token is ever readable via another's group.
 ARG SHIMPZ_R2DRIVER_TOKEN_GID=10007
+ARG SHIMPZ_R2PROVISIONER_TOKEN_GID=10015
 RUN groupadd -g "${SHIMPZ_R2DRIVER_TOKEN_GID}" shimpzr2driver-token \
-    && useradd -u 10007 -G shimpzr2driver-token -M -s /usr/sbin/nologin r2driver
+    && groupadd -g "${SHIMPZ_R2PROVISIONER_TOKEN_GID}" shimpzr2provisioner-token \
+    && useradd -u 10007 -G shimpzr2driver-token,shimpzr2provisioner-token -M -s /usr/sbin/nologin r2driver
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
@@ -69,10 +71,13 @@ COPY app.py validate.py r2_client.py audit.py backup_gate.py token_store.py heal
 
 # Pre-create + own every path a NAMED VOLUME mounts onto — Docker seeds a fresh volume from the image
 # dir's ownership, otherwise root:root/0755 and unwritable by the non-root `r2driver` user.
-RUN mkdir -p /run/shimpz-r2driver /run/shimpz-r2backup /var/log/r2-driver /var/lib/shimpz-r2backup \
+RUN mkdir -p /run/shimpz-r2driver /run/shimpz-r2backup /run/shimpz-r2provisioner \
+        /var/log/r2-driver /var/lib/shimpz-r2backup \
         /var/lib/shimpz-r2credentials /var/lib/shimpz-r2keyring /var/lib/shimpz-r2principals \
     && chown r2driver:shimpzr2driver-token /run/shimpz-r2driver && chmod 750 /run/shimpz-r2driver \
     && chown r2driver:r2driver /run/shimpz-r2backup && chmod 700 /run/shimpz-r2backup \
+    && chown r2driver:shimpzr2provisioner-token /run/shimpz-r2provisioner \
+    && chmod 750 /run/shimpz-r2provisioner \
     && chown -R r2driver:shimpzr2driver-token /var/log/r2-driver \
     && chown r2driver:r2driver /var/lib/shimpz-r2backup /var/lib/shimpz-r2credentials \
         /var/lib/shimpz-r2keyring /var/lib/shimpz-r2principals \

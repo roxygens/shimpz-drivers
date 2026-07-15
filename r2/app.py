@@ -40,12 +40,15 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import ipaddress
+import json
 import os
 import re
 import stat
 import sys
 import tempfile
+import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -55,7 +58,9 @@ from urllib.parse import parse_qs, urlsplit
 
 import audit
 import backup_gate
+import credential_store
 import driver_manifest
+import principal_store
 import r2_client
 import token_store
 import validate
@@ -68,8 +73,21 @@ _CHUNK = 1024 * 1024
 _BACKUP_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _BACKUP_CREATED_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 _BACKUP_SPOOL_PREFIX = ".shimpz-r2backup-"
+_MAX_JSON_BODY = 64 * 1024
+_MAX_JSON_RESPONSE = 256 * 1024
+_MAX_CAPSULE_CREDENTIALS = 256
+_CAPSULE_CREDENTIAL_PATH_RE = re.compile(
+    r"^/v1/capsules/(?P<capsule>[a-z0-9_]{1,40})/credentials"
+    r"(?:/(?P<credential>[a-z0-9][a-z0-9-]{0,63})(?:/(?P<action>verify))?)?$"
+)
+_LIFECYCLE_PATHS = {
+    "/v1/capsules/provision",
+    "/v1/capsules/retire",
+    "/v1/capsules/finalize",
+}
 BACKUP_SPOOL_DIR = Path(os.environ.get("SHIMPZ_R2DRIVER_BACKUP_SPOOL_DIR", "/var/lib/shimpz-r2backup"))
 _backup_transfer_gate = backup_gate.BackupTransferGate()
+_capsule_lifecycle_gate = threading.RLock()
 
 
 def _fsync_directory(path: Path) -> None:
@@ -132,6 +150,10 @@ _token = token_store.ensure_token()
 _backup_token = token_store.ensure_private_token(
     Path(os.environ.get("SHIMPZ_R2DRIVER_BACKUP_TOKEN_FILE", "/run/shimpz-r2backup/token"))
 )
+_provisioner_token = token_store.ensure_group_token(
+    Path(os.environ.get("SHIMPZ_R2DRIVER_PROVISIONER_TOKEN_FILE", "/run/shimpz-r2provisioner/token")),
+    os.environ.get("SHIMPZ_R2DRIVER_PROVISIONER_TOKEN_GROUP", "shimpzr2provisioner-token"),
+)
 
 
 class ApiError(Exception):
@@ -158,6 +180,49 @@ def _backup_key(created_at: str, sha256: str) -> str:
     return f"backups/v1/{time.strftime('%Y/%m/%d', created)}/{stamp}-{sha256}.sbk"
 
 
+def _public_credential(metadata: credential_store.CredentialMetadata) -> dict[str, object]:
+    """Project exact public metadata; internal ownership and encryption fields cannot enter it."""
+    return {
+        "id": metadata.credential_id,
+        "profile_id": metadata.profile_id,
+        "label": metadata.label,
+        "generation": metadata.generation,
+        "status": metadata.status,
+        "created_at": metadata.created_at,
+        "updated_at": metadata.updated_at,
+    }
+
+
+def _closed_json(value: object, keys: set[str]) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "request body does not match the endpoint contract")
+    return value
+
+
+def _candidate_credentials(profile_id: object, values: object) -> r2_client.R2Credentials:
+    try:
+        bundle = credential_store.validate_bundle(profile_id, values)
+        return r2_client.R2Credentials.from_values(bundle)
+    except (credential_store.CredentialValidationError, r2_client.R2Error) as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "credential fields are invalid") from exc
+
+
+def _probe_candidate(credentials: r2_client.R2Credentials) -> None:
+    try:
+        r2_client.probe(credentials=credentials)
+    except r2_client.R2Error as exc:
+        if exc.category in {"authentication", "configuration"}:
+            status = HTTPStatus.UNPROCESSABLE_ENTITY
+            message = "R2 rejected the credential bundle"
+        elif exc.category == "local":
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+            message = "R2 credential verification is unavailable"
+        else:
+            status = HTTPStatus.BAD_GATEWAY
+            message = "R2 credential verification failed"
+        raise ApiError(status, message) from exc
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"{DRIVER.id}-driver/{DRIVER.version}"
 
@@ -174,10 +239,47 @@ class Handler(BaseHTTPRequestHandler):
             expected = _token
         return self.headers.get("Authorization", "") == f"Bearer {expected}"
 
-    def _send_json(self, status: HTTPStatus, payload: object) -> None:
-        import json
+    def _bearer_matches(self, expected: str) -> bool:
+        supplied = self.headers.get("Authorization", "")
+        return len(supplied) == 71 and hmac.compare_digest(supplied, f"Bearer {expected}")
 
-        body = json.dumps(payload).encode()
+    def _capsule_bearer(self) -> str:
+        supplied = self.headers.get("Authorization", "")
+        if not re.fullmatch(r"Bearer [0-9a-f]{64}", supplied):
+            raise ApiError(HTTPStatus.FORBIDDEN, "invalid or missing Capsule bearer token")
+        return supplied[7:]
+
+    def _read_json(self) -> dict[str, object]:
+        if self.headers.get("Transfer-Encoding") is not None:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "chunked JSON requests are not supported")
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Content-Type must be application/json")
+        raw_length = self.headers.get("Content-Length", "")
+        if not raw_length.isascii() or not raw_length.isdecimal():
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Content-Length must be a decimal byte count")
+        if len(raw_length) > 20:
+            raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "JSON request body exceeds its fixed limit")
+        length = int(raw_length)
+        if not 1 <= length <= _MAX_JSON_BODY:
+            status = HTTPStatus.REQUEST_ENTITY_TOO_LARGE if length > _MAX_JSON_BODY else HTTPStatus.BAD_REQUEST
+            raise ApiError(status, "JSON request body exceeds its fixed limit")
+        payload = self.rfile.read(length)
+        if len(payload) != length:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "JSON request body ended early")
+        try:
+            value = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "request body is not valid JSON") from exc
+        if not isinstance(value, dict):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
+        return value
+
+    def _send_json(self, status: HTTPStatus, payload: object) -> None:
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        if len(body) > _MAX_JSON_RESPONSE:
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+            body = b'{"error":"response exceeds its fixed limit"}'
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -247,6 +349,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and path == DRIVER.credential_schema_path:
             self._send_json(HTTPStatus.OK, CREDENTIALS.public())
             return
+        if self._dispatch_capsule_api(method, path):
+            return
         if not self._authed():
             # 127.0.0.1 = this container's own Docker HEALTHCHECK proving the 403 gate is live
             # (an unauthenticated probe every 30s BY DESIGN) — keep the audit line but at info,
@@ -275,8 +379,180 @@ class Handler(BaseHTTPRequestHandler):
             audit.log(method.lower(), self.path, result="error", reason=str(exc))
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            audit.log(method.lower(), self.path, result="error", reason=str(exc))
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            audit.log(method.lower(), self.path, result="error", reason=type(exc).__name__)
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal driver error"})
+
+    def _dispatch_capsule_api(self, method: str, path: str) -> bool:
+        match = _CAPSULE_CREDENTIAL_PATH_RE.fullmatch(path)
+        if path not in _LIFECYCLE_PATHS and match is None:
+            return False
+        try:
+            if path in _LIFECYCLE_PATHS:
+                if not self._bearer_matches(_provisioner_token):
+                    raise ApiError(HTTPStatus.FORBIDDEN, "invalid or missing provisioner token")
+                self._capsule_lifecycle(method, path)
+            elif match is not None:
+                self._capsule_credentials(method, match)
+        except Exception as exc:  # noqa: BLE001 - mapped to a closed, non-secret HTTP error below
+            self._capsule_api_error(method, path, exc)
+        return True
+
+    def _capsule_api_error(self, method: str, path: str, exc: Exception) -> None:
+        status = HTTPStatus.INTERNAL_SERVER_ERROR
+        message = "internal driver error"
+        reason = type(exc).__name__
+        if isinstance(exc, ApiError):
+            status, message, reason = exc.status, exc.message, exc.message
+        elif isinstance(exc, principal_store.PrincipalError):
+            status, message, reason = HTTPStatus.NOT_FOUND, "Capsule resource was not found", "Capsule scope not found"
+        elif isinstance(exc, credential_store.CredentialValidationError):
+            status, message, reason = (
+                HTTPStatus.BAD_REQUEST,
+                "credential request is invalid",
+                "invalid credential request",
+            )
+        elif isinstance(exc, (credential_store.CredentialNotFoundError, credential_store.CredentialRevokedError)):
+            status, message, reason = HTTPStatus.NOT_FOUND, "credential was not found", "credential not found"
+        elif isinstance(exc, credential_store.CredentialConflictError):
+            status, message, reason = HTTPStatus.CONFLICT, "credential changed or conflicts", "credential conflict"
+        elif isinstance(exc, (credential_store.CredentialStoreError, principal_store.PrincipalStoreError)):
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+            message = "credential storage is unavailable"
+            reason = "credential storage unavailable"
+        audit.log(method.lower(), path, result="denied" if status.value < 500 else "error", reason=reason)
+        self._send_json(status, {"error": message})
+
+    def _capsule_lifecycle(self, method: str, path: str) -> None:
+        if method != "POST":
+            raise ApiError(HTTPStatus.NOT_FOUND, "lifecycle route was not found")
+        if path == "/v1/capsules/provision":
+            body = _closed_json(self._read_json(), {"capsule_id", "principal_token"})
+            try:
+                with _capsule_lifecycle_gate:
+                    principal_store.STORE.provision(body["capsule_id"], body["principal_token"])
+            except principal_store.PrincipalError as exc:
+                raise ApiError(HTTPStatus.CONFLICT, "Capsule principal conflicts with its lifecycle") from exc
+            audit.log("r2.credentials.provision", str(body["capsule_id"]), result="ok")
+            self._send_json(HTTPStatus.OK, {"status": "active"})
+            return
+        body = _closed_json(self._read_json(), {"capsule_id"})
+        capsule_id = body["capsule_id"]
+        if path == "/v1/capsules/retire":
+            with _capsule_lifecycle_gate:
+                principal_store.STORE.retire_capsule(capsule_id)
+                credential_store.STORE.revoke_capsule(capsule_id)
+            operation, status = "r2.credentials.retire", "retired"
+        elif path == "/v1/capsules/finalize":
+            try:
+                with _capsule_lifecycle_gate:
+                    credential_store.STORE.purge_capsule(capsule_id)
+                    principal_store.STORE.finalize(capsule_id)
+            except principal_store.PrincipalError as exc:
+                raise ApiError(HTTPStatus.CONFLICT, "Capsule principal is still active") from exc
+            operation, status = "r2.credentials.finalize", "finalized"
+        else:
+            raise ApiError(HTTPStatus.NOT_FOUND, "lifecycle route was not found")
+        audit.log(operation, str(capsule_id), result="ok")
+        self._send_json(HTTPStatus.OK, {"status": status})
+
+    def _capsule_credentials(self, method: str, match: re.Match[str]) -> None:
+        capsule_id = match.group("capsule")
+        credential_id = match.group("credential")
+        action = match.group("action")
+        bearer = self._capsule_bearer()
+        with _capsule_lifecycle_gate, principal_store.STORE.authorized(bearer, capsule_id):
+            if method == "GET" and credential_id is None:
+                credentials = credential_store.STORE.list_metadata(capsule_id)
+                if len(credentials) > _MAX_CAPSULE_CREDENTIALS:
+                    raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "credential inventory exceeds its fixed limit")
+                self._send_json(HTTPStatus.OK, {"credentials": [_public_credential(item) for item in credentials]})
+                return
+            if method == "POST" and credential_id is None:
+                body = _closed_json(
+                    self._read_json(),
+                    {"profile_id", "label", "values", "idempotency_key"},
+                )
+                identifier = credential_store.STORE.credential_id(capsule_id, body["idempotency_key"])
+                existing = credential_store.STORE.preflight_create(
+                    capsule_id,
+                    identifier,
+                    body["profile_id"],
+                    body["label"],
+                    body["values"],
+                    body["idempotency_key"],
+                )
+                if existing is not None:
+                    self._send_json(HTTPStatus.OK, _public_credential(existing))
+                    return
+                if len(credential_store.STORE.list_metadata(capsule_id)) >= _MAX_CAPSULE_CREDENTIALS:
+                    raise credential_store.CredentialConflictError("Capsule credential capacity is exhausted")
+                candidate = _candidate_credentials(body["profile_id"], body["values"])
+                _probe_candidate(candidate)
+                metadata = credential_store.STORE.create(
+                    capsule_id,
+                    identifier,
+                    body["profile_id"],
+                    body["label"],
+                    body["values"],
+                    body["idempotency_key"],
+                )
+                audit.log("r2.credentials.create", f"{capsule_id}/{identifier}", result="ok")
+                self._send_json(HTTPStatus.OK, _public_credential(metadata))
+                return
+            if credential_id is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "credential route was not found")
+            if method == "PUT" and action is None:
+                body = _closed_json(
+                    self._read_json(),
+                    {"profile_id", "label", "values", "expected_generation"},
+                )
+                credential_store.STORE.preflight_rotate(
+                    capsule_id,
+                    credential_id,
+                    body["expected_generation"],
+                    body["profile_id"],
+                    body["label"],
+                    body["values"],
+                )
+                candidate = _candidate_credentials(body["profile_id"], body["values"])
+                _probe_candidate(candidate)
+                metadata = credential_store.STORE.rotate(
+                    capsule_id,
+                    credential_id,
+                    body["expected_generation"],
+                    body["profile_id"],
+                    body["label"],
+                    body["values"],
+                )
+                audit.log("r2.credentials.rotate", f"{capsule_id}/{credential_id}", result="ok")
+                self._send_json(HTTPStatus.OK, _public_credential(metadata))
+                return
+            if method == "DELETE" and action is None:
+                body = _closed_json(self._read_json(), {"expected_generation"})
+                metadata = credential_store.STORE.remove(
+                    capsule_id,
+                    credential_id,
+                    body["expected_generation"],
+                )
+                audit.log("r2.credentials.remove", f"{capsule_id}/{credential_id}", result="ok")
+                self._send_json(HTTPStatus.OK, _public_credential(metadata))
+                return
+            if method == "POST" and action == "verify":
+                _closed_json(self._read_json(), set())
+                resolved = credential_store.STORE.resolve(capsule_id, credential_id)
+                _probe_candidate(_candidate_credentials(resolved.metadata.profile_id, resolved.values()))
+                trace = audit.log("r2.credentials.verify", f"{capsule_id}/{credential_id}", result="ok")
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "id": credential_id,
+                        "generation": resolved.metadata.generation,
+                        "verdict": "valid",
+                        "trace_id": trace,
+                    },
+                )
+                return
+        raise ApiError(HTTPStatus.NOT_FOUND, "credential route was not found")
 
     def _route(self, method: str) -> None:
         split = urlsplit(self.path)
@@ -436,6 +712,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self._dispatch("POST")
+
+    def do_PUT(self) -> None:
+        self._dispatch("PUT")
+
+    def do_DELETE(self) -> None:
+        self._dispatch("DELETE")
 
     def log_message(self, fmt: str, *args: object) -> None:
         # Suppress BaseHTTPRequestHandler's default stderr access log — audit.log() is the single

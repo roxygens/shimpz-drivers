@@ -476,6 +476,99 @@ class CredentialStore:
         ).digest()
         return hmac.new(fingerprint_key, request, hashlib.sha256).hexdigest()
 
+    def credential_id(self, capsule_id: object, idempotency_key: object) -> str:
+        """Derive a stable opaque identifier without exposing the caller's idempotency key."""
+        capsule = _validate_capsule_id(capsule_id)
+        idempotency = _validate_idempotency_key(idempotency_key)
+        with self._lock:
+            key = self._key(allow_create=not self.state_path.exists())
+            identifier_key = hmac.new(
+                key,
+                b"shimpz-r2-credential-id-key-v1",
+                hashlib.sha256,
+            ).digest()
+            digest = hmac.new(
+                identifier_key,
+                f"{capsule}\0{idempotency}".encode(),
+                hashlib.sha256,
+            ).hexdigest()
+        return f"r2-{digest[:48]}"
+
+    def preflight_create(
+        self,
+        capsule_id: object,
+        credential_id: object,
+        profile_id: object,
+        label: object,
+        values: object,
+        idempotency_key: object,
+    ) -> CredentialMetadata | None:
+        """Return an exact prior create, reject conflicts, or admit a new provider probe."""
+        capsule = _validate_capsule_id(capsule_id)
+        credential = _validate_credential_id(credential_id)
+        selected_profile = _profile(profile_id).id
+        selected_label = _validate_label(label)
+        bundle = validate_bundle(selected_profile, values)
+        idempotency_hash = hashlib.sha256(_validate_idempotency_key(idempotency_key).encode()).hexdigest()
+        with self._lock:
+            state = self._read_state()
+            capsules = state["capsules"]
+            if not isinstance(capsules, dict):
+                raise CredentialStoreError("credential state capsules are malformed")
+            records = capsules.get(capsule)
+            if records is not None and not isinstance(records, dict):
+                raise CredentialStoreError("credential state Capsule set is malformed")
+            for existing_capsule, existing_records in capsules.items():
+                if not isinstance(existing_records, dict):
+                    raise CredentialStoreError("credential state Capsule set is malformed")
+                for existing_id, existing_record in existing_records.items():
+                    if not isinstance(existing_record, dict):
+                        raise CredentialStoreError("credential state record is malformed")
+                    if existing_record.get("idempotency_hash") == idempotency_hash and (
+                        existing_capsule != capsule or existing_id != credential
+                    ):
+                        raise CredentialConflictError("idempotency key is already bound to another credential")
+            if not isinstance(records, dict) or credential not in records:
+                return None
+            existing = self._record(state, capsule, credential)
+            fingerprint = self._create_fingerprint(
+                capsule,
+                credential,
+                selected_profile,
+                selected_label,
+                bundle,
+                self._key(),
+            )
+            if secrets.compare_digest(
+                str(existing.get("idempotency_hash")), idempotency_hash
+            ) and secrets.compare_digest(str(existing.get("create_fingerprint")), fingerprint):
+                return _metadata(capsule, credential, existing)
+            raise CredentialConflictError("credential identity or idempotency request conflicts")
+
+    def preflight_rotate(
+        self,
+        capsule_id: object,
+        credential_id: object,
+        expected_generation: object,
+        profile_id: object,
+        label: object,
+        values: object,
+    ) -> None:
+        """Validate identity, CAS, profile, label, and bundle before a provider network probe."""
+        capsule = _validate_capsule_id(capsule_id)
+        credential = _validate_credential_id(credential_id)
+        selected_profile = _profile(profile_id).id
+        _validate_label(label)
+        validate_bundle(selected_profile, values)
+        with self._lock:
+            state = self._read_state()
+            record = self._record(state, capsule, credential)
+            if record.get("status") != "active":
+                raise CredentialRevokedError("credential is revoked")
+            self._expected_generation(record, expected_generation)
+            if selected_profile != record.get("profile_id"):
+                raise CredentialConflictError("credential profile cannot change during rotation")
+
     def _decrypt(
         self,
         record: Mapping[str, object],
@@ -702,6 +795,33 @@ class CredentialStore:
         expected_generation: object,
     ) -> CredentialMetadata:
         return self.remove(capsule_id, credential_id, expected_generation)
+
+    def revoke_capsule(self, capsule_id: object) -> None:
+        """Atomically destroy every active envelope for one Capsule, retry-safe."""
+        capsule = _validate_capsule_id(capsule_id)
+        with self._lock:
+            state = self._read_state()
+            capsules = state["capsules"]
+            if not isinstance(capsules, dict):
+                raise CredentialStoreError("credential state Capsules are malformed")
+            records = capsules.get(capsule)
+            if records is None:
+                return
+            if not isinstance(records, dict):
+                raise CredentialStoreError("credential state Capsule set is malformed")
+            changed = False
+            now = _timestamp()
+            for record in records.values():
+                if not isinstance(record, dict):
+                    raise CredentialStoreError("credential state record is malformed")
+                if record.get("status") == "active":
+                    record["generation"] = int(record["generation"]) + 1
+                    record["status"] = "revoked"
+                    record["updated_at"] = now
+                    record["envelope"] = None
+                    changed = True
+            if changed:
+                self._write_state(state)
 
     def purge_revoked(self, capsule_id: object, credential_id: object, expected_generation: object) -> None:
         """Physically remove one exact tombstone during an authorized teardown."""

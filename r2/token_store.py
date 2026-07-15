@@ -37,17 +37,18 @@ def ensure_token() -> str:
     return token
 
 
-def ensure_private_token(path: Path) -> str:
-    """Atomically create or securely read a service-private 0400 capability."""
+def _ensure_secure_token(path: Path, *, mode: int, parent_mode: int, group: str | None) -> str:
     owner = os.geteuid()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    group_id = os.getegid() if group is None else grp.getgrnam(group).gr_gid
+    path.parent.mkdir(parents=True, exist_ok=True, mode=parent_mode)
     parent_info = path.parent.lstat()
     if (
         not stat.S_ISDIR(parent_info.st_mode)
         or parent_info.st_uid != owner
-        or stat.S_IMODE(parent_info.st_mode) != 0o700
+        or stat.S_IMODE(parent_info.st_mode) != parent_mode
+        or (group is not None and parent_info.st_gid != group_id)
     ):
-        raise RuntimeError(f"unsafe backup token directory: {path.parent}")
+        raise RuntimeError(f"unsafe capability token directory: {path.parent}")
 
     read_flags = os.O_RDONLY | os.O_CLOEXEC
     create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
@@ -59,17 +60,18 @@ def ensure_private_token(path: Path) -> str:
         try:
             fd = os.open(path, read_flags)
         except OSError as exc:
-            raise RuntimeError(f"cannot securely open backup token: {path}") from exc
+            raise RuntimeError(f"cannot securely open capability token: {path}") from exc
         try:
             info = os.fstat(fd)
             if (
                 not stat.S_ISREG(info.st_mode)
                 or info.st_uid != owner
-                or stat.S_IMODE(info.st_mode) != 0o400
+                or info.st_gid != group_id
+                or stat.S_IMODE(info.st_mode) != mode
                 or info.st_nlink != 1
                 or info.st_size != 64
             ):
-                raise RuntimeError(f"unsafe backup token file: {path}")
+                raise RuntimeError(f"unsafe capability token file: {path}")
             raw_token = os.read(fd, 65)
             after = os.fstat(fd)
             stable = (
@@ -80,6 +82,7 @@ def ensure_private_token(path: Path) -> str:
                 info.st_ctime_ns,
                 info.st_mode,
                 info.st_uid,
+                info.st_gid,
                 info.st_nlink,
             ) == (
                 after.st_dev,
@@ -89,30 +92,32 @@ def ensure_private_token(path: Path) -> str:
                 after.st_ctime_ns,
                 after.st_mode,
                 after.st_uid,
+                after.st_gid,
                 after.st_nlink,
             )
             if not stable or len(raw_token) != 64:
-                raise RuntimeError(f"backup token changed while it was read: {path}")
+                raise RuntimeError(f"capability token changed while it was read: {path}")
             try:
                 token = raw_token.decode("ascii")
             except UnicodeDecodeError as exc:
-                raise RuntimeError(f"invalid backup token contents: {path}") from exc
+                raise RuntimeError(f"invalid capability token contents: {path}") from exc
         finally:
             if fd >= 0:
                 os.close(fd)
         if not _PRIVATE_TOKEN_RE.fullmatch(token):
-            raise RuntimeError(f"invalid backup token contents: {path}")
+            raise RuntimeError(f"invalid capability token contents: {path}")
         return token
 
     token = secrets.token_hex(32)
     try:
-        fd = os.open(path, create_flags, 0o400)
+        fd = os.open(path, create_flags, mode)
     except FileExistsError:
         return read_existing()
     except OSError as exc:
-        raise RuntimeError(f"cannot securely create backup token: {path}") from exc
+        raise RuntimeError(f"cannot securely create capability token: {path}") from exc
     try:
-        os.fchmod(fd, 0o400)
+        os.fchown(fd, -1, group_id)
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w") as stream:
             fd = -1
             stream.write(token)
@@ -127,3 +132,13 @@ def ensure_private_token(path: Path) -> str:
     finally:
         os.close(directory_fd)
     return token
+
+
+def ensure_private_token(path: Path) -> str:
+    """Atomically create or securely read a service-private 0400 capability."""
+    return _ensure_secure_token(path, mode=0o400, parent_mode=0o700, group=None)
+
+
+def ensure_group_token(path: Path, group: str) -> str:
+    """Create a 0440 capability readable only by its owner and one dedicated group."""
+    return _ensure_secure_token(path, mode=0o440, parent_mode=0o750, group=group)

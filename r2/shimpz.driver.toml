@@ -19,4 +19,9 @@ operations = [
   "r2.get",
   "r2.backup.upload",
   "r2.backup.download",
+  "credential.list",
+  "credential.create",
+  "credential.rotate",
+  "credential.verify",
+  "credential.remove",
 ]

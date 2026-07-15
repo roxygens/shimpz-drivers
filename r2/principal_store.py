@@ -192,9 +192,9 @@ class PrincipalStore:
             if isinstance(existing_for_digest, dict) and existing_for_digest.get("capsule_id") != capsule:
                 raise PrincipalError("principal token is already scoped to another Capsule")
             matching = [key for key, record in principals.items() if record.get("capsule_id") == capsule]
+            if any(principals[key].get("retired") for key in matching):
+                raise PrincipalError("Capsule principal is retired")
             if len(matching) == 1 and matching[0] == digest:
-                if principals[digest].get("retired"):
-                    raise PrincipalError("Capsule principal is retired")
                 return
             for key in matching:
                 del principals[key]
@@ -247,6 +247,21 @@ class PrincipalStore:
             if record.get("retired"):
                 return
             record["retired"] = True
+            self._write(state)
+
+    def retire_capsule(self, capsule_id: object) -> None:
+        """Retire the principal by provisioner-authorized Capsule identity, retry-safe."""
+        capsule = _capsule_id(capsule_id)
+        with self._lock:
+            state = self._read()
+            principals = state["principals"]
+            if not isinstance(principals, dict):
+                raise PrincipalStoreError("principal registry set is malformed")
+            matching = [record for record in principals.values() if record.get("capsule_id") == capsule]
+            if not matching or all(record.get("retired") for record in matching):
+                return
+            for record in matching:
+                record["retired"] = True
             self._write(state)
 
     def finalize(self, capsule_id: object) -> None:
