@@ -39,6 +39,8 @@ ARG SHIMPZ_CAPSULEDRIVER_TOKEN_GID=10010
 ARG SHIMPZ_PGDRIVER_TOKEN_GID=10004
 ARG SHIMPZ_BRAINCRED_UNSEAL_TOKEN_GID=10012
 ARG SHIMPZ_ACCOUNTS_BRAIN_RESOLVE_TOKEN_GID=10013
+# R2 lifecycle capability only. This is deliberately distinct from the legacy R2 operational token.
+ARG SHIMPZ_R2PROVISIONER_TOKEN_GID=10015
 
 # Downloaded + hash-checked BEFORE execution — never `curl | sh` (SECURITY_ENGINEERING_PLAN.md item 6).
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
@@ -51,16 +53,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
         /var/cache/ldconfig/aux-cache /var/cache/man/* /var/log/apt/* \
         /var/log/alternatives.log /var/log/dpkg.log /root/.cache/uv
 
-# `capsuledriver` needs THREE groups: `dockersock` (the socket), `shimpzcapsuledriver-token` (so the
-# token it writes is group-readable by the admin's uid 1000), and `shimpzpgdriver-token` (so it can
-# READ pg-driver's 0440 token to request a scoped DB). None is its PRIMARY group.
+# Every shared capability has a distinct supplementary group. In particular, R2 grants only its
+# provisioner token here; capsule-driver never receives the legacy R2 operational bearer.
 RUN groupadd -g "${DOCKER_GID}" dockersock \
     && groupadd -g "${SHIMPZ_CAPSULEDRIVER_TOKEN_GID}" shimpzcapsuledriver-token \
     && groupadd -g "${SHIMPZ_PGDRIVER_TOKEN_GID}" shimpzpgdriver-token \
     && groupadd -g "${SHIMPZ_BRAINCRED_UNSEAL_TOKEN_GID}" shimpzbraincred-unseal-token \
     && groupadd -g "${SHIMPZ_ACCOUNTS_BRAIN_RESOLVE_TOKEN_GID}" shimpzbrain-resolve \
+    && groupadd -g "${SHIMPZ_R2PROVISIONER_TOKEN_GID}" shimpzr2provisioner-token \
     && useradd -u 10001 -g dockersock \
-        -G shimpzcapsuledriver-token,shimpzpgdriver-token,shimpzbraincred-unseal-token,shimpzbrain-resolve \
+        -G shimpzcapsuledriver-token,shimpzpgdriver-token,shimpzbraincred-unseal-token,shimpzbrain-resolve,shimpzr2provisioner-token \
         -M -s /usr/sbin/nologin capsuledriver
 
 WORKDIR /app
@@ -70,12 +72,13 @@ RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-install-project --no-
     rm -rf /root/.cache/uv
 
 COPY app.py validate.py manifests.py network_policy.py marketplace.py cleanup_state.py audit.py token_store.py \
-     pgdriver_client.py accounts_client.py brain_credentials_client.py healthcheck.py ./
+     pgdriver_client.py r2driver_client.py accounts_client.py brain_credentials_client.py healthcheck.py ./
 
 # Pre-create + own every named-volume mountpoint so the fresh (root:root) volume is writable by the
 # non-root user. /run/shimpz-capsuledriver gets GROUP `shimpzcapsuledriver-token` so the fresh volume's
 # perms already match what the token file inside needs — readable by the admin panel via that group.
 RUN mkdir -p /run/shimpz-capsuledriver /var/log/capsule-driver /var/lib/capsule-driver/pg-principals \
+        /var/lib/capsule-driver/r2-principals \
         /var/lib/capsule-driver/cleanup \
         /app-egress-policy /run/shimpz-braincred-unseal /run/shimpz-accounts-brain-resolve \
     && chown capsuledriver:shimpzcapsuledriver-token /run/shimpz-capsuledriver && chmod 750 /run/shimpz-capsuledriver \
