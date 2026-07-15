@@ -25,8 +25,8 @@ _TOP_LEVEL_KEYS = {
     "capabilities",
 }
 _CAPABILITY_KEYS = {"operations"}
-_SCOPES = {"space", "capsule"}
-_CREDENTIAL_POLICIES = {"none", "managed", "byok-required", "managed-or-byok"}
+_SCOPES = {"space"}
+_CREDENTIAL_POLICIES = {"none", "managed", "managed-or-byok"}
 _DATA_PLANES = {"direct", "brokered"}
 _ID_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _VERSION_PATTERN = re.compile(r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
