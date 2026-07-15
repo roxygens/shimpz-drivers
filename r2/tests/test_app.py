@@ -155,7 +155,7 @@ class AppLifecycleTests(unittest.TestCase):
         first_probe_count = self.probe_calls
 
         self.probe_error = r2_client.R2Error("safe", category="network")
-        with mock.patch.object(app.credential_store.STORE, "list_metadata", return_value=(object(),) * 256):
+        with mock.patch.object(app.credential_store.STORE, "capsule_record_count", return_value=256):
             retry_status, retried = self.request(
                 "POST", "/v1/capsules/capsule_a/credentials", first_body, token=CAPSULE_A_TOKEN
             )
@@ -179,7 +179,7 @@ class AppLifecycleTests(unittest.TestCase):
         status, third = self.request(
             "POST",
             "/v1/capsules/capsule_b/credentials",
-            create_body("33333333-3333-4333-8333-333333333333", bucket="capsule-b-one"),
+            create_body("11111111-1111-4111-8111-111111111111", bucket="capsule-b-one"),
             token=CAPSULE_B_TOKEN,
         )
         self.assertEqual(status, 200)
@@ -270,6 +270,20 @@ class AppLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
 
+        status, removed = self.request(
+            "DELETE",
+            f"/v1/capsules/capsule_b/credentials/{created['id']}",
+            {"expected_generation": 1},
+            token=CAPSULE_B_TOKEN,
+        )
+        self.assertEqual((status, removed["status"]), (200, "revoked"))
+        credentials_before = app.credential_store.STORE.state_path.read_bytes()
+        principals_before = app.principal_store.STORE.state_path.read_bytes()
+        status, _ = self.request("POST", "/v1/capsules/finalize", {"capsule_id": "capsule_b"}, token=PROVISIONER_TOKEN)
+        self.assertEqual(status, 409)
+        self.assertEqual(app.credential_store.STORE.state_path.read_bytes(), credentials_before)
+        self.assertEqual(app.principal_store.STORE.state_path.read_bytes(), principals_before)
+
         for _ in range(2):
             status, payload = self.request(
                 "POST", "/v1/capsules/retire", {"capsule_id": "capsule_b"}, token=PROVISIONER_TOKEN
@@ -285,6 +299,14 @@ class AppLifecycleTests(unittest.TestCase):
             )
             self.assertEqual((status, payload), (200, {"status": "finalized"}))
         self.assertNotIn("capsule_b", json.loads(app.credential_store.STORE.state_path.read_text())["capsules"])
+        replay_status, _ = self.request(
+            "POST",
+            "/v1/capsules/provision",
+            {"capsule_id": "capsule_b", "principal_token": CAPSULE_B_TOKEN},
+            token=PROVISIONER_TOKEN,
+        )
+        self.assertEqual(replay_status, 409)
+        self.provision("capsule_b", "3" * 64)
 
     def test_body_limit_is_413(self) -> None:
         self.provision("capsule_a", CAPSULE_A_TOKEN)
@@ -292,6 +314,31 @@ class AppLifecycleTests(unittest.TestCase):
             "POST", "/v1/capsules/capsule_a/credentials", b"{" + b" " * (64 * 1024), token=CAPSULE_A_TOKEN
         )
         self.assertEqual(status, 413)
+
+    def test_health_and_startup_fail_closed_after_key_loss(self) -> None:
+        self.provision("capsule_a", CAPSULE_A_TOKEN)
+        status, _ = self.request(
+            "POST",
+            "/v1/capsules/capsule_a/credentials",
+            create_body("77777777-7777-4777-8777-777777777777"),
+            token=CAPSULE_A_TOKEN,
+        )
+        self.assertEqual(status, 200)
+        app.credential_store.STORE.key_path.unlink()
+        status, payload = self.request("GET", "/healthz")
+        self.assertEqual((status, payload), (503, {"error": "credential storage is unavailable"}))
+        with (
+            mock.patch.object(app, "_prepare_backup_spool"),
+            mock.patch.object(
+                app.credential_store.STORE,
+                "check_health",
+                side_effect=credential_store.CredentialStoreError("private detail"),
+            ),
+            mock.patch.object(app, "ThreadingHTTPServer") as server,
+            self.assertRaises(SystemExit),
+        ):
+            app.main()
+        server.assert_not_called()
 
     def test_retire_waits_for_in_flight_probe_then_revokes_the_result(self) -> None:
         self.provision("capsule_a", CAPSULE_A_TOKEN)

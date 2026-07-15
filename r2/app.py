@@ -341,6 +341,11 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch(self, method: str) -> None:
         path = urlsplit(self.path).path
         if method == "GET" and path == DRIVER.health_path:
+            try:
+                credential_store.STORE.check_health()
+            except credential_store.CredentialStoreError:
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "credential storage is unavailable"})
+                return
             self._send_json(HTTPStatus.OK, {"status": "ok"})
             return
         if method == "GET" and path == DRIVER.metadata_path:
@@ -445,6 +450,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/v1/capsules/finalize":
             try:
                 with _capsule_lifecycle_gate:
+                    principal_store.STORE.assert_finalizable(capsule_id)
                     credential_store.STORE.purge_capsule(capsule_id)
                     principal_store.STORE.finalize(capsule_id)
             except principal_store.PrincipalError as exc:
@@ -460,6 +466,7 @@ class Handler(BaseHTTPRequestHandler):
         credential_id = match.group("credential")
         action = match.group("action")
         bearer = self._capsule_bearer()
+        request_body = self._read_json() if method in {"POST", "PUT", "DELETE"} else None
         with _capsule_lifecycle_gate, principal_store.STORE.authorized(bearer, capsule_id):
             if method == "GET" and credential_id is None:
                 credentials = credential_store.STORE.list_metadata(capsule_id)
@@ -468,10 +475,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, {"credentials": [_public_credential(item) for item in credentials]})
                 return
             if method == "POST" and credential_id is None:
-                body = _closed_json(
-                    self._read_json(),
-                    {"profile_id", "label", "values", "idempotency_key"},
-                )
+                body = _closed_json(request_body, {"profile_id", "label", "values", "idempotency_key"})
                 identifier = credential_store.STORE.credential_id(capsule_id, body["idempotency_key"])
                 existing = credential_store.STORE.preflight_create(
                     capsule_id,
@@ -484,7 +488,7 @@ class Handler(BaseHTTPRequestHandler):
                 if existing is not None:
                     self._send_json(HTTPStatus.OK, _public_credential(existing))
                     return
-                if len(credential_store.STORE.list_metadata(capsule_id)) >= _MAX_CAPSULE_CREDENTIALS:
+                if credential_store.STORE.capsule_record_count(capsule_id) >= _MAX_CAPSULE_CREDENTIALS:
                     raise credential_store.CredentialConflictError("Capsule credential capacity is exhausted")
                 candidate = _candidate_credentials(body["profile_id"], body["values"])
                 _probe_candidate(candidate)
@@ -502,10 +506,7 @@ class Handler(BaseHTTPRequestHandler):
             if credential_id is None:
                 raise ApiError(HTTPStatus.NOT_FOUND, "credential route was not found")
             if method == "PUT" and action is None:
-                body = _closed_json(
-                    self._read_json(),
-                    {"profile_id", "label", "values", "expected_generation"},
-                )
+                body = _closed_json(request_body, {"profile_id", "label", "values", "expected_generation"})
                 credential_store.STORE.preflight_rotate(
                     capsule_id,
                     credential_id,
@@ -528,7 +529,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, _public_credential(metadata))
                 return
             if method == "DELETE" and action is None:
-                body = _closed_json(self._read_json(), {"expected_generation"})
+                body = _closed_json(request_body, {"expected_generation"})
                 metadata = credential_store.STORE.remove(
                     capsule_id,
                     credential_id,
@@ -538,7 +539,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, _public_credential(metadata))
                 return
             if method == "POST" and action == "verify":
-                _closed_json(self._read_json(), set())
+                _closed_json(request_body, set())
                 resolved = credential_store.STORE.resolve(capsule_id, credential_id)
                 _probe_candidate(_candidate_credentials(resolved.metadata.profile_id, resolved.values()))
                 trace = audit.log("r2.credentials.verify", f"{capsule_id}/{credential_id}", result="ok")
@@ -727,6 +728,11 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     _prepare_backup_spool()
+    try:
+        credential_store.STORE.check_health()
+    except credential_store.CredentialStoreError:
+        print("r2-driver credential storage is unavailable", file=sys.stderr)
+        raise SystemExit(1) from None
     # IPv4Address(0) is INADDR_ANY. The container must serve its private Docker network as well as
     # loopback health/operator calls; Compose publishes no host port.
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)

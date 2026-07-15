@@ -1,7 +1,7 @@
 schema_version = 1
 id = "r2"
 title = "Cloudflare R2"
-version = "1.0.0"
+version = "1.1.0"
 summary = "Brokered Cloudflare R2 object storage for Space services and Capsules."
 interface = "shimpz.r2/v1"
 scope = "space"
@@ -19,9 +19,9 @@ operations = [
   "r2.get",
   "r2.backup.upload",
   "r2.backup.download",
-  "credential.list",
   "credential.create",
-  "credential.rotate",
+  "credential.list",
   "credential.verify",
+  "credential.rotate",
   "credential.remove",
 ]

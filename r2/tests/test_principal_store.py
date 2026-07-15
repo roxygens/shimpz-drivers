@@ -39,20 +39,29 @@ class PrincipalStoreTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.state_path.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(self.state_path.parent.stat().st_mode), 0o700)
 
-    def test_retire_finalize_and_rotation_never_restore_old_bearer(self) -> None:
+    def test_retire_finalize_history_blocks_replay_and_allows_only_a_new_token(self) -> None:
         replacement = "2" * 64
         self.store.provision("capsule_one", self.token)
-        self.store.provision("capsule_one", replacement)
+        with self.assertRaises(PrincipalError):
+            self.store.provision("capsule_one", replacement)
+        self.store.retire(self.token, "capsule_one")
+        self.store.retire(self.token, "capsule_one")
         with self.assertRaises(PrincipalError):
             self.store.resolve(self.token, "capsule_one")
-        self.store.retire(replacement, "capsule_one")
-        self.store.retire(replacement, "capsule_one")
+        self.assertEqual(self.store.resolve(self.token, "capsule_one", allow_retired=True), "capsule_one")
+        self.store.finalize("capsule_one")
+        self.store.finalize("capsule_one")
         with self.assertRaises(PrincipalError):
-            self.store.resolve(replacement, "capsule_one")
-        self.assertEqual(self.store.resolve(replacement, "capsule_one", allow_retired=True), "capsule_one")
+            self.store.provision("capsule_one", self.token)
+        self.store.provision("capsule_one", replacement)
+        self.assertEqual(self.store.resolve(replacement, "capsule_one"), "capsule_one")
+        self.store.retire(replacement, "capsule_one")
         self.store.finalize("capsule_one")
-        self.store.finalize("capsule_one")
-        self.assertEqual(json.loads(self.state_path.read_text())["principals"], {})
+        with self.assertRaises(PrincipalError):
+            self.store.provision("capsule_one", self.token)
+        state = json.loads(self.state_path.read_text())["principals"]
+        self.assertEqual(len(state), 2)
+        self.assertEqual({record["status"] for record in state.values()}, {"finalized"})
 
     def test_finalize_refuses_an_active_principal(self) -> None:
         self.store.provision("capsule_one", self.token)

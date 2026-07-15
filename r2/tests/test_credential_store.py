@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 import sys
@@ -86,16 +87,23 @@ class CredentialStoreTests(unittest.TestCase):
         self.assertNotEqual(self.state_path.parent, self.key_path.parent)
         self.assertNotIn(bundle()["secret_access_key"], repr(self.store.resolve("capsule_one", "primary-r2")))
 
-    def test_create_rejects_idempotency_reuse_and_changed_payload(self) -> None:
+    def test_create_scopes_hmac_idempotency_and_rejects_changed_payload(self) -> None:
         self.create()
         with self.assertRaises(CredentialConflictError):
             self.create(values=bundle(bucket="different-bucket"))
+        second = self.create(
+            capsule_id="capsule_two",
+            credential_id="secondary-r2",
+            idempotency_key="create_primary_r2_000001",
+        )
+        self.assertEqual(second.capsule_id, "capsule_two")
+        state = self.state()["capsules"]
+        first_hash = state["capsule_one"]["primary-r2"]["idempotency_hash"]
+        second_hash = state["capsule_two"]["secondary-r2"]["idempotency_hash"]
+        self.assertNotEqual(first_hash, second_hash)
+        self.assertNotEqual(first_hash, hashlib.sha256(b"create_primary_r2_000001").hexdigest())
         with self.assertRaises(CredentialConflictError):
-            self.create(
-                capsule_id="capsule_two",
-                credential_id="secondary-r2",
-                idempotency_key="create_primary_r2_000001",
-            )
+            self.create(credential_id="other-r2")
 
     def test_bundle_and_identifiers_are_closed(self) -> None:
         with self.assertRaises(CredentialValidationError):
@@ -168,6 +176,7 @@ class CredentialStoreTests(unittest.TestCase):
         self.assertEqual(removed.status, "revoked")
         self.assertIsNone(self.state()["capsules"]["capsule_one"]["primary-r2"]["envelope"])
         self.assertEqual(self.store.list_metadata("capsule_one"), ())
+        self.assertEqual(self.store.capsule_record_count("capsule_one"), 1)
         with self.assertRaises(CredentialRevokedError):
             self.store.resolve("capsule_one", "primary-r2")
         self.assertEqual(self.store.remove("capsule_one", "primary-r2", 2), removed)
@@ -193,6 +202,34 @@ class CredentialStoreTests(unittest.TestCase):
         with self.assertRaises(CredentialStoreError):
             self.store.resolve("capsule_one", "primary-r2")
         self.assertFalse(self.key_path.exists(), "a missing key must never be silently replaced")
+
+    def test_health_authenticates_state_and_requires_its_key(self) -> None:
+        self.store.check_health()
+        self.create()
+        self.store.check_health()
+        self.key_path.write_bytes(b"z" * 32)
+        with self.assertRaises(CredentialStoreError):
+            self.store.check_health()
+
+        self.key_path.unlink()
+        with self.assertRaises(CredentialStoreError):
+            self.store.check_health()
+
+        root = Path(self.temporary.name) / "empty"
+        empty = CredentialStore(root / "state" / "state.json", root / "key" / "aes256.key")
+        metadata = empty.create(
+            "capsule_one",
+            "temporary-r2",
+            "s3-access-key",
+            "Temporary",
+            bundle(),
+            "temporary_create_000001",
+        )
+        removed = empty.remove("capsule_one", metadata.credential_id, 1)
+        empty.purge_revoked("capsule_one", metadata.credential_id, removed.generation)
+        empty.key_path.unlink()
+        with self.assertRaises(CredentialStoreError):
+            empty.check_health()
 
 
 if __name__ == "__main__":

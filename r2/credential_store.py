@@ -44,7 +44,7 @@ KEY_PATH = Path(
         "/var/lib/shimpz-r2keyring/aes256.key",
     )
 )
-STATE_VERSION = 1
+STATE_VERSION = 2
 MAX_STATE_BYTES = 8 * 1024 * 1024
 MAX_CREDENTIALS = 4096
 
@@ -476,6 +476,19 @@ class CredentialStore:
         ).digest()
         return hmac.new(fingerprint_key, request, hashlib.sha256).hexdigest()
 
+    @staticmethod
+    def _idempotency_hash(capsule_id: str, idempotency_key: str, key: bytes) -> str:
+        digest_key = hmac.new(
+            key,
+            b"shimpz-r2-idempotency-hash-key-v1",
+            hashlib.sha256,
+        ).digest()
+        return hmac.new(
+            digest_key,
+            json.dumps([capsule_id, idempotency_key], separators=(",", ":")).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
     def credential_id(self, capsule_id: object, idempotency_key: object) -> str:
         """Derive a stable opaque identifier without exposing the caller's idempotency key."""
         capsule = _validate_capsule_id(capsule_id)
@@ -509,24 +522,22 @@ class CredentialStore:
         selected_profile = _profile(profile_id).id
         selected_label = _validate_label(label)
         bundle = validate_bundle(selected_profile, values)
-        idempotency_hash = hashlib.sha256(_validate_idempotency_key(idempotency_key).encode()).hexdigest()
+        idempotency = _validate_idempotency_key(idempotency_key)
         with self._lock:
             state = self._read_state()
+            key = self._key() if self.state_path.exists() else self._key(allow_create=True)
+            idempotency_hash = self._idempotency_hash(capsule, idempotency, key)
             capsules = state["capsules"]
             if not isinstance(capsules, dict):
                 raise CredentialStoreError("credential state capsules are malformed")
             records = capsules.get(capsule)
             if records is not None and not isinstance(records, dict):
                 raise CredentialStoreError("credential state Capsule set is malformed")
-            for existing_capsule, existing_records in capsules.items():
-                if not isinstance(existing_records, dict):
-                    raise CredentialStoreError("credential state Capsule set is malformed")
-                for existing_id, existing_record in existing_records.items():
+            if isinstance(records, dict):
+                for existing_id, existing_record in records.items():
                     if not isinstance(existing_record, dict):
                         raise CredentialStoreError("credential state record is malformed")
-                    if existing_record.get("idempotency_hash") == idempotency_hash and (
-                        existing_capsule != capsule or existing_id != credential
-                    ):
+                    if existing_record.get("idempotency_hash") == idempotency_hash and existing_id != credential:
                         raise CredentialConflictError("idempotency key is already bound to another credential")
             if not isinstance(records, dict) or credential not in records:
                 return None
@@ -537,7 +548,7 @@ class CredentialStore:
                 selected_profile,
                 selected_label,
                 bundle,
-                self._key(),
+                key,
             )
             if secrets.compare_digest(
                 str(existing.get("idempotency_hash")), idempotency_hash
@@ -574,6 +585,7 @@ class CredentialStore:
         record: Mapping[str, object],
         capsule_id: str,
         credential_id: str,
+        key: bytes | None = None,
     ) -> dict[str, str]:
         envelope = record.get("envelope")
         if not isinstance(envelope, dict):
@@ -581,7 +593,7 @@ class CredentialStore:
         nonce = _decode_part(envelope.get("nonce"), 12)
         ciphertext = _decode_part(envelope.get("ciphertext"))
         try:
-            plaintext = AESGCM(self._key()).decrypt(
+            plaintext = AESGCM(key if key is not None else self._key()).decrypt(
                 nonce,
                 ciphertext,
                 _aad(
@@ -634,10 +646,11 @@ class CredentialStore:
         selected_profile = _profile(profile_id).id
         selected_label = _validate_label(label)
         bundle = validate_bundle(selected_profile, values)
-        idempotency_hash = hashlib.sha256(_validate_idempotency_key(idempotency_key).encode()).hexdigest()
+        idempotency = _validate_idempotency_key(idempotency_key)
         with self._lock:
             state = self._read_state()
             key = self._key(allow_create=not self.state_path.exists())
+            idempotency_hash = self._idempotency_hash(capsule, idempotency, key)
             fingerprint = self._create_fingerprint(
                 capsule,
                 credential,
@@ -652,15 +665,11 @@ class CredentialStore:
             records = capsules.get(capsule)
             if records is not None and not isinstance(records, dict):
                 raise CredentialStoreError("credential state Capsule set is malformed")
-            for existing_capsule, existing_records in capsules.items():
-                if not isinstance(existing_records, dict):
-                    raise CredentialStoreError("credential state Capsule set is malformed")
-                for existing_id, existing_record in existing_records.items():
+            if isinstance(records, dict):
+                for existing_id, existing_record in records.items():
                     if not isinstance(existing_record, dict):
                         raise CredentialStoreError("credential state record is malformed")
-                    if existing_record.get("idempotency_hash") == idempotency_hash and (
-                        existing_capsule != capsule or existing_id != credential
-                    ):
+                    if existing_record.get("idempotency_hash") == idempotency_hash and existing_id != credential:
                         raise CredentialConflictError("idempotency key is already bound to another credential")
             if isinstance(records, dict) and credential in records:
                 existing = self._record(state, capsule, credential)
@@ -712,6 +721,38 @@ class CredentialStore:
                 for credential_id in sorted(records)
                 if records[credential_id].get("status") == "active"
             )
+
+    def capsule_record_count(self, capsule_id: object) -> int:
+        """Count active records and tombstones toward the bounded per-Capsule inventory."""
+        capsule = _validate_capsule_id(capsule_id)
+        with self._lock:
+            state = self._read_state()
+            capsules = state["capsules"]
+            if not isinstance(capsules, dict):
+                raise CredentialStoreError("credential state capsules are malformed")
+            records = capsules.get(capsule, {})
+            if not isinstance(records, dict):
+                raise CredentialStoreError("credential state Capsule set is malformed")
+            return len(records)
+
+    def check_health(self) -> None:
+        """Authenticate all active envelopes and fail if non-empty state lost its keyring."""
+        with self._lock:
+            state = self._read_state()
+            capsules = state["capsules"]
+            if not isinstance(capsules, dict):
+                raise CredentialStoreError("credential state capsules are malformed")
+            records = [
+                (capsule_id, credential_id, record)
+                for capsule_id, capsule_records in capsules.items()
+                for credential_id, record in capsule_records.items()
+            ]
+            if not records and not self.state_path.exists():
+                return
+            key = self._key()
+            for capsule_id, credential_id, record in records:
+                if record.get("status") == "active":
+                    self._decrypt(record, capsule_id, credential_id, key)
 
     def resolve(self, capsule_id: object, credential_id: object) -> ResolvedCredential:
         capsule = _validate_capsule_id(capsule_id)
