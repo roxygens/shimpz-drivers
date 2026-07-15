@@ -88,8 +88,15 @@ def _closed_keys(value: object, allowed: set[str], context: str) -> dict:
 
 
 def _string(value: object, field: str, *, maximum: int = 80) -> str:
-    if not isinstance(value, str) or not value or value.strip() != value or len(value) > maximum:
-        raise ManifestError(f"{field} must be a non-empty trimmed string up to {maximum} characters")
+    if (
+        not isinstance(value, str)
+        or not value
+        or value.strip() != value
+        or "\n" in value
+        or "\r" in value
+        or len(value) > maximum
+    ):
+        raise ManifestError(f"{field} must be a non-empty trimmed single-line string up to {maximum} characters")
     return value
 
 
