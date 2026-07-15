@@ -42,6 +42,7 @@ import manifests
 import marketplace
 import network_policy
 import pgdriver_client
+import r2driver_client
 import token_store
 import validate
 
@@ -77,6 +78,7 @@ if GLOBAL_MEMORY_BUDGET_BYTES < _LARGEST_RESOURCE_LIMIT:
 if not _LARGEST_RESOURCE_LIMIT <= OWNER_MEMORY_BUDGET_BYTES <= GLOBAL_MEMORY_BUDGET_BYTES:
     raise ValueError("SHIMPZ_CAPSULE_OWNER_MEM_BUDGET must fit one resource and the global memory budget")
 MAX_JSON_BODY_BYTES = max(1024, int(os.environ.get("SHIMPZ_CAPSULE_MAX_JSON_BODY_BYTES", str(128 * 1024))))
+MAX_DRIVER_JSON_BODY_BYTES = 64 * 1024
 CREATE_RATE_LIMIT = _positive_int_env("SHIMPZ_CAPSULE_CREATE_RATE_LIMIT", 5)
 CREATE_RATE_WINDOW_SECONDS = _positive_int_env("SHIMPZ_CAPSULE_CREATE_RATE_WINDOW_SECONDS", 3600)
 INSTALL_RATE_LIMIT = _positive_int_env("SHIMPZ_CAPSULE_INSTALL_RATE_LIMIT", 20)
@@ -2846,6 +2848,15 @@ def _teardown_volumes(cid: str) -> bool:
     return all(results)
 
 
+def _retire_teardown_r2(cid: str) -> bool:
+    """Cut off every new Capsule R2 operation before deleting any tenant artifact."""
+    try:
+        r2driver_client.retire_capsule(cid)
+    except r2driver_client.R2DriverError:
+        return False
+    return True
+
+
 def _drop_teardown_database(cid: str, record: cleanup_state.Record) -> cleanup_state.Record | None:
     if record.db_dropped:
         return record
@@ -2864,9 +2875,13 @@ def _drop_teardown_database(cid: str, record: cleanup_state.Record) -> cleanup_s
 
 def _finalize_teardown(cid: str, record: cleanup_state.Record) -> bool:
     try:
+        # R2 destroys its encrypted bundles and hashed principal first. Its local cleartext principal
+        # is removed only after that authenticated 200; both finalizers remain safe to replay.
+        r2driver_client.finalize_capsule_drop(cid)
         pgdriver_client.finalize_capsule_drop(cid)
         cleanup_state.finish(record)
     except (
+        r2driver_client.R2DriverError,
         pgdriver_client.PgDriverError,
         cleanup_state.CleanupStateError,
         http.client.HTTPException,
@@ -2890,6 +2905,10 @@ def _teardown(cid: str, *, owner: str, brain_id: str) -> _CleanupResult:
     except cleanup_state.CleanupStateError:
         return _CleanupResult(False, False)
     if not _stop_teardown_brain(brain):
+        return _CleanupResult(False, record.db_dropped)
+    # Fail closed while the durable cleanup record and stopped Brain still exist. No credential,
+    # volume, network or database artifact is removed until R2 has revoked this Capsule principal.
+    if not _retire_teardown_r2(cid):
         return _CleanupResult(False, record.db_dropped)
     if not _purge_teardown_credentials(brain):
         return _CleanupResult(False, record.db_dropped)
@@ -3285,6 +3304,12 @@ def _create(cid: str, body: dict, owner: str = "") -> dict:
             container = None
             try:
                 db = pgdriver_client.provision_capsule(cid)
+                try:
+                    # Principal registration precedes every runnable/public Brain artifact. A retry
+                    # reuses the same local principal and the R2 lifecycle endpoint is idempotent.
+                    r2driver_client.provision_capsule(cid)
+                except r2driver_client.R2DriverError as exc:
+                    raise ApiError(exc.status, exc.message) from exc
                 _ensure_capsule_volume(cid, network_policy.CONFIG_VOLUME_KIND)
                 _ensure_capsule_volume(cid, network_policy.WORKSPACE_VOLUME_KIND)
                 network = _ensure_capsule_network(cid)
@@ -3442,6 +3467,23 @@ def _lifecycle(cid: str, op: str, lease: _AuthorizationLease) -> dict:
     return {"capsule": cid, "op": op, "status": "ok"}
 
 
+def _r2_driver_operation(
+    cid: str,
+    lease: _AuthorizationLease,
+    operation: Callable[[], dict[str, object]],
+) -> dict[str, object]:
+    """Revalidate the exact Capsule, lazily provision its principal, then make one fixed R2 call."""
+    with _lock_for(cid):
+        _require_current_authorization(cid, lease)
+        try:
+            # Existing Capsules acquire R2 only here, after their owner and immutable container id
+            # have both been rechecked inside the lifecycle lock. Provision is deliberately replayable.
+            r2driver_client.ensure_provisioned(cid)
+            return operation()
+        except r2driver_client.R2DriverError as exc:
+            raise ApiError(exc.status, exc.message) from exc
+
+
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
     """Thread-per-request server with hard admission and slow-client expiry."""
@@ -3594,11 +3636,26 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             raise ApiError(HTTPStatus.BAD_REQUEST, f"invalid JSON body: {exc}") from exc
 
+    def _read_driver_body(self, keys: set[str]) -> dict[str, object]:
+        """Read one closed Driver mutation document; arbitrary scripts/shapes never cross the bridge."""
+        if self.headers.get("Transfer-Encoding") is not None:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "chunked Driver requests are not supported")
+        content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+        if content_type != "application/json":
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Content-Type must be application/json")
+        body = self._read_body(max_bytes=MAX_DRIVER_JSON_BODY_BYTES)
+        if not isinstance(body, dict) or set(body) != keys:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "request body does not match the Driver operation")
+        return body
+
     def do_GET(self) -> None:
         self._dispatch("GET")
 
     def do_POST(self) -> None:
         self._dispatch("POST")
+
+    def do_PUT(self) -> None:
+        self._dispatch("PUT")
 
     def do_DELETE(self) -> None:
         self._dispatch("DELETE")
@@ -3660,6 +3717,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # every other op acts on an EXISTING capsule → gate on ownership first (404 if not yours)
             lease = _authorize(cid, principal)
+            if sub == "drivers":
+                self._route_driver(method, parts, cid, lease)
+                return
             if sub == "apps":
                 self._route_apps(method, parts, cid, principal, lease)
                 return
@@ -3688,6 +3748,81 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
         raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} {path}")
+
+    def _route_driver(
+        self,
+        method: str,
+        parts: list[str],
+        cid: str,
+        lease: _AuthorizationLease,
+    ) -> None:
+        """Closed Admin surface for the single proven Driver implementation: Cloudflare R2."""
+        if len(parts) < 5 or parts[4] != "r2":
+            raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
+        if method == "GET" and len(parts) == 5:
+            result = _r2_driver_operation(cid, lease, lambda: r2driver_client.driver_document(cid))
+            self._send_json(HTTPStatus.OK, result)
+            return
+        if method == "POST" and len(parts) == 6 and parts[5] == "credentials":
+            body = self._read_driver_body({"profile_id", "label", "values", "idempotency_key"})
+            result = _r2_driver_operation(cid, lease, lambda: r2driver_client.create_credential(cid, body))
+            audit.log("driver_credential_create", cid, result="ok", driver="r2", credential=result.get("id"))
+            self._send_json(HTTPStatus.OK, result)
+            return
+        if len(parts) == 7 and parts[5] == "credentials":
+            credential_id = parts[6]
+            if method == "PUT":
+                body = self._read_driver_body(
+                    {"profile_id", "label", "values", "expected_generation"},
+                )
+                result = _r2_driver_operation(
+                    cid,
+                    lease,
+                    lambda: r2driver_client.rotate_credential(cid, credential_id, body),
+                )
+                audit.log(
+                    "driver_credential_rotate",
+                    cid,
+                    result="ok",
+                    driver="r2",
+                    credential=result.get("id"),
+                )
+                self._send_json(HTTPStatus.OK, result)
+                return
+            if method == "DELETE":
+                body = self._read_driver_body({"expected_generation"})
+                result = _r2_driver_operation(
+                    cid,
+                    lease,
+                    lambda: r2driver_client.remove_credential(cid, credential_id, body),
+                )
+                audit.log(
+                    "driver_credential_remove",
+                    cid,
+                    result="ok",
+                    driver="r2",
+                    credential=result.get("id"),
+                )
+                self._send_json(HTTPStatus.OK, result)
+                return
+        if method == "POST" and len(parts) == 8 and parts[5] == "credentials" and parts[7] == "verify":
+            credential_id = parts[6]
+            self._read_driver_body(set())
+            result = _r2_driver_operation(
+                cid,
+                lease,
+                lambda: r2driver_client.verify_credential(cid, credential_id),
+            )
+            audit.log(
+                "driver_credential_verify",
+                cid,
+                result="ok",
+                driver="r2",
+                credential=result.get("id"),
+            )
+            self._send_json(HTTPStatus.OK, result)
+            return
+        raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
 
     def _route_brain(
         self,

@@ -183,7 +183,27 @@ class R2DriverClientTests(unittest.TestCase):
                 mock.patch.object(client, "_call", return_value={"status": "finalized"}),
             ):
                 client.finalize_capsule_drop("capsule_1")
+                # An ambiguous caller response may retry after R2 finalized and the local token was
+                # already durably removed. Both the upstream finalizer and local removal are no-ops.
+                client.finalize_capsule_drop("capsule_1")
             self.assertFalse(path.exists())
+
+    def test_retire_is_retryable_without_a_local_principal(self) -> None:
+        calls: list[tuple] = []
+
+        def call(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"status": "retired"}
+
+        with (
+            mock.patch.object(client, "_read_provisioner", return_value="b" * 64),
+            mock.patch.object(client, "_call", side_effect=call),
+        ):
+            client.retire_capsule("capsule_1")
+            client.retire_capsule("capsule_1")
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(item[0][1] == "/v1/capsules/retire" for item in calls))
+        self.assertTrue(all(item[0][2] == {"capsule_id": "capsule_1"} for item in calls))
 
     def test_metadata_projection_rejects_secret_fields(self) -> None:
         metadata = {
