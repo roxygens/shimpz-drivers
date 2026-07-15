@@ -184,6 +184,11 @@ class PrincipalStore:
             with contextlib.suppress(OSError):
                 temporary.unlink(missing_ok=True)
 
+    def check_health(self) -> None:
+        """Fail closed when the durable Capsule-principal registry cannot be trusted."""
+        with self._lock:
+            self._read()
+
     def provision(self, capsule_id: object, token: object) -> None:
         """Register or retry one lifecycle principal; cleartext is never persisted."""
         capsule = _capsule_id(capsule_id)

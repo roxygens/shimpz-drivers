@@ -317,6 +317,16 @@ class AppLifecycleTests(unittest.TestCase):
 
     def test_health_and_startup_fail_closed_after_key_loss(self) -> None:
         self.provision("capsule_a", CAPSULE_A_TOKEN)
+        principal_path = app.principal_store.STORE.state_path
+        principal_state = principal_path.read_bytes()
+        principal_path.write_text("{}", encoding="utf-8")
+        status, payload = self.request("GET", "/healthz")
+        self.assertEqual((status, payload), (503, {"error": "credential storage is unavailable"}))
+        principal_path.write_bytes(principal_state)
+        principal_path.chmod(0o600)
+        status, payload = self.request("GET", "/healthz")
+        self.assertEqual((status, payload), (200, {"status": "ok"}))
+
         status, _ = self.request(
             "POST",
             "/v1/capsules/capsule_a/credentials",

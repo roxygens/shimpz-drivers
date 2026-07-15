@@ -343,7 +343,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and path == DRIVER.health_path:
             try:
                 credential_store.STORE.check_health()
-            except credential_store.CredentialStoreError:
+                principal_store.STORE.check_health()
+            except credential_store.CredentialStoreError, principal_store.PrincipalStoreError:
                 self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "credential storage is unavailable"})
                 return
             self._send_json(HTTPStatus.OK, {"status": "ok"})
@@ -730,7 +731,8 @@ def main() -> None:
     _prepare_backup_spool()
     try:
         credential_store.STORE.check_health()
-    except credential_store.CredentialStoreError:
+        principal_store.STORE.check_health()
+    except credential_store.CredentialStoreError, principal_store.PrincipalStoreError:
         print("r2-driver credential storage is unavailable", file=sys.stderr)
         raise SystemExit(1) from None
     # IPv4Address(0) is INADDR_ANY. The container must serve its private Docker network as well as
