@@ -53,7 +53,8 @@ RUN groupadd -g "${SHIMPZ_R2DRIVER_TOKEN_GID}" shimpzr2driver-token \
     && useradd -u 10007 -G shimpzr2driver-token -M -s /usr/sbin/nologin r2driver
 
 WORKDIR /app
-COPY app.py validate.py r2_client.py audit.py backup_gate.py token_store.py healthcheck.py ./
+COPY app.py validate.py r2_client.py audit.py backup_gate.py token_store.py healthcheck.py \
+    driver_manifest.py shimpz.driver.toml shimpz.credentials.json ./
 
 # Pre-create + own every path a NAMED VOLUME mounts onto — Docker seeds a fresh volume from the image
 # dir's ownership, otherwise root:root/0755 and unwritable by the non-root `r2driver` user.

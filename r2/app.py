@@ -10,7 +10,8 @@ object. A separate loopback-only operator capability handles immutable encrypted
 bounded-range recovery without widening any Brain-facing operation.
 
 Mandatory controls (same contract as the other sidecars):
-  - Auth fail-closed on EVERY endpoint: `Authorization: Bearer <token>` required; no anonymous route.
+  - Auth fails closed on every operational endpoint. Only health and definition-only discovery are
+    unauthenticated on the private driver network; neither can return credential values or inventory.
   - No CORS, ever: this API is for `shimpz-brain`'s own r2send/r2ls/r2get wrappers, never a page in Chrome.
   - No execution endpoint: r2_client.py shells rclone with a FIXED argv (never a shell string), so a
     bucket key can't inject a command. There is no "arbitrary rclone" endpoint by design.
@@ -28,6 +29,11 @@ Endpoints (all require `Authorization: Bearer <token>`):
   GET  /v1/r2/backup/download ?key=<exact backup key>&offset=<n>&length=<n> -> <raw range>
   GET  /v1/r2/list     ?prefix=<prefix>  -> {prefix, entries: [{size, modtime, path}, ...]}
   GET  /v1/r2/get      ?key=<key>        -> <raw bytes>  (X-R2-Size header)
+
+Private-network discovery (unauthenticated, definitions only):
+  GET  /healthz                  -> {status}
+  GET  /v1/driver                -> Driver Spec v1 manifest
+  GET  /v1/driver/credentials    -> closed credential form schema, never values or inventory
 """
 
 from __future__ import annotations
@@ -49,11 +55,14 @@ from urllib.parse import parse_qs, urlsplit
 
 import audit
 import backup_gate
+import driver_manifest
 import r2_client
 import token_store
 import validate
 
-LISTEN_PORT = int(os.environ.get("SHIMPZ_R2DRIVER_PORT", "7075"))
+DRIVER = driver_manifest.load()
+CREDENTIALS = driver_manifest.load_credentials()
+LISTEN_PORT = int(os.environ.get("SHIMPZ_R2DRIVER_PORT", str(DRIVER.port)))
 LISTEN_HOST = str(ipaddress.IPv4Address(0))
 _CHUNK = 1024 * 1024
 _BACKUP_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -150,7 +159,7 @@ def _backup_key(created_at: str, sha256: str) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "r2-driver/1.0"
+    server_version = f"{DRIVER.id}-driver/{DRIVER.version}"
 
     def _authed(self) -> bool:
         path = urlsplit(self.path).path
@@ -228,6 +237,16 @@ class Handler(BaseHTTPRequestHandler):
         return written, digest.hexdigest()
 
     def _dispatch(self, method: str) -> None:
+        path = urlsplit(self.path).path
+        if method == "GET" and path == DRIVER.health_path:
+            self._send_json(HTTPStatus.OK, {"status": "ok"})
+            return
+        if method == "GET" and path == DRIVER.metadata_path:
+            self._send_json(HTTPStatus.OK, DRIVER.public())
+            return
+        if method == "GET" and path == DRIVER.credential_schema_path:
+            self._send_json(HTTPStatus.OK, CREDENTIALS.public())
+            return
         if not self._authed():
             # 127.0.0.1 = this container's own Docker HEALTHCHECK proving the 403 gate is live
             # (an unauthenticated probe every 30s BY DESIGN) — keep the audit line but at info,

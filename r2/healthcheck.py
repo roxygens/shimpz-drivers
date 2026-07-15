@@ -1,8 +1,8 @@
 #!/usr/local/bin/python3
-"""Docker HEALTHCHECK probe: the server is up and its auth gate is live.
+"""Docker HEALTHCHECK probe: the server is up and its operational auth gate is live.
 
-No `curl` in this image on purpose — an unauthenticated GET must be refused with 403 (see app.py's
-bearer-token check), the same proof the other sidecars' healthchecks make for their own endpoints.
+No `curl` in this image on purpose — an unauthenticated operational GET must be refused with 403
+(see app.py's bearer-token check). Read-only manifest discovery remains intentionally unauthenticated.
 """
 
 import http.client

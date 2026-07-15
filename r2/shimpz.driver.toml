@@ -1,0 +1,22 @@
+schema_version = 1
+id = "r2"
+title = "Cloudflare R2"
+version = "1.0.0"
+summary = "Brokered Cloudflare R2 object storage for Space services and Capsules."
+interface = "shimpz.r2/v1"
+scope = "space"
+credential_policy = "managed-or-byok"
+data_plane = "brokered"
+port = 7075
+health_path = "/healthz"
+metadata_path = "/v1/driver"
+credential_schema_path = "/v1/driver/credentials"
+
+[capabilities]
+operations = [
+  "r2.upload",
+  "r2.list",
+  "r2.get",
+  "r2.backup.upload",
+  "r2.backup.download",
+]
