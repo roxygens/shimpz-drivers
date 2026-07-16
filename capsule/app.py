@@ -1505,7 +1505,7 @@ _PROVIDER_ARTIFACTS = {
         ".claude/.credentials.json",
         ".shimpz/login",
     ),
-    "codex": (".codex/auth.json", ".shimpz/codex-thread-id"),
+    "codex": (".codex/auth.json", ".shimpz/codex-thread-id", ".shimpz/codex-login"),
 }
 _PROVIDER_VOLUME_SCRIPT = r"""
 import os
@@ -1516,7 +1516,7 @@ from pathlib import Path
 
 ARTIFACTS = {
     "claude-code": (".shimpz/brain-credential.sh", ".claude/.credentials.json", ".shimpz/login"),
-    "codex": (".codex/auth.json", ".shimpz/codex-thread-id"),
+    "codex": (".codex/auth.json", ".shimpz/codex-thread-id", ".shimpz/codex-login"),
 }
 MAX_CONFIG_ENTRIES = 4096
 QUARANTINE_NAME = re.compile(r"[.]shimpz-provider-swap-[a-f0-9]{32}")
@@ -1586,6 +1586,18 @@ else:
 
 
 @dataclass(frozen=True)
+class _InteractiveLoginAdapter:
+    """One provider's fixed interactive-login transport; no request can shape these commands."""
+
+    mode: str
+    start_command: tuple[str, ...]
+    info: Callable[[object], dict]
+    status: Callable[[object], tuple[dict, dict]]
+    submit_command: tuple[str, ...] | None = None
+    cancel_command: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
 class _BrainAdapter:
     """All provider-specific behavior in one registry entry, never request-shaped branching."""
 
@@ -1595,7 +1607,7 @@ class _BrainAdapter:
     invocation: Callable[[str, bool, bool, str], tuple[list[str], bytes | None]]
     parse_stream_line: Callable[[bytes], tuple[str, str] | None]
     no_session_markers: tuple[str, ...]
-    interactive_login: bool
+    interactive_login: _InteractiveLoginAdapter | None
     requires_completion_event: bool
 
 
@@ -1738,7 +1750,10 @@ def _brain_exec_stdin(
 
 
 def _brain_id(container) -> str:
-    return container.labels.get("capsule.brain", manifests.DEFAULT_BRAIN)
+    labels = getattr(container, "labels", {})
+    if not isinstance(labels, dict):
+        return manifests.DEFAULT_BRAIN
+    return labels.get("capsule.brain", manifests.DEFAULT_BRAIN)
 
 
 def _brain_model(container, brain: str | None = None) -> str:
@@ -2043,9 +2058,112 @@ def _chat_answer(cid: str, body: dict, lease: _AuthorizationLease) -> dict:
         return {"capsule": cid, "rid": rid, "answered": answered}
 
 
-# The Claude-subscription OAuth flow, PER CAPSULE — the exact mirror of shimpz-driver's brain-login
-# (drivers/apps/app.py): only ever the FIXED binary `shimpz-login` (baked into the brain image every
-# capsule runs), owner-enforced upstream, audited, and the pasted code carried only over stdin.
+# Interactive provider login, PER CAPSULE. Every adapter exposes only fixed binaries baked into its
+# Brain image. Authorization remains owner-enforced upstream and serialized with chat/config changes.
+def _claude_login_info(container) -> dict:
+    rc, out = _brain_exec(
+        container,
+        ["sh", "-c", 'cat "${SHIMPZ_HOME:-/config/.shimpz}/login/url" 2>/dev/null'],
+    )
+    url = out.strip() if rc == 0 else ""
+    return {"url": url} if url else {"pending": True}
+
+
+def _codex_device_info(container) -> dict:
+    rc, out = _brain_exec(container, ["shimpz-codex-auth", "device-info"])
+    if rc != 0:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Codex device login information is unavailable")
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Codex device login returned an invalid response") from exc
+    if payload == {"pending": True}:
+        return payload
+    if not isinstance(payload, dict) or set(payload) != {"pending", "url", "user_code"}:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Codex device login returned an invalid response")
+    url = payload.get("url")
+    user_code = payload.get("user_code")
+    try:
+        parsed = urlparse(url) if isinstance(url, str) else None
+        port = parsed.port if parsed is not None else None
+    except ValueError as exc:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Codex device login returned an invalid response") from exc
+    code_parts = user_code.split("-") if isinstance(user_code, str) else []
+    valid_code = 2 <= len(code_parts) <= 3 and all(
+        4 <= len(part) <= 8 and part.isascii() and part.isalnum() and part == part.upper()
+        for part in code_parts
+    )
+    if (
+        payload.get("pending") is not False
+        or parsed is None
+        or parsed.scheme != "https"
+        or parsed.hostname != "auth.openai.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or parsed.path.rstrip("/") != "/codex/device"
+        or not valid_code
+    ):
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Codex device login returned an invalid response")
+    return {"pending": False, "url": url, "user_code": user_code}
+
+
+def _claude_login_status(container) -> tuple[dict, dict]:
+    rc, out = _brain_exec(container, ["shimpz-login", "status", "--json"])
+    result: dict = {"loggedIn": False}
+    if rc == 0:
+        with contextlib.suppress(json.JSONDecodeError, ValueError):
+            parsed = json.loads(out or "{}")
+            result = {"loggedIn": bool(parsed.get("loggedIn")), "email": parsed.get("email")}
+    verdict: dict = {}
+    rc, raw = _brain_exec(
+        container,
+        ["sh", "-c", 'cat "${SHIMPZ_HOME:-/config/.shimpz}/login/result" 2>/dev/null'],
+    )
+    if rc == 0 and raw.strip():
+        with contextlib.suppress(json.JSONDecodeError, ValueError):
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                verdict = parsed
+    return result, verdict
+
+
+def _codex_login_status(container) -> tuple[dict, dict]:
+    status_rc, status_raw = _brain_exec(container, ["shimpz-codex-auth", "status"])
+    result_rc, result_raw = _brain_exec(container, ["shimpz-codex-auth", "device-result"])
+    try:
+        status = json.loads(status_raw)
+        device = json.loads(result_raw)
+    except json.JSONDecodeError as exc:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Codex device login returned an invalid response") from exc
+    if (
+        status_rc != 0
+        or not isinstance(status, dict)
+        or set(status) != {"provider", "configured", "auth_type"}
+        or status.get("provider") != "codex"
+        or type(status.get("configured")) is not bool
+        or status.get("auth_type") not in {None, "api_key", "oauth"}
+        or (status["configured"] is True) != (status["auth_type"] in {"api_key", "oauth"})
+        or result_rc != 0
+        or not isinstance(device, dict)
+        or set(device) - {"state", "message"}
+        or device.get("state") not in {"idle", "starting", "waiting", "succeeded", "failed", "cancelled", "timeout"}
+        or ("message" in device and (not isinstance(device["message"], str) or len(device["message"]) > 200))
+    ):
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Codex device login returned an invalid response")
+    succeeded = (
+        status_rc == 0
+        and status["configured"] is True
+        and status["auth_type"] == "oauth"
+        and device["state"] == "succeeded"
+    )
+    result = {"loggedIn": succeeded, "state": device["state"]}
+    verdict = {"ok": succeeded}
+    if not succeeded and device.get("message"):
+        verdict["message"] = device["message"]
+    return result, verdict
+
+
 def _interactive_login_capsule(cid: str, lease: _AuthorizationLease):
     container = _require_current_authorization(cid, lease)
     container.reload()
@@ -2055,7 +2173,7 @@ def _interactive_login_capsule(cid: str, lease: _AuthorizationLease):
     if not adapter.interactive_login:
         raise ApiError(
             HTTPStatus.CONFLICT,
-            f"{brain!r} uses the account Brain credential flow, not the Claude login bridge",
+            f"{brain!r} does not support interactive Brain login",
         )
     return container
 
@@ -2092,6 +2210,10 @@ def _release_finished_credential_mutation(cid: str, container) -> bool:
 def _capsule_login_start(cid: str, lease: _AuthorizationLease) -> dict:
     with _lock_for(cid):
         container = _interactive_login_capsule(cid, lease)
+        brain, adapter = _adapter_for(container)
+        login = adapter.interactive_login
+        if login is None:  # guarded by _interactive_login_capsule; keeps the type contract explicit
+            raise ApiError(HTTPStatus.CONFLICT, f"{brain!r} does not support interactive Brain login")
         chat_lock = _chat_lock_for(cid)
         if not chat_lock.acquire(blocking=False):
             raise ApiError(HTTPStatus.CONFLICT, "stop the active chat turn before changing its Brain credential")
@@ -2103,13 +2225,13 @@ def _capsule_login_start(cid: str, lease: _AuthorizationLease) -> dict:
                 if cid in _credential_mutations:
                     raise ApiError(HTTPStatus.CONFLICT, "Brain credential change is already in progress")
                 _credential_mutations.add(cid)
-            # The bridge blocks holding the PKCE state until the Captain pastes the code. Keep its
+            # The provider bridge owns all ephemeral authorization state until it exits. Keep its
             # exact Engine exec identity: a lost start response may still have launched the writer.
             exec_id = ""
             try:
                 created = _docker.api.exec_create(
                     container.id,
-                    ["shimpz-login", "run"],
+                    list(login.start_command),
                     user=_BRAIN_USER,
                     environment={"HOME": "/config"},
                 )
@@ -2141,25 +2263,40 @@ def _capsule_login_start(cid: str, lease: _AuthorizationLease) -> dict:
         finally:
             chat_lock.release()
     trace_id = audit.log("brain_login", cid, result="ok", step="start")
-    return {"capsule": cid, "started": True, "trace_id": trace_id}
+    return {
+        "capsule": cid,
+        "provider": brain,
+        "mode": login.mode,
+        "started": True,
+        "trace_id": trace_id,
+    }
 
 
 def _capsule_login_url(cid: str, lease: _AuthorizationLease) -> dict:
     with _lock_for(cid):
         container = _interactive_login_capsule(cid, lease)
-        rc, out = _brain_exec(
-            container,
-            ["sh", "-c", 'cat "${SHIMPZ_HOME:-/config/.shimpz}/login/url" 2>/dev/null'],
-        )
-    url = out.strip() if rc == 0 else ""
-    audit.log("brain_login", cid, result="ok", step="url", has_url=bool(url))
-    return {"capsule": cid, "url": url} if url else {"capsule": cid, "pending": True}
+        brain, adapter = _adapter_for(container)
+        login = adapter.interactive_login
+        if login is None:
+            raise ApiError(HTTPStatus.CONFLICT, f"{brain!r} does not support interactive Brain login")
+        info = login.info(container)
+    audit.log("brain_login", cid, result="ok", step="url", ready=info.get("pending") is not True)
+    return {"capsule": cid, "provider": brain, "mode": login.mode, **info}
 
 
 def _capsule_login_code(cid: str, body: dict, lease: _AuthorizationLease) -> dict:
-    code = validate.validate_login_code(body.get("code"))
     with _lock_for(cid):
         container = _interactive_login_capsule(cid, lease)
+        brain, adapter = _adapter_for(container)
+        login = adapter.interactive_login
+        if login is None:
+            raise ApiError(HTTPStatus.CONFLICT, f"{brain!r} does not support interactive Brain login")
+        if login.submit_command is None:
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "enter the displayed one-time code on the provider website; never paste it into Shimpz",
+            )
+        code = validate.validate_login_code(body.get("code"))
         chat_lock = _chat_lock_for(cid)
         if not chat_lock.acquire(blocking=False):
             raise ApiError(HTTPStatus.CONFLICT, "stop the active chat turn before changing its Brain credential")
@@ -2168,42 +2305,31 @@ def _capsule_login_code(cid: str, body: dict, lease: _AuthorizationLease) -> dic
             _clear_brain_authentication(cid)
             rc, _stdout, _stderr = _brain_exec_stdin(
                 container,
-                ["shimpz-login", "submit"],
+                list(login.submit_command),
                 code.encode("ascii"),
             )
         finally:
             chat_lock.release()
     ok = rc == 0
     audit.log("brain_login", cid, result="ok" if ok else "error", step="code")
-    return {"capsule": cid, "ok": ok}
+    return {"capsule": cid, "provider": brain, "mode": login.mode, "ok": ok}
 
 
 def _capsule_login_status(cid: str, lease: _AuthorizationLease) -> dict:
     with _lock_for(cid):
         container = _interactive_login_capsule(cid, lease)
+        brain, adapter = _adapter_for(container)
+        login = adapter.interactive_login
+        if login is None:
+            raise ApiError(HTTPStatus.CONFLICT, f"{brain!r} does not support interactive Brain login")
         chat_lock = _chat_lock_for(cid)
         if not chat_lock.acquire(blocking=False):
             raise ApiError(HTTPStatus.CONFLICT, "stop the active chat turn before checking Brain login")
         try:
             _require_no_durable_chat_turn(container)
-            rc, out = _brain_exec(container, ["shimpz-login", "status", "--json"])
-            result: dict = {"loggedIn": False}
-            if rc == 0:
-                with contextlib.suppress(json.JSONDecodeError, ValueError):
-                    parsed = json.loads(out or "{}")
-                    result = {"loggedIn": bool(parsed.get("loggedIn")), "email": parsed.get("email")}
-            # Read the bridge's own verdict. A successful interactive OAuth exchange supersedes any old
-            # API-key shell file; this is a credential rotation and invalidates prior turn verification.
-            verdict: dict = {}
-            rc, raw = _brain_exec(
-                container,
-                ["sh", "-c", 'cat "${SHIMPZ_HOME:-/config/.shimpz}/login/result" 2>/dev/null'],
-            )
-            if rc == 0 and raw.strip():
-                with contextlib.suppress(json.JSONDecodeError, ValueError):
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, dict):
-                        verdict = parsed
+            result, verdict = login.status(container)
+            # A successful interactive exchange supersedes old account-provisioned credentials and
+            # invalidates every provider-turn verification observed before this rotation.
             if result["loggedIn"] and verdict.get("ok"):
                 _clear_brain_authentication(cid)
                 stale_rc, _stale_output = _brain_exec(
@@ -2230,7 +2356,45 @@ def _capsule_login_status(cid: str, lease: _AuthorizationLease) -> dict:
         finally:
             chat_lock.release()
     audit.log("brain_login", cid, result="ok", step="status", logged_in=result["loggedIn"])
-    return {"capsule": cid, **result}
+    return {"capsule": cid, "provider": brain, "mode": login.mode, **result}
+
+
+def _capsule_login_cancel(cid: str, lease: _AuthorizationLease) -> dict:
+    with _lock_for(cid):
+        container = _interactive_login_capsule(cid, lease)
+        brain, adapter = _adapter_for(container)
+        login = adapter.interactive_login
+        if login is None or login.cancel_command is None:
+            raise ApiError(HTTPStatus.CONFLICT, f"{brain!r} interactive login cannot be cancelled here")
+        chat_lock = _chat_lock_for(cid)
+        if not chat_lock.acquire(blocking=False):
+            raise ApiError(HTTPStatus.CONFLICT, "stop the active chat turn before changing its Brain credential")
+        try:
+            _require_no_durable_chat_turn(container)
+            _release_finished_credential_mutation(cid, container)
+            rc, out = _brain_exec(container, list(login.cancel_command))
+            try:
+                payload = json.loads(out)
+            except json.JSONDecodeError as exc:
+                raise ApiError(HTTPStatus.BAD_GATEWAY, "Brain login cancel returned an invalid response") from exc
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != {"cancelled"}
+                or type(payload.get("cancelled")) is not bool
+            ):
+                raise ApiError(HTTPStatus.BAD_GATEWAY, "Brain login cancel returned an invalid response")
+            if rc != 0:
+                raise ApiError(HTTPStatus.GATEWAY_TIMEOUT, "Brain login cancellation could not be proved")
+            _release_finished_credential_mutation(cid, container)
+        finally:
+            chat_lock.release()
+    audit.log("brain_login", cid, result="ok", step="cancel", cancelled=payload["cancelled"])
+    return {
+        "capsule": cid,
+        "provider": brain,
+        "mode": login.mode,
+        "cancelled": payload["cancelled"],
+    }
 
 
 def _claude_status(container) -> tuple[bool, bool]:
@@ -2565,7 +2729,13 @@ _BRAIN_ADAPTERS = {
         invocation=_claude_invocation,
         parse_stream_line=_parse_claude_stream_line,
         no_session_markers=("no conversation",),
-        interactive_login=True,
+        interactive_login=_InteractiveLoginAdapter(
+            mode="authorization_code",
+            start_command=("shimpz-login", "run"),
+            info=_claude_login_info,
+            status=_claude_login_status,
+            submit_command=("shimpz-login", "submit"),
+        ),
         requires_completion_event=True,
     ),
     "codex": _BrainAdapter(
@@ -2575,7 +2745,13 @@ _BRAIN_ADAPTERS = {
         invocation=_codex_invocation,
         parse_stream_line=_parse_codex_stream_line,
         no_session_markers=("no saved session", "no session found", "no rollout found", "no thread found"),
-        interactive_login=False,
+        interactive_login=_InteractiveLoginAdapter(
+            mode="device_code",
+            start_command=("shimpz-codex-auth", "device-login"),
+            info=_codex_device_info,
+            status=_codex_login_status,
+            cancel_command=("shimpz-codex-auth", "device-cancel"),
+        ),
         requires_completion_event=True,
     ),
 }
@@ -3844,10 +4020,10 @@ class Handler(BaseHTTPRequestHandler):
         principal: tuple[str, str | None],
         lease: _AuthorizationLease,
     ) -> None:
-        """Provider status/config plus the Claude-only legacy interactive OAuth bridge.
+        """Provider status/config plus each adapter's fixed interactive login bridge.
 
-        Ownership was already enforced by _authorize. Login operations are rejected for every
-        provider whose adapter does not explicitly expose the fixed `shimpz-login` bridge.
+        Ownership was already enforced by _authorize. Login operations are rejected unless the
+        selected provider adapter explicitly exposes the corresponding fixed operation.
         """
         if method == "GET" and len(parts) == 4:
             self._send_json(HTTPStatus.OK, _brain_status(cid, lease))
@@ -3877,6 +4053,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if method == "GET" and step == "status":
                 self._send_json(HTTPStatus.OK, _capsule_login_status(cid, lease))
+                return
+            if method == "POST" and step == "cancel":
+                self._send_json(HTTPStatus.OK, _capsule_login_cancel(cid, lease))
                 return
         raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
 
