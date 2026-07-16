@@ -2060,11 +2060,9 @@ def _interactive_login_capsule(cid: str, lease: _AuthorizationLease):
     return container
 
 
-def _credential_writer_finished(cid: str, container) -> bool:
+def _credential_writer_finished(identity: tuple[str, str], container) -> bool:
     """Prove the exact detached OAuth writer exited before releasing the mutation gate."""
-    with _active_chat_guard:
-        identity = _credential_mutation_execs.get(cid)
-    if identity is None or identity[0] != container.id:
+    if identity[0] != container.id:
         return False
     try:
         metadata = _docker.api.exec_inspect(identity[1])
@@ -2073,6 +2071,22 @@ def _credential_writer_finished(cid: str, container) -> bool:
     return (
         isinstance(metadata, dict) and metadata.get("ContainerID") == container.id and metadata.get("Running") is False
     )
+
+
+def _release_finished_credential_mutation(cid: str, container) -> bool:
+    """Release only the unchanged mutation gate whose exact Engine writer has exited."""
+    with _active_chat_guard:
+        if cid not in _credential_mutations:
+            return False
+        identity = _credential_mutation_execs.get(cid)
+    if identity is None or not _credential_writer_finished(identity, container):
+        return False
+    with _active_chat_guard:
+        if cid not in _credential_mutations or _credential_mutation_execs.get(cid) != identity:
+            return False
+        _credential_mutations.discard(cid)
+        _credential_mutation_execs.pop(cid, None)
+        return True
 
 
 def _capsule_login_start(cid: str, lease: _AuthorizationLease) -> dict:
@@ -2084,6 +2098,7 @@ def _capsule_login_start(cid: str, lease: _AuthorizationLease) -> dict:
         try:
             _require_no_durable_chat_turn(container)
             _clear_brain_authentication(cid)
+            _release_finished_credential_mutation(cid, container)
             with _active_chat_guard:
                 if cid in _credential_mutations:
                     raise ApiError(HTTPStatus.CONFLICT, "Brain credential change is already in progress")
@@ -2211,10 +2226,7 @@ def _capsule_login_status(cid: str, lease: _AuthorizationLease) -> dict:
                     )
             elif not result["loggedIn"] and verdict.get("message"):
                 result["last_error"] = str(verdict["message"])[:300]
-            if verdict and _credential_writer_finished(cid, container):
-                with _active_chat_guard:
-                    _credential_mutations.discard(cid)
-                    _credential_mutation_execs.pop(cid, None)
+            _release_finished_credential_mutation(cid, container)
         finally:
             chat_lock.release()
     audit.log("brain_login", cid, result="ok", step="status", logged_in=result["loggedIn"])
