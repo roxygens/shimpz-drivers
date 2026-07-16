@@ -550,7 +550,7 @@ class LocalController:
                             "Docker could not start the Assistant",
                             code="docker-start-failed",
                         ) from exc
-                    self._wait_ready(existing, spec)
+                self._wait_ready(existing, spec)
                 return {"assistant": assistant_id, "installed": False}
 
             image = self._trusted_image(spec)

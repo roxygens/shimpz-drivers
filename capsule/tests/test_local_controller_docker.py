@@ -336,14 +336,6 @@ class DockerFlowTests(unittest.TestCase):
             )
             self.assertEqual((installed_status, installed["installed"]), (200, True))
             self.assertEqual(self._run("image", "inspect", trusted_ref, check=False).returncode, 0)
-            _, installed_again = self._api(
-                port,
-                token,
-                "POST",
-                "/v1/capsules/demo_capsule/assistants",
-                {"assistant": "hello-pulse"},
-            )
-            self.assertFalse(installed_again["installed"])
 
             assistant_name = self._run(
                 "ps",
@@ -378,6 +370,33 @@ class DockerFlowTests(unittest.TestCase):
             self.assertTrue(network_metadata["Internal"])
             self.assertEqual(network_metadata["Labels"]["com.shimpz.local.space-id"], space_id)
             self.assertEqual(network_metadata["Labels"]["com.shimpz.local.capsule-name"], "Demo Capsule")
+
+            # Docker still reports "running" when PID 1 is stopped. An idempotent install must probe
+            # the operation contract instead of accepting that shallow state as healthy.
+            self._run("kill", "--signal", "STOP", assistant_name)
+            try:
+                stopped_state = self._run("inspect", "--format", "{{.State.Status}}", assistant_name).stdout.strip()
+                self.assertEqual(stopped_state, "running")
+                unhealthy_status, unhealthy = self._api(
+                    port,
+                    token,
+                    "POST",
+                    "/v1/capsules/demo_capsule/assistants",
+                    {"assistant": "hello-pulse"},
+                )
+                self.assertEqual(unhealthy_status, 502)
+                self.assertEqual(unhealthy["error"], "Assistant did not become ready")
+            finally:
+                self._run("kill", "--signal", "CONT", assistant_name, check=False)
+
+            _, installed_again = self._api(
+                port,
+                token,
+                "POST",
+                "/v1/capsules/demo_capsule/assistants",
+                {"assistant": "hello-pulse"},
+            )
+            self.assertFalse(installed_again["installed"])
 
             _, listed = self._api(port, token, "GET", "/v1/capsules/demo_capsule/assistants")
             self.assertEqual(listed["assistants"], [{"assistant": "hello-pulse", "status": "running"}])
