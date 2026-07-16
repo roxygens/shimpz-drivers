@@ -44,9 +44,10 @@ def main() -> int:
         if not isinstance(decoded, dict):
             return 3
         sys.stdout.buffer.write(json.dumps(decoded, separators=(",", ":")).encode("utf-8"))
-        return 0
     except OSError, ValueError, json.JSONDecodeError:
         return 3
+    else:
+        return 0
     finally:
         connection.close()
 
