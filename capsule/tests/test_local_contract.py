@@ -66,13 +66,18 @@ class LocalContractTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(local_app.ApiProblem):
                 local_app.validate_capsule_name(invalid)
 
-    def test_container_limits_are_intentionally_small(self) -> None:
+    def test_container_limits_and_stateless_recovery_are_intentionally_narrow(self) -> None:
         self.assertEqual(local_app.ASSISTANT_NANO_CPUS, 250_000_000)
         self.assertEqual(local_app.ASSISTANT_MEMORY, 128 * 1024 * 1024)
         self.assertEqual(local_app.ASSISTANT_PIDS, 64)
         self.assertEqual(local_app.half_cpu_set(96), "0-47")
         self.assertEqual(local_app.half_cpu_set(8), "0-3")
         self.assertEqual(local_app.half_cpu_set(1), "0")
+        readiness = local_app.ApiProblem(HTTPStatus.BAD_GATEWAY, "not ready", code="assistant-not-ready")
+        ownership = local_app.ApiProblem(HTTPStatus.CONFLICT, "drift", code="ownership-conflict")
+        self.assertTrue(local_app._is_replaceable_readiness_failure("hello-pulse", readiness))
+        self.assertFalse(local_app._is_replaceable_readiness_failure("future-stateful-assistant", readiness))
+        self.assertFalse(local_app._is_replaceable_readiness_failure("hello-pulse", ownership))
 
 
 if __name__ == "__main__":

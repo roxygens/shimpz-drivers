@@ -64,6 +64,7 @@ ASSISTANT_UID = "10001:10001"
 ASSISTANT_MEMORY = 128 * 1024 * 1024
 ASSISTANT_NANO_CPUS = 250_000_000
 ASSISTANT_PIDS = 64
+STATELESS_RECOVERY_ASSISTANTS = frozenset({"hello-pulse"})
 
 
 class ApiProblem(RuntimeError):
@@ -72,6 +73,10 @@ class ApiProblem(RuntimeError):
         self.status = status
         self.message = message
         self.code = code
+
+
+def _is_replaceable_readiness_failure(assistant_id: str, problem: ApiProblem) -> bool:
+    return assistant_id in STATELESS_RECOVERY_ASSISTANTS and problem.code == "assistant-not-ready"
 
 
 def validate_capsule_id(value: str) -> str:
@@ -532,6 +537,76 @@ class LocalController:
         output.sort(key=lambda item: item["assistant"])
         return {"assistants": output}
 
+    def _create_assistant_container(self, capsule_id: str, spec: AssistantSpec, network, image) -> None:
+        container = None
+        try:
+            container = self.client.containers.create(
+                image=spec.image,
+                name=self._container_name(capsule_id, spec.assistant_id),
+                command=None,
+                detach=True,
+                user=ASSISTANT_UID,
+                network=network.name,
+                labels=self._assistant_labels(capsule_id, spec),
+                environment={
+                    "SHIMPZ_ASSISTANT_ID": spec.assistant_id,
+                    "SHIMPZ_CAPSULE_ID": capsule_id,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+                read_only=True,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
+                privileged=False,
+                ipc_mode="private",
+                cgroupns="private",
+                mem_limit=ASSISTANT_MEMORY,
+                memswap_limit=ASSISTANT_MEMORY,
+                nano_cpus=ASSISTANT_NANO_CPUS,
+                cpuset_cpus=self.cpuset_cpus,
+                pids_limit=ASSISTANT_PIDS,
+                ulimits=[Ulimit(name="nofile", soft=1024, hard=1024)],
+                restart_policy={"Name": "no"},
+                log_config=LogConfig(type=LogConfig.types.JSON, config={"max-size": "1m", "max-file": "2"}),
+            )
+            container.reload()
+            if container.attrs.get("Image") != image.id:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Docker resolved an unexpected Assistant image",
+                    code="image-resolution-mismatch",
+                )
+            container.start()
+            self._validate_container(container, capsule_id, spec, network.name)
+            self._wait_ready(container, spec)
+        except ApiProblem:
+            if container is not None:
+                container.remove(force=True)
+            raise
+        except DockerException as exc:
+            if container is not None:
+                with suppress(DockerException):
+                    container.remove(force=True)
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Docker could not install the Assistant",
+                code="docker-install-failed",
+            ) from exc
+
+    def _replace_unready_assistant(self, capsule_id: str, spec: AssistantSpec, network, existing) -> None:
+        # Hello Pulse is the only explicitly stateless recovery target. Resolve its trusted image before
+        # removing anything, then revalidate ownership to close the pull/remove race.
+        image = self._trusted_image(spec)
+        self._validate_container(existing, capsule_id, spec, network.name)
+        try:
+            existing.remove(force=True)
+        except DockerException as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Docker could not replace the Assistant",
+                code="docker-remove-failed",
+            ) from exc
+        self._create_assistant_container(capsule_id, spec, network, image)
+
     def install_assistant(self, capsule_id: str, assistant_id: str) -> dict[str, object]:
         capsule_id = validate_capsule_id(capsule_id)
         spec = self._resolve(assistant_id)
@@ -550,62 +625,16 @@ class LocalController:
                             "Docker could not start the Assistant",
                             code="docker-start-failed",
                         ) from exc
-                self._wait_ready(existing, spec)
+                try:
+                    self._wait_ready(existing, spec)
+                except ApiProblem as exc:
+                    if not _is_replaceable_readiness_failure(assistant_id, exc):
+                        raise
+                    self._replace_unready_assistant(capsule_id, spec, network, existing)
                 return {"assistant": assistant_id, "installed": False}
 
             image = self._trusted_image(spec)
-            try:
-                container = self.client.containers.create(
-                    image=spec.image,
-                    name=self._container_name(capsule_id, assistant_id),
-                    command=None,
-                    detach=True,
-                    user=ASSISTANT_UID,
-                    network=network.name,
-                    labels=self._assistant_labels(capsule_id, spec),
-                    environment={
-                        "SHIMPZ_ASSISTANT_ID": assistant_id,
-                        "SHIMPZ_CAPSULE_ID": capsule_id,
-                        "PYTHONDONTWRITEBYTECODE": "1",
-                    },
-                    read_only=True,
-                    cap_drop=["ALL"],
-                    security_opt=["no-new-privileges:true"],
-                    privileged=False,
-                    ipc_mode="private",
-                    cgroupns="private",
-                    mem_limit=ASSISTANT_MEMORY,
-                    memswap_limit=ASSISTANT_MEMORY,
-                    nano_cpus=ASSISTANT_NANO_CPUS,
-                    cpuset_cpus=self.cpuset_cpus,
-                    pids_limit=ASSISTANT_PIDS,
-                    ulimits=[Ulimit(name="nofile", soft=1024, hard=1024)],
-                    restart_policy={"Name": "no"},
-                    log_config=LogConfig(type=LogConfig.types.JSON, config={"max-size": "1m", "max-file": "2"}),
-                )
-                container.reload()
-                if container.attrs.get("Image") != image.id:
-                    raise ApiProblem(
-                        HTTPStatus.CONFLICT,
-                        "Docker resolved an unexpected Assistant image",
-                        code="image-resolution-mismatch",
-                    )
-                container.start()
-                self._validate_container(container, capsule_id, spec, network.name)
-                self._wait_ready(container, spec)
-            except ApiProblem:
-                if "container" in locals():
-                    container.remove(force=True)
-                raise
-            except DockerException as exc:
-                if "container" in locals():
-                    with suppress(DockerException):
-                        container.remove(force=True)
-                raise ApiProblem(
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                    "Docker could not install the Assistant",
-                    code="docker-install-failed",
-                ) from exc
+            self._create_assistant_container(capsule_id, spec, network, image)
             return {"assistant": assistant_id, "installed": True}
 
     def uninstall_assistant(self, capsule_id: str, assistant_id: str) -> dict[str, object]:

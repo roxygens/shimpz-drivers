@@ -356,6 +356,7 @@ class DockerFlowTests(unittest.TestCase):
                 "{{.Names}}",
             ).stdout.strip()
             self.assertTrue(assistant_name)
+            original_assistant_id = self._run("inspect", "--format", "{{.Id}}", assistant_name).stdout.strip()
             metadata = json.loads(self._run("inspect", assistant_name).stdout)[0]
             host = metadata["HostConfig"]
             self.assertEqual(metadata["Config"]["User"], "10001:10001")
@@ -379,23 +380,22 @@ class DockerFlowTests(unittest.TestCase):
             self.assertEqual(network_metadata["Labels"]["com.shimpz.local.space-id"], space_id)
             self.assertEqual(network_metadata["Labels"]["com.shimpz.local.capsule-name"], "Demo Capsule")
 
-            # Docker still reports "running" when PID 1 is stopped. An idempotent install must probe
-            # the operation contract instead of accepting that shallow state as healthy.
+            # Docker still reports "running" when PID 1 is stopped. A retry must replace this explicitly
+            # stateless runtime; relying on an external SIGCONT would leave the documented recovery false.
             self._run("kill", "--signal", "STOP", assistant_name)
-            try:
-                stopped_state = self._run("inspect", "--format", "{{.State.Status}}", assistant_name).stdout.strip()
-                self.assertEqual(stopped_state, "running")
-                unhealthy_status, unhealthy = self._api(
-                    port,
-                    token,
-                    "POST",
-                    "/v1/capsules/demo_capsule/assistants",
-                    {"assistant": "hello-pulse"},
-                )
-                self.assertEqual(unhealthy_status, 502)
-                self.assertEqual(unhealthy["error"], "Assistant did not become ready")
-            finally:
-                self._run("kill", "--signal", "CONT", assistant_name, check=False)
+            stopped_state = self._run("inspect", "--format", "{{.State.Status}}", assistant_name).stdout.strip()
+            self.assertEqual(stopped_state, "running")
+            recovered_status, recovered = self._api(
+                port,
+                token,
+                "POST",
+                "/v1/capsules/demo_capsule/assistants",
+                {"assistant": "hello-pulse"},
+            )
+            self.assertEqual((recovered_status, recovered["installed"]), (200, False))
+            replacement_assistant_id = self._run("inspect", "--format", "{{.Id}}", assistant_name).stdout.strip()
+            self.assertNotEqual(replacement_assistant_id, original_assistant_id)
+            self.assertNotEqual(self._run("inspect", original_assistant_id, check=False).returncode, 0)
 
             _, installed_again = self._api(
                 port,
@@ -405,6 +405,10 @@ class DockerFlowTests(unittest.TestCase):
                 {"assistant": "hello-pulse"},
             )
             self.assertFalse(installed_again["installed"])
+            self.assertEqual(
+                self._run("inspect", "--format", "{{.Id}}", assistant_name).stdout.strip(),
+                replacement_assistant_id,
+            )
 
             _, listed = self._api(port, token, "GET", "/v1/capsules/demo_capsule/assistants")
             self.assertEqual(listed["assistants"], [{"assistant": "hello-pulse", "status": "running"}])
