@@ -71,7 +71,7 @@ COPY pyproject.toml uv.lock ./
 RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-install-project --no-dev --python 3.14 && \
     rm -rf /root/.cache/uv
 
-COPY app.py validate.py manifests.py network_policy.py marketplace.py cleanup_state.py audit.py token_store.py \
+COPY app.py validate.py manifests.py network_policy.py marketplace.py marketplace_image.py cleanup_state.py audit.py token_store.py \
      pgdriver_client.py r2driver_client.py accounts_client.py brain_credentials_client.py healthcheck.py ./
 
 # Pre-create + own every named-volume mountpoint so the fresh (root:root) volume is writable by the

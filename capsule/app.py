@@ -40,6 +40,7 @@ import docker.errors
 import docker.utils.socket as docker_socket
 import manifests
 import marketplace
+import marketplace_image
 import network_policy
 import pgdriver_client
 import r2driver_client
@@ -440,6 +441,16 @@ def _trusted_image_id(image_ref: str) -> str:
     if not isinstance(image_id, str) or not image_id:
         raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Capsule isolation is blocked: invalid workload image identity")
     return image_id
+
+
+def _prepare_marketplace_image(spec: marketplace.AppSpec) -> None:
+    """Materialize and prove only registry-owned digest artifacts before a new App can run."""
+    if not marketplace.is_digest_image(spec.image):
+        return
+    try:
+        marketplace_image.ensure_digest_artifact(_docker.images, spec)
+    except marketplace_image.ImageTrustError as exc:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, str(exc)) from exc
 
 
 def _trusted_workload_image(container, cid: str) -> tuple[str, str]:
@@ -1323,6 +1334,7 @@ def _install_app(
         capsule = _require_current_authorization(cid, lease)
         if owner != lease.owner:
             raise ApiError(HTTPStatus.NOT_FOUND, f"capsule {cid!r} not found")
+        _prepare_marketplace_image(spec)
         capsule_name = capsule.labels.get("capsule.name", "")
         existing = _get_container(manifests.capsule_app_container_name(cid, app_id))
         if existing is not None:  # idempotent only for this exact, still-isolated installed App
