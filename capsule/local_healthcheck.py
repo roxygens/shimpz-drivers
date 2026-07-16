@@ -33,7 +33,7 @@ def main() -> int:
             and len(payload["trace_id"]) == 32
             else 1
         )
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError, http.client.HTTPException):
+    except OSError, UnicodeError, ValueError, json.JSONDecodeError, http.client.HTTPException:
         return 1
     finally:
         if "connection" in locals():

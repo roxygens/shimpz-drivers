@@ -9,7 +9,7 @@ import stat
 from pathlib import Path
 
 TOKEN_PATH = Path("/run/shimpz-local/token")
-TOKEN_ACCESS_GROUP = "shimpzlocal-token"  # noqa: S105 - Unix group name, never credential material
+LOCAL_ACCESS_GROUP = "shimpzlocal-token"
 TOKEN_BYTES = 32
 
 
@@ -36,7 +36,7 @@ def _read_checked(path: Path, expected_gid: int) -> str:
 
 def ensure_token(path: Path = TOKEN_PATH) -> str:
     """Create the token once, then fail closed on metadata drift."""
-    expected_gid = grp.getgrnam(TOKEN_ACCESS_GROUP).gr_gid
+    expected_gid = grp.getgrnam(LOCAL_ACCESS_GROUP).gr_gid
     if path.exists() or path.is_symlink():
         return _read_checked(path, expected_gid)
 

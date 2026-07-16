@@ -43,7 +43,7 @@ class Handler(BaseHTTPRequestHandler):
             name = payload["name"]
             if not isinstance(name, str) or not 1 <= len(name) <= 80:
                 raise ValueError
-        except (ValueError, json.JSONDecodeError):
+        except ValueError, json.JSONDecodeError:
             self._send(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "invalid input"})
             return
         self._send(HTTPStatus.OK, {"message": f"Hello, {name}. Your Capsule is alive."})

@@ -66,7 +66,7 @@ ASSISTANT_NANO_CPUS = 250_000_000
 ASSISTANT_PIDS = 64
 
 
-class ApiProblem(RuntimeError):  # noqa: N818 - an HTTP problem carries both status and safe public detail
+class ApiProblem(RuntimeError):
     def __init__(self, status: HTTPStatus, message: str, *, code: str) -> None:
         super().__init__(message)
         self.status = status
@@ -299,9 +299,9 @@ class LocalController:
     @staticmethod
     def _image_labels_valid(image, spec: AssistantSpec) -> bool:
         labels = (image.attrs.get("Config") or {}).get("Labels") or {}
-        return labels.get("org.shimpz.assistant.id") == spec.assistant_id and labels.get(
-            "org.shimpz.assistant.api"
-        ) == "1"
+        return (
+            labels.get("org.shimpz.assistant.id") == spec.assistant_id and labels.get("org.shimpz.assistant.api") == "1"
+        )
 
     def _trusted_image(self, spec: AssistantSpec):
         try:
@@ -900,17 +900,18 @@ class Handler(BaseHTTPRequestHandler):
             if length != 0:
                 raise ApiProblem(HTTPStatus.BAD_REQUEST, "this request cannot have a body", code="unexpected-body")
 
-    def _route(self) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None]:  # noqa: C901
+    def _path_parts(self) -> list[str]:
         if len(self.path.encode("utf-8", "replace")) > MAX_PATH_BYTES:
             raise ApiProblem(HTTPStatus.URI_TOO_LONG, "request path is too long", code="path-too-long")
         parsed = urlsplit(self.path)
         if parsed.query or parsed.fragment or "%" in parsed.path:
             raise ApiProblem(HTTPStatus.BAD_REQUEST, "query and encoded paths are not accepted", code="invalid-path")
-        parts = [part for part in parsed.path.split("/") if part]
-        controller = self.server.controller
-        if self.command != "POST":
-            self._reject_body()
+        return [part for part in parsed.path.split("/") if part]
 
+    def _fixed_route(
+        self, parts: list[str]
+    ) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
+        controller = self.server.controller
         if self.command == "GET" and parts == ["healthz"]:
             return HTTPStatus.OK, controller.health(), "health", None, None
         if self.command == "GET" and parts == ["v1", "assistants"]:
@@ -919,6 +920,17 @@ class Handler(BaseHTTPRequestHandler):
             return HTTPStatus.OK, controller.list_capsules(), "capsule-list", None, None
         if self.command == "DELETE" and parts == ["v1", "space"]:
             return HTTPStatus.OK, controller.reset_space(), "space-reset", None, None
+        return None
+
+    def _route(self) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None]:
+        parts = self._path_parts()
+        controller = self.server.controller
+        if self.command != "POST":
+            self._reject_body()
+
+        fixed_route = self._fixed_route(parts)
+        if fixed_route is not None:
+            return fixed_route
         if len(parts) == 4 and parts[:2] == ["v1", "capsules"] and parts[3] == "create":
             capsule_id = validate_capsule_id(parts[2])
             if self.command == "POST":
@@ -1009,17 +1021,17 @@ class Handler(BaseHTTPRequestHandler):
         except DockerException:
             trace_id = local_audit.record(operation, result="error", detail="docker-error")
             self._send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Docker is unavailable", "trace_id": trace_id})
-        except Exception:  # noqa: BLE001 - final HTTP trust-boundary fail-closed guard
+        except Exception:
             trace_id = local_audit.record(operation, result="error", detail="internal-error")
             self._send(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error", "trace_id": trace_id})
 
-    do_GET = _handle  # noqa: N815 - BaseHTTPRequestHandler callback name
-    do_POST = _handle  # noqa: N815 - BaseHTTPRequestHandler callback name
-    do_DELETE = _handle  # noqa: N815 - BaseHTTPRequestHandler callback name
-    do_HEAD = _handle  # noqa: N815 - BaseHTTPRequestHandler callback name
-    do_OPTIONS = _handle  # noqa: N815 - BaseHTTPRequestHandler callback name
-    do_PATCH = _handle  # noqa: N815 - BaseHTTPRequestHandler callback name
-    do_PUT = _handle  # noqa: N815 - BaseHTTPRequestHandler callback name
+    do_GET = _handle
+    do_POST = _handle
+    do_DELETE = _handle
+    do_HEAD = _handle
+    do_OPTIONS = _handle
+    do_PATCH = _handle
+    do_PUT = _handle
 
 
 def main() -> int:
@@ -1029,7 +1041,7 @@ def main() -> int:
         token = local_token_store.ensure_token()
         client = docker.from_env(timeout=REQUEST_TIMEOUT_SECONDS)
         controller = LocalController(client, space_id, registry)
-        server = BoundedServer(("0.0.0.0", LISTEN_PORT), Handler, controller, token)  # noqa: S104
+        server = BoundedServer(("0.0.0.0", LISTEN_PORT), Handler, controller, token)
     except (KeyError, RegistryError, RuntimeError, DockerException) as exc:
         print(f"capsule-driver-local: startup failed: {exc}", file=sys.stderr, flush=True)
         return 1

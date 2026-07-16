@@ -1,4 +1,3 @@
-# ruff: noqa: S603,S607
 """No-mock end-to-end contract against the real local Docker daemon."""
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from pathlib import Path
 CAPSULE = Path(__file__).resolve().parents[1]
 FIXTURE = CAPSULE / "tests" / "fixtures" / "hello-pulse"
 REGISTRY_IMAGE = "registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
+BUILDKIT_IMAGE = "moby/buildkit:v0.31.1@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a"
 MANAGED_LABEL = "com.shimpz.local.managed"
 PROFILE_LABEL = "com.shimpz.local.profile"
 SPACE_LABEL = "com.shimpz.local.space-id"
@@ -75,7 +75,7 @@ class DockerFlowTests(unittest.TestCase):
                 continue
             try:
                 metadata = json.loads(inspected.stdout)[0]
-            except (IndexError, TypeError, json.JSONDecodeError):
+            except IndexError, TypeError, json.JSONDecodeError:
                 continue
             labels = metadata.get("Config", {}).get("Labels") if resource == "container" else metadata.get("Labels")
             if isinstance(labels, dict) and all(labels.get(key) == value for key, value in expected.items()):
@@ -96,7 +96,7 @@ class DockerFlowTests(unittest.TestCase):
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/v2/", timeout=1) as response:
                     if response.status == 200:
                         return
-            except (OSError, urllib.error.URLError):
+            except OSError, urllib.error.URLError:
                 time.sleep(0.2)
         self.fail("the test OCI registry did not become ready")
 
@@ -121,7 +121,7 @@ class DockerFlowTests(unittest.TestCase):
             method=method,
         )
         try:
-            response = urllib.request.urlopen(request, timeout=30)  # noqa: S310
+            response = urllib.request.urlopen(request, timeout=30)
         except urllib.error.HTTPError as exc:
             response = exc
         with response:
@@ -147,7 +147,7 @@ class DockerFlowTests(unittest.TestCase):
                     port = int(mapping.rsplit(":", 1)[1])
                     try:
                         status, _ = self._api(port, token_result.stdout.strip(), "GET", "/healthz")
-                    except (OSError, urllib.error.URLError):
+                    except OSError, urllib.error.URLError:
                         pass
                     else:
                         if status == 200:
@@ -184,6 +184,8 @@ class DockerFlowTests(unittest.TestCase):
                 "docker-container",
                 "--driver-opt",
                 "network=host",
+                "--driver-opt",
+                f"image={BUILDKIT_IMAGE}",
                 "--driver-opt",
                 f"cpuset-cpus={test_cpuset}",
                 "--driver-opt",
@@ -276,7 +278,7 @@ class DockerFlowTests(unittest.TestCase):
                 "--security-opt",
                 "no-new-privileges",
                 "--tmpfs",
-                "/tmp:rw,noexec,nosuid,nodev,size=32m",  # noqa: S108
+                "/tmp:rw,noexec,nosuid,nodev,size=32m",
                 "--group-add",
                 socket_gid,
                 "--volume",
