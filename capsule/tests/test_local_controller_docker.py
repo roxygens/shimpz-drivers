@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 import unittest
 import urllib.error
@@ -21,6 +22,9 @@ PROFILE_LABEL = "com.shimpz.local.profile"
 SPACE_LABEL = "com.shimpz.local.space-id"
 KIND_LABEL = "com.shimpz.local.kind"
 LOCAL_PROFILE = "single-owner-local-v1"
+
+sys.path.insert(0, str(CAPSULE))
+from local_app import half_cpu_set
 
 
 class DockerFlowTests(unittest.TestCase):
@@ -167,6 +171,8 @@ class DockerFlowTests(unittest.TestCase):
         space_id = f"test-space-{unique}"
         foreign_network = f"shimpz-foreign-{unique}"
         trusted_ref = ""
+        daemon_processors = int(self._run("info", "--format", "{{.NCPU}}").stdout.strip())
+        test_cpuset = half_cpu_set(daemon_processors)
 
         try:
             self._run(
@@ -179,7 +185,7 @@ class DockerFlowTests(unittest.TestCase):
                 "--driver-opt",
                 "network=host",
                 "--driver-opt",
-                "cpuset-cpus=0-47",
+                f"cpuset-cpus={test_cpuset}",
                 "--driver-opt",
                 "memory=4g",
                 "--driver-opt",
@@ -204,7 +210,7 @@ class DockerFlowTests(unittest.TestCase):
                 "--name",
                 registry,
                 "--cpuset-cpus",
-                "0-1",
+                test_cpuset,
                 "--cpus",
                 "1",
                 "--memory",
@@ -255,7 +261,7 @@ class DockerFlowTests(unittest.TestCase):
                 "--name",
                 controller,
                 "--cpuset-cpus",
-                "0-1",
+                test_cpuset,
                 "--cpus",
                 "2",
                 "--memory",
@@ -359,7 +365,7 @@ class DockerFlowTests(unittest.TestCase):
             self.assertEqual(host["MemorySwap"], 128 * 1024 * 1024)
             self.assertEqual(host["NanoCpus"], 250_000_000)
             self.assertEqual(host["PidsLimit"], 64)
-            self.assertEqual(host["CpusetCpus"], "0-47")
+            self.assertEqual(host["CpusetCpus"], test_cpuset)
             self.assertIn(host.get("Tmpfs"), (None, {}))
             self.assertEqual(metadata["Mounts"], [])
             self.assertIn(host["PortBindings"], (None, {}))
