@@ -136,6 +136,9 @@ def _subprocess_environment(credentials: R2Credentials | None) -> dict[str, str]
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "RCLONE_CONFIG": "/dev/null",
     }
+    bandwidth_limit = os.environ.get("RCLONE_BWLIMIT")
+    if bandwidth_limit is not None:
+        environment["RCLONE_BWLIMIT"] = bandwidth_limit
     if credentials is None:
         environment.update({name: value for name, value in os.environ.items() if name.startswith("RCLONE_CONFIG_R2_")})
         return environment

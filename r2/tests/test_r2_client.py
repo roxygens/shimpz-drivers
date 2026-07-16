@@ -81,6 +81,24 @@ class R2ClientTests(unittest.TestCase):
         self.assertEqual(first_environment["RCLONE_CONFIG_R2_ACL"], "private")
         self.assertEqual(first_environment["RCLONE_CONFIG_R2_NO_CHECK_BUCKET"], "true")
 
+    def test_only_the_explicit_bandwidth_limit_global_option_is_inherited(self) -> None:
+        calls = []
+        responses = [(0, "", ""), (0, "", "")]
+        injected = {
+            "RCLONE_BWLIMIT": "64k",
+            "RCLONE_ARBITRARY_OPTION": "must-not-pass",
+        }
+        with (
+            mock.patch.dict(os.environ, injected, clear=False),
+            mock.patch.object(r2_client.subprocess, "Popen", self.popen(responses, calls)),
+        ):
+            r2_client._run(["version"])
+            r2_client._run(["version"], credentials=credentials())
+        for call in calls:
+            environment = call.kwargs["env"]
+            self.assertEqual(environment["RCLONE_BWLIMIT"], "64k")
+            self.assertNotIn("RCLONE_ARBITRARY_OPTION", environment)
+
     def test_managed_fallback_only_inherits_the_r2_remote(self) -> None:
         calls = []
         responses = [(0, "", "")]
