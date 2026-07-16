@@ -72,6 +72,7 @@ RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-install-project --no-
     rm -rf /root/.cache/uv
 
 COPY app.py validate.py manifests.py network_policy.py marketplace.py marketplace_image.py cleanup_state.py audit.py token_store.py \
+     capsule_storage.py \
      pgdriver_client.py r2driver_client.py accounts_client.py brain_credentials_client.py healthcheck.py ./
 
 # Pre-create + own every named-volume mountpoint so the fresh (root:root) volume is writable by the
@@ -79,6 +80,7 @@ COPY app.py validate.py manifests.py network_policy.py marketplace.py marketplac
 # perms already match what the token file inside needs — readable by the admin panel via that group.
 RUN mkdir -p /run/shimpz-capsuledriver /var/log/capsule-driver /var/lib/capsule-driver/pg-principals \
         /var/lib/capsule-driver/r2-principals \
+        /var/lib/capsule-driver/storage \
         /var/lib/capsule-driver/cleanup \
         /app-egress-policy /run/shimpz-braincred-unseal /run/shimpz-accounts-brain-resolve \
     && chown capsuledriver:shimpzcapsuledriver-token /run/shimpz-capsuledriver && chmod 750 /run/shimpz-capsuledriver \
@@ -87,6 +89,7 @@ RUN mkdir -p /run/shimpz-capsuledriver /var/log/capsule-driver /var/lib/capsule-
     && chmod 0750 /run/shimpz-braincred-unseal /run/shimpz-accounts-brain-resolve \
     && chown -R capsuledriver:dockersock /var/log/capsule-driver /var/lib/capsule-driver \
     && chmod 0700 /var/lib/capsule-driver/pg-principals /var/lib/capsule-driver/r2-principals \
+        /var/lib/capsule-driver/storage \
         /var/lib/capsule-driver/cleanup \
     # egress-policy mountpoint owned by the driver uid, so a FRESH policy volume copies up writable
     # (an existing root-owned volume needs the one-time `chown 10001` — see docs/TESTS.md)

@@ -36,7 +36,7 @@ COPY pyproject.toml uv.lock ./
 RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-install-project --no-dev --python 3.14 && \
     rm -rf /root/.cache/uv
 
-COPY local_app.py local_audit.py local_registry.py local_token_store.py local_healthcheck.py ./
+COPY local_app.py local_audit.py local_registry.py local_token_store.py local_healthcheck.py capsule_storage.py ./
 
 # A normal source build remains possible, but cannot start until release automation supplies the
 # published Hello Pulse digest with `--build-arg HELLO_PULSE_IMAGE=repo@sha256:...`.
@@ -47,9 +47,10 @@ RUN mkdir -p /etc/shimpz && HELLO_PULSE_IMAGE="$HELLO_PULSE_IMAGE" /opt/venv/bin
 RUN groupadd --gid 10001 shimpzlocal && \
     groupadd --gid 10010 shimpzlocal-token && \
     useradd --uid 10001 --gid 10001 --groups 10010 --no-create-home --shell /usr/sbin/nologin shimpzlocal && \
-    mkdir -p /run/shimpz-local /var/log/shimpz-local && \
+    mkdir -p /run/shimpz-local /var/log/shimpz-local /var/lib/shimpz-local/storage && \
     chown shimpzlocal:shimpzlocal-token /run/shimpz-local && chmod 2750 /run/shimpz-local && \
-    chown shimpzlocal:shimpzlocal /var/log/shimpz-local && chmod 0700 /var/log/shimpz-local && \
+    chown shimpzlocal:shimpzlocal /var/log/shimpz-local /var/lib/shimpz-local/storage && \
+    chmod 0700 /var/log/shimpz-local /var/lib/shimpz-local/storage && \
     chmod 0555 /app/local_healthcheck.py && chmod 0444 /etc/shimpz/local-assistants.json
 
 LABEL org.opencontainers.image.source="https://github.com/roxygens/shimpz-drivers" \
