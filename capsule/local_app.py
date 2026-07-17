@@ -477,24 +477,33 @@ class LocalController:
             return
         except DockerException:
             pass
+        if self._power_not_running(container):
+            return
         try:
-            container.reload()
-            if container.status != "running":
-                return
             container.kill()
-            container.reload()
-            if container.status != "running":
-                return
         except NotFound:
             return
         except DockerException:
             pass
+        if self._power_not_running(container):
+            return
         self._blocked_power_workloads.add(container.id)
         raise ApiProblem(
             HTTPStatus.SERVICE_UNAVAILABLE,
             "Assistant Power termination could not be proved; reinstall the Assistant",
             code="assistant-power-blocked",
         )
+
+    @staticmethod
+    def _power_not_running(container) -> bool:
+        try:
+            container.reload()
+        except NotFound:
+            return True
+        except DockerException:
+            return False
+        state = container.attrs.get("State")
+        return isinstance(state, dict) and state.get("Running") is False
 
     @staticmethod
     def _read_exact(raw_socket: socket.socket, amount: int, deadline: float) -> bytes:

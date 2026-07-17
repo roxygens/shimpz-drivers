@@ -87,8 +87,12 @@ class LocalContractTests(unittest.TestCase):
             id = "stoppable"
             status = "running"
 
+            def __init__(self) -> None:
+                self.attrs = {"State": {"Running": True}}
+
             def stop(self, *, timeout: int) -> None:
                 self.status = "exited"
+                self.attrs["State"]["Running"] = False
 
             def reload(self) -> None:
                 return None
@@ -101,6 +105,33 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(stopped.status, "exited")
         self.assertNotIn(stopped.id, controller._blocked_power_workloads)
 
+        class Paused:
+            id = "paused"
+            status = "paused"
+            killed = False
+
+            def __init__(self) -> None:
+                self.attrs = {"State": {"Running": True}}
+
+            def stop(self, *, timeout: int) -> None:
+                return None
+
+            def reload(self) -> None:
+                return None
+
+            def kill(self) -> None:
+                self.killed = True
+                self.attrs["State"]["Running"] = False
+
+        paused = Paused()
+        controller._fail_stop_power(paused)
+        self.assertTrue(paused.killed)
+        self.assertNotIn(paused.id, controller._blocked_power_workloads)
+
+    def test_unprovable_power_stop_is_permanently_blocked(self) -> None:
+        controller = object.__new__(local_app.LocalController)
+        controller._blocked_power_workloads = set()
+
         class Ambiguous:
             id = "ambiguous"
 
@@ -110,11 +141,34 @@ class LocalContractTests(unittest.TestCase):
             def reload(self) -> None:
                 raise local_app.DockerException("ambiguous inspect")
 
+            def kill(self) -> None:
+                raise local_app.DockerException("ambiguous kill")
+
         ambiguous = Ambiguous()
         with self.assertRaises(local_app.ApiProblem) as caught:
             controller._fail_stop_power(ambiguous)
         self.assertEqual(caught.exception.code, "assistant-power-blocked")
         self.assertIn(ambiguous.id, controller._blocked_power_workloads)
+
+        class Malformed:
+            id = "malformed"
+
+            def __init__(self) -> None:
+                self.attrs = {"State": {}}
+
+            def stop(self, *, timeout: int) -> None:
+                return None
+
+            def reload(self) -> None:
+                return None
+
+            def kill(self) -> None:
+                return None
+
+        malformed = Malformed()
+        with self.assertRaises(local_app.ApiProblem):
+            controller._fail_stop_power(malformed)
+        self.assertIn(malformed.id, controller._blocked_power_workloads)
 
     def test_large_upload_admission_is_single_slot(self) -> None:
         self.assertTrue(local_app._FILE_UPLOAD_SLOTS.acquire(blocking=False))
