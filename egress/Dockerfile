@@ -10,7 +10,7 @@ FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a279
 ARG SOURCE_DATE_EPOCH=0
 
 # IPv6 egress is broken on this host (see the main Dockerfile) → prefer IPv4 so an outbound CONNECT to a
-# dual-stack allowlisted host (e.g. api.telegram.org) doesn't stall on an unreachable AAAA. Same fix as
+# dual-stack allowlisted host (e.g. api.openai.com) doesn't stall on an unreachable AAAA. Same fix as
 # every other image in this repo. `>>` creates the file; glibc's getaddrinfo reads it when present.
 RUN echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf
 

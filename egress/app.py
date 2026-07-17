@@ -13,7 +13,7 @@ Design (deliberately minimal — no bearer, no TLS termination):
     Postgres, or other core/data member is attached. `egress_out` is its own route to the internet.
   * CONNECT-only: a plain-HTTP forward request is refused (405) so `http://` exfil is impossible; the
     tunnel is opaque TLS end-to-end (no CA injection, the proxy never sees plaintext).
-  * allowlist by HOSTNAME (the proxy resolves the name), so it survives Anthropic/Telegram CDN-IP
+  * allowlist by HOSTNAME (the proxy resolves the name), so it survives model-provider CDN-IP
     rotation, and the brain — having no default route — cannot even resolve external names itself
     (DNS-tunnel exfil is closed for free).
   * fail-closed: if this process is down, the brain reaches nothing external.

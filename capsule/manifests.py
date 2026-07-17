@@ -1,7 +1,7 @@
 """Turn a validated capsule id into docker-py kwargs for an isolated Capsule anchor.
 
 The ONE place that decides what a Capsule container actually gets. Every security-relevant field
-(security_opt, network, mounts, limits, Telegram/browser OFF) is a hardcoded constant here; the caller
+(security_opt, network, mounts, limits, host/browser access OFF) is a hardcoded constant here; the caller
 never carries any of them, so there is nothing to override. A Capsule is a `shimpz-brain` with:
 its OWN internal network and resource envelope, but no provider runtime, credential, Docker socket,
 filesystem, browser, or application authority. Inference runs in the separate LangGraph service.
