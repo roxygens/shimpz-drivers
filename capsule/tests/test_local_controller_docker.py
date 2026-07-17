@@ -169,6 +169,7 @@ class DockerFlowTests(unittest.TestCase):
         fixture_tag = f"shimpz-hello-pulse-test:{unique}"
         controller_tag = f"shimpz-capsule-driver-local-test:{unique}"
         token_volume = f"shimpz-local-token-{unique}"
+        runtime_token_volume = f"shimpz-local-runtime-token-{unique}"
         audit_volume = f"shimpz-local-audit-{unique}"
         storage_volume = f"shimpz-local-storage-{unique}"
         space_id = f"test-space-{unique}"
@@ -258,6 +259,7 @@ class DockerFlowTests(unittest.TestCase):
                 str(CAPSULE),
             )
             self._run("volume", "create", token_volume)
+            self._run("volume", "create", runtime_token_volume)
             self._run("volume", "create", audit_volume)
             self._run("volume", "create", storage_volume)
             socket_gid = str(Path("/var/run/docker.sock").stat().st_gid)
@@ -289,6 +291,8 @@ class DockerFlowTests(unittest.TestCase):
                 "/var/run/docker.sock:/var/run/docker.sock",
                 "--volume",
                 f"{token_volume}:/run/shimpz-local",
+                "--volume",
+                f"{runtime_token_volume}:/run/shimpz-brain-runtime",
                 "--volume",
                 f"{audit_volume}:/var/log/shimpz-local",
                 "--volume",
@@ -616,6 +620,15 @@ class DockerFlowTests(unittest.TestCase):
                 "print(oct(stat.S_IMODE(s.st_mode)),s.st_uid,s.st_gid,s.st_nlink)",
             ).stdout.strip()
             self.assertEqual(token_mode, "0o440 10001 10010 1")
+            runtime_token_mode = self._run(
+                "exec",
+                controller,
+                "/opt/venv/bin/python",
+                "-c",
+                "import os,stat; s=os.stat('/run/shimpz-brain-runtime/token'); "
+                "print(oct(stat.S_IMODE(s.st_mode)),s.st_uid,s.st_gid,s.st_nlink,s.st_size)",
+            ).stdout.strip()
+            self.assertEqual(runtime_token_mode, "0o440 10001 10016 1 64")
 
             # Leave one exact-owned pair for the outer finally. This proves cleanup does not depend
             # on reaching the controller reset route and therefore also runs after an earlier failure.
@@ -643,7 +656,15 @@ class DockerFlowTests(unittest.TestCase):
             self._remove("rm", "--force", controller)
             self._remove("rm", "--force", registry)
             self._remove("network", "rm", foreign_network)
-            self._remove("volume", "rm", "--force", token_volume, audit_volume, storage_volume)
+            self._remove(
+                "volume",
+                "rm",
+                "--force",
+                token_volume,
+                runtime_token_volume,
+                audit_volume,
+                storage_volume,
+            )
             if trusted_ref:
                 self._remove("image", "rm", "--force", trusted_ref)
             self._remove("image", "rm", "--force", fixture_tag, controller_tag)
