@@ -3,8 +3,7 @@
 Nothing here talks to Docker; it only decides yes/no and returns a validated, structured
 request the caller (app.py) turns into Docker calls via manifests.py.
 
-This is the actual security boundary: even a fully compromised `shimpz-brain` container can only ever
-request what this module allows.
+This is the actual security boundary: even a fully compromised caller can only request what this module allows.
 """
 
 from __future__ import annotations
@@ -18,13 +17,6 @@ from pathlib import Path
 APP_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 FQDN_RE = re.compile(r"^[A-Za-z0-9.-]+$")
 PORT_MIN, PORT_MAX = 3100, 3999
-
-# The Claude-subscription OAuth code the panel forwards to `shimpz-login submit`. Claude's real code is
-# `<code>#<state>`, so the charset is "printable ASCII, no whitespace" — IDENTICAL to shimpz-login's own
-# SUBMIT_CODE_RE. The one real risk is whitespace/newline (a second stdin line typed into the brain's
-# interactive CLI), which this excludes; the code is validated HERE, then carried on private exec
-# stdin and written to a file, so a `;`/backtick/`$` in it is inert.
-LOGIN_CODE_RE = re.compile(r"^[!-~]{1,4096}$")
 
 # Every app runs one of these two operator-selected release images — never a client-supplied image
 # string. The defaults preserve local development; an immutable release override injects each exact
@@ -262,19 +254,6 @@ def validate_fqdn(fqdn: str) -> str:
     if not FQDN_RE.match(fqdn) or not fqdn:
         raise ValidationError(f"fqdn must be [A-Za-z0-9.-]: {fqdn!r}")
     return fqdn
-
-
-def validate_login_code(code: object) -> str:
-    """The Claude-subscription OAuth code sent to `shimpz-login submit` on private exec stdin.
-
-    Rejected (a 400 that NEVER reaches the container) unless it matches the same charset
-    shimpz-login's own `submit` enforces: printable ASCII, 1..4096 chars, with no whitespace. The
-    fixed exec command receives the code only over stdin; this gate remains defense in depth and is
-    kept identical on both sides. The refusal message NEVER echoes the code.
-    """
-    if not isinstance(code, str) or not LOGIN_CODE_RE.match(code):
-        raise ValidationError("login code must match ^[A-Za-z0-9._~=/+-]{1,4096}$ (no whitespace/newline)")
-    return code
 
 
 def validate_optional_port(port: object, field: str) -> int | None:

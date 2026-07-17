@@ -1,10 +1,9 @@
 #!/opt/venv/bin/python
 """shimpz-driver — the host-side control plane for per-app containers.
 
-SECURITY_ENGINEERING_PLAN.md sections 1/1.1: `shimpz-brain` never touches the Docker API; it calls
-this restricted, allowlisted, audited HTTP API instead. Every request is validated (see
-validate.py) BEFORE any Docker call — a compromised `shimpz-brain` can only ever ask for what the
-allowlist permits.
+The Brain and Assistants never touch the Docker API. The trusted control plane calls this restricted,
+allowlisted, audited HTTP API instead. Every request is validated (see validate.py) BEFORE any Docker
+call, so a compromised caller can only request the closed operations implemented here.
 
 Endpoints (all require `Authorization: Bearer <token>` — see token_store.py):
   POST   /v1/apps/<name>/deploy         {image_kind, entrypoint, port, env, persist}
@@ -16,10 +15,6 @@ Endpoints (all require `Authorization: Bearer <token>` — see token_store.py):
   POST   /v1/routes/apply               {fqdn, target, web_port, api_port, ws_port}
   DELETE /v1/routes/<fqdn>
   POST   /v1/stack/recreate             {service, env}   (C2: recreate a whitelisted stateless sidecar)
-  POST   /v1/brain/login/start                           (Claude-subscription OAuth: run shimpz-login in `shimpz-brain`)
-  GET    /v1/brain/login/url                             (read the bridge's authorize URL — not a secret)
-  POST   /v1/brain/login/code           {code}           (validated, then stdin to `shimpz-login submit`)
-  GET    /v1/brain/login/status                          (read-only `shimpz-login status --json`)
 """
 
 from __future__ import annotations
@@ -30,7 +25,6 @@ import json
 import os
 import re
 import secrets
-import socket
 import sys
 import threading
 import time
@@ -43,7 +37,6 @@ import audit
 import caddy_routes
 import docker
 import docker.errors
-import docker.utils.socket as docker_socket
 import egress_lock
 import manifests
 import token_store
@@ -569,115 +562,6 @@ def _recreate(body: dict) -> dict:
     return {"status": "recreated", "service": req.service, "health": detail, "trace_id": trace_id}
 
 
-# ── Claude-subscription OAuth (brain login) ──────────────────────────────────────────────────────
-# A DELIBERATELY tiny scope expansion: the driver otherwise never touches the brain. These four
-# endpoints only ever exec the FIXED binary `shimpz-login` (never a client-chosen command) in the FIXED
-# container `shimpz-brain` (+ SHIMPZ_SUFFIX, never a client-chosen container). Bearer-gated by the existing
-# `_authed`, audited on every op, and the pasted code is validated + sent only over the private Docker
-# exec stdin stream. It is never placed in argv, environment metadata, or logs.
-def _brain_container():
-    """The FIXED `shimpz-brain` brain container (+ SHIMPZ_SUFFIX) — the only container these endpoints ever address.
-
-    The name is hard-coded here, never taken from the request, so the brain-login capability can
-    reach the brain and nothing else. A missing brain means the stack isn't up → SERVICE_UNAVAILABLE,
-    not a 500.
-    """
-    name = "shimpz-brain" + os.environ.get("SHIMPZ_SUFFIX", "")
-    try:
-        return _docker.containers.get(name)
-    except docker.errors.NotFound as exc:
-        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "brain container not found") from exc
-
-
-def _close_exec_stream(stream) -> None:
-    """Close docker-py's owning HTTP response before its raw socket (Python 3.14 safe)."""
-    response = getattr(stream, "_response", None)
-    if response is not None:
-        response.close()
-    else:
-        stream.close()
-
-
-def _brain_exec_stdin(brain, command: list[str], payload: bytes) -> int | None:
-    """Run one fixed brain operation with credential material carried only over stdin."""
-    exec_id = _docker.api.exec_create(
-        brain.id,
-        command,
-        stdin=True,
-        stdout=True,
-        stderr=True,
-        user="abc",
-        environment={"HOME": "/config"},
-    )["Id"]
-    stream = _docker.api.exec_start(exec_id, socket=True)
-    try:
-        raw_socket = getattr(stream, "_sock", None)
-        if raw_socket is None:
-            raise OSError("Docker exec attach socket does not support a stdin half-close")
-        raw_socket.sendall(payload)
-        raw_socket.shutdown(socket.SHUT_WR)
-        for _stream_id, _chunk in docker_socket.frames_iter(stream, tty=False):
-            pass
-    finally:
-        _close_exec_stream(stream)
-    return _docker.api.exec_inspect(exec_id).get("ExitCode")
-
-
-def _brain_login_start() -> dict:
-    """Start the OAuth bridge in the brain: `shimpz-login run`, DETACHED (it writes url/result files itself).
-
-    Detached because the bridge is long-running (it blocks on the user pasting the code) and holds
-    the PKCE state for the whole flow — it must outlive this request.
-    """
-    brain = _brain_container()
-    brain.exec_run(["shimpz-login", "run"], detach=True, user="abc")
-    trace_id = audit.log("brain_login", "start", result="ok")
-    return {"started": True, "trace_id": trace_id}
-
-
-def _brain_login_url() -> dict:
-    """Read the OAuth authorize URL the bridge wrote to $SHIMPZ_HOME/login/url (a URL is not a secret)."""
-    brain = _brain_container()
-    rc, out = brain.exec_run(["sh", "-c", 'cat "${SHIMPZ_HOME:-/config/.shimpz}/login/url" 2>/dev/null'])
-    url = out.decode(errors="replace").strip() if rc == 0 else ""
-    audit.log("brain_login", "url", result="ok", has_url=bool(url))
-    return {"url": url} if url else {"pending": True}
-
-
-def _brain_login_code(body: dict) -> dict:
-    """Forward the pasted OAuth code to `shimpz-login submit` over private exec stdin.
-
-    Validation happens before any exec. The fixed command has no caller data in argv; the code is
-    delivered through Docker's attach socket and half-closed, so it cannot enter process metadata or
-    inject a second stdin line. The code is never logged.
-    """
-    code = validate.validate_login_code(body.get("code"))
-    brain = _brain_container()
-    rc = _brain_exec_stdin(brain, ["shimpz-login", "submit"], code.encode("ascii"))
-    ok = rc == 0
-    audit.log("brain_login", "code", result="ok" if ok else "error")
-    return {"ok": ok}
-
-
-def _brain_login_status() -> dict:
-    """Read-only Claude auth status from `shimpz-login status --json` → {loggedIn, email}.
-
-    Falls back to {"loggedIn": false} on a non-zero exit or unparseable output — a status read must
-    never itself become a 500.
-    """
-    brain = _brain_container()
-    rc, out = brain.exec_run(["shimpz-login", "status", "--json"])
-    result: dict = {"loggedIn": False}
-    if rc == 0:
-        try:
-            parsed = json.loads(out.decode(errors="replace") or "{}")
-            result = {"loggedIn": bool(parsed.get("loggedIn")), "email": parsed.get("email")}
-        except json.JSONDecodeError, ValueError:
-            result = {"loggedIn": False}
-    audit.log("brain_login", "status", result="ok", logged_in=result["loggedIn"])
-    return result
-
-
 def _lifecycle(name: str, op: str) -> dict:
     validate.validate_name(name)
     container = _get_or_none(name)
@@ -811,22 +695,6 @@ class Handler(BaseHTTPRequestHandler):
             audit.log(method.lower(), self.path, result="error", reason=str(exc))
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
-    def _brain_login_route(self, method: str, path: str) -> dict | None:
-        """The four Claude-subscription OAuth endpoints, or None if this isn't one of them.
-
-        Kept as its own matcher so _route's branch count stays under the complexity cap — the exec
-        scope (fixed `shimpz-login`, fixed `shimpz-brain` container) lives entirely in the _brain_login_* handlers.
-        """
-        if method == "POST" and path == "/v1/brain/login/start":
-            return _brain_login_start()
-        if method == "GET" and path == "/v1/brain/login/url":
-            return _brain_login_url()
-        if method == "POST" and path == "/v1/brain/login/code":
-            return _brain_login_code(self._body())
-        if method == "GET" and path == "/v1/brain/login/status":
-            return _brain_login_status()
-        return None
-
     def _route(self, method: str) -> None:
         path = self.path.split("?", 1)[0]
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
@@ -836,10 +704,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         if method == "POST" and path == "/v1/stack/recreate":
             self._send_json(HTTPStatus.OK, _recreate(self._body()))
-            return
-        brain = self._brain_login_route(method, path)  # the 4 Claude-OAuth endpoints, kept out of the branch count
-        if brain is not None:
-            self._send_json(HTTPStatus.OK, brain)
             return
         if method == "POST" and (m := _APP_ROUTE.match(path)) and m.group(2) in ("stop", "start", "restart"):
             self._send_json(HTTPStatus.OK, _lifecycle(m.group(1), m.group(2)))
