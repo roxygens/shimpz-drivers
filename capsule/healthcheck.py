@@ -27,8 +27,10 @@ DOCKER_SOCKET = os.environ.get("DOCKER_HOST_SOCKET", "/var/run/docker.sock")
 REQUIRED_RUNTIME = "runsc"
 REQUIRED_RUNTIME_PATH = "/usr/local/bin/runsc"
 REQUIRED_BRAIN_IMAGES = {
-    "claude-code": os.environ.get("SHIMPZ_CAPSULE_IMAGE", "shimpz-brain:shimpz-local"),
-    "codex": os.environ.get("SHIMPZ_CODEX_CAPSULE_IMAGE", "shimpz-brain-codex:shimpz-local"),
+    "runtime": os.environ.get(
+        "SHIMPZ_CAPSULE_IMAGE",
+        "registry.k8s.io/pause:3.10.1@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c",
+    ),
 }
 REQUIRED_IMAGES = tuple(REQUIRED_BRAIN_IMAGES.values())
 LISTEN_PORT = int(os.environ.get("SHIMPZ_CAPSULEDRIVER_PORT", "7077"))
@@ -197,22 +199,6 @@ def _load_network_members(network: dict, inspections: dict[str, dict]) -> bool:
     return True
 
 
-def _volumes_ready(cids: set[str]) -> bool:
-    """Require the exact option-free local volumes mounted by every Capsule Brain."""
-    for cid in cids:
-        for kind in (network_policy.CONFIG_VOLUME_KIND, network_policy.WORKSPACE_VOLUME_KIND):
-            name = network_policy.volume_name(cid, kind)
-            encoded = urllib.parse.quote(name, safe="")
-            status, metadata = _docker_json(f"/volumes/{encoded}")
-            if (
-                status != 200
-                or not isinstance(metadata, dict)
-                or not network_policy.volume_identity_valid(metadata, cid, kind)
-            ):
-                return False
-    return True
-
-
 def network_topology_ready() -> bool:
     """Require exact workload posture and two-plane membership for every Capsule."""
     status, summaries = _docker_json("/containers/json?all=1")
@@ -222,7 +208,7 @@ def network_topology_ready() -> bool:
     if inspected is None:
         return False
     inspections, cids, brains_by_cid, running_brains, workloads = inspected
-    if any(brains_by_cid.get(cid) != 1 for cid in cids) or not _volumes_ready(cids):
+    if any(brains_by_cid.get(cid) != 1 for cid in cids):
         return False
 
     for cid in cids:
