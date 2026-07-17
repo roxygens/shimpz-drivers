@@ -94,7 +94,7 @@ APPS: dict[str, AppSpec] = {
             powers={
                 "hello": PowerSpec(
                     method="POST",
-                    path="/v1/operations/hello",
+                    path="/v1/powers/hello",
                     summary="Return a friendly greeting for an optional name of 1 to 80 characters.",
                     input_schema={
                         "type": "object",

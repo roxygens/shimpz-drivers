@@ -497,14 +497,14 @@ class DockerFlowTests(unittest.TestCase):
                 {"name": "Captain"},
             )
             self.assertEqual(invoked["result"], {"message": "Hello, Captain. Your Capsule is alive."})
-            unknown_operation, _ = self._api(
+            unknown_power, _ = self._api(
                 port,
                 token,
                 "POST",
                 "/v1/capsules/demo_capsule/assistants/hello-pulse/powers/shell",
                 {},
             )
-            self.assertEqual(unknown_operation, 404)
+            self.assertEqual(unknown_power, 404)
 
             _, removed = self._api(
                 port,

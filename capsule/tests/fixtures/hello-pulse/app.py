@@ -30,7 +30,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self) -> None:
-        if self.path != "/v1/operations/hello":
+        if self.path != "/v1/powers/hello":
             self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
         try:

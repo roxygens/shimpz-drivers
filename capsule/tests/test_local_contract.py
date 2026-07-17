@@ -58,6 +58,7 @@ class LocalContractTests(unittest.TestCase):
         registry = self._registry(digest)
         self.assertEqual(registry["hello-pulse"].image, digest)
         self.assertEqual(set(registry["hello-pulse"].powers), {"hello"})
+        self.assertEqual(registry["hello-pulse"].powers["hello"].path, "/v1/powers/hello")
 
         invalid = (
             "ghcr.io/roxygens/shimpz-space:latest",

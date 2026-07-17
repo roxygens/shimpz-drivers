@@ -73,7 +73,7 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
         powers={
             "hello": PowerSpec(
                 method="POST",
-                path="/v1/operations/hello",
+                path="/v1/powers/hello",
                 summary="Return a friendly greeting for an optional name.",
                 input_schema={
                     "type": "object",

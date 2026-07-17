@@ -59,6 +59,10 @@ All routes require the bearer token, including health and read routes.
 | `DELETE` | `/v1/capsules/{capsule}/files/{opaque_id}` | none | deletes one object from that Capsule only |
 | `DELETE` | `/v1/space` | none | idempotent installer reset for this `SPACE_ID` |
 
+The controller resolves that public invocation through its reviewed `PowerSpec`. Inside the Assistant container, the
+fixed adapter accepts only the declared `POST /v1/powers/<power-id>` route and its health probe; neither callers nor
+manifests can supply another method or path.
+
 `DELETE /v1/space` accepts no resource IDs. It acquires every Capsule mutation lock, selects only
 resources with the full managed/profile/`SPACE_ID`/kind label set, verifies their deterministic names,
 removes Assistant containers first, every safely shaped directory in the dedicated storage volume second,

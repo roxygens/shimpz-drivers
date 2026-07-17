@@ -76,7 +76,7 @@ class MarketplaceImageTests(unittest.TestCase):
         )
         self.assertIsNotNone(spec.assistant)
         self.assertEqual(set(spec.assistant.powers), {"hello"})
-        self.assertEqual(spec.assistant.powers["hello"].path, "/v1/operations/hello")
+        self.assertEqual(spec.assistant.powers["hello"].path, "/v1/powers/hello")
 
     def test_hello_power_exposes_the_runtime_schema_and_approval_policy(self) -> None:
         power = marketplace.APPS["hello-pulse"].assistant.powers["hello"]
