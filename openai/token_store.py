@@ -1,6 +1,7 @@
-"""The local, single-scope bearer token `shimpz-brain` uses to call this driver.
+"""The local, single-scope bearer token protecting this private driver.
 
-Generated once on first boot, on a volume shared only between `shimpz-brain` and this sidecar; never stored in .env.
+Generated once on first boot and stored only in the driver token volume, never in ``.env``. No
+Assistant Power currently receives it.
 """
 
 from __future__ import annotations

@@ -2,13 +2,10 @@
 
 A thin wrapper over the `openai` SDK, called ONLY by app.py's already-allowlisted (validate.py)
 endpoint handlers. Never exposes a generic "any OpenAI call" passthrough — every function here is one
-SPECIFIC operation (image / transcribe / speech) with a fixed shape. Same reasoning as cf_client.py:
-the credential lives here, the brain only ever asks for one of these named operations, so a
-prompt-injected brain can't exfiltrate the raw key or spend it on arbitrary endpoints (fine-tuning,
-other models, the Assistants API, …).
-
-SECURITY_ENGINEERING_PLAN.md item 7: `shimpz-brain` no longer holds OPENAI_API_KEY/VOICE_TOOLS_OPENAI_KEY at
-all — imagegen and the gateway's voice (STT/TTS) call this sidecar instead.
+SPECIFIC operation (image / transcribe / speech) with a fixed shape. The credential stays inside
+this module and cannot be spent on arbitrary endpoints such as fine-tuning or the Assistants API.
+No current Assistant Power calls these functions; they remain private building blocks for a future
+Controller integration.
 """
 
 from __future__ import annotations

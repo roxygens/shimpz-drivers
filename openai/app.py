@@ -1,15 +1,14 @@
 #!/usr/local/bin/python3
-"""openai-driver — the ONLY container that holds the OpenAI API key.
+"""OpenAI media credential boundary with three audited operations.
 
-SECURITY_ENGINEERING_PLAN.md item 7: `shimpz-brain` (the brain) never sees OPENAI_API_KEY/VOICE_TOOLS_OPENAI_KEY
-anymore; imagegen and the gateway's voice (STT/TTS) call this restricted, allowlisted, audited API
-instead. Every endpoint is one SPECIFIC operation (image / transcribe / speech) with an allowlisted
-model — never a generic OpenAI passthrough. Before this split a prompt-injected brain could exfiltrate
-the raw key or spend it on any endpoint/model; now it can only ever ask for one of these three.
+This private sidecar implements image generation, audio transcription, and speech synthesis with
+closed request shapes and allowlisted models. These operations are not yet exposed as Assistant
+Powers, so no Assistant currently consumes this API. It deliberately provides no generic OpenAI
+passthrough.
 
 Mandatory controls (same contract as the other sidecars):
   - Auth fail-closed on EVERY endpoint: `Authorization: Bearer <token>` required; no anonymous route.
-  - No CORS, ever: for `shimpz-brain`'s own imagegen/gateway, never a page in Chrome.
+  - No CORS, ever: this API is reserved for authenticated internal control-plane callers.
   - No execution endpoint: only the three named OpenAI operations, each with an allowlisted model.
   - Redacted audit: only model/size/duration/byte counts — never prompts, transcripts, audio/image
     bytes, or the key.

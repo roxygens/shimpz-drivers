@@ -215,8 +215,8 @@ def resolve_run_dir(workspace_projects_root: Path, app_name: str) -> RunLocation
 
     A bare name ("laudoctor") is the project's WEB tier, working dir = the project root; a
     "<project>-backend" or "<project>-ws" name is a role-specific process of that SAME project,
-    working dir = <project>/backend (the ws gateway also lives under backend/, per CLAUDE.md's
-    app/ws.py convention). This is NEVER guessed from which subdirectories happen to exist — a
+    working dir = <project>/backend (the legacy workspace layout also placed the WebSocket gateway
+    at backend/app/ws.py). This is NEVER guessed from which subdirectories happen to exist — a
     bare-named web app's project root routinely ALSO has its own backend/ subdirectory, so "does
     backend/ exist" is not a safe signal for which tier a bare name means (confirmed against the
     real live `laudoctor` + `laudoctor-backend` apps, which share one project dir this way).

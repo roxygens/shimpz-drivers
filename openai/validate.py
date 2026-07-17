@@ -2,13 +2,13 @@
 
 Nothing here touches the OpenAI SDK; it only decides yes/no and returns validated values the caller
 (app.py) turns into oa_client.py calls. Same shape as every other driver's validate.py — the
-actual security boundary. Models are an explicit allowlist so a compromised brain can't redirect
+actual security boundary. Models are an explicit allowlist so an authenticated caller cannot redirect
 spend onto an arbitrary (e.g. far more expensive) model through these endpoints.
 """
 
 from __future__ import annotations
 
-# Exactly the models imagegen + the gateway use today — an allowlist, not a passthrough.
+# Exactly the models admitted by the three audited media operations — an allowlist, not a passthrough.
 IMAGE_MODELS = frozenset({"gpt-image-2", "gpt-image-1"})
 STT_MODELS = frozenset({"gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"})
 TTS_MODELS = frozenset({"gpt-4o-mini-tts", "tts-1", "tts-1-hd"})
