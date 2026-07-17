@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 # check=skip=SecretsUsedInArgOrEnv ; HELLO_PULSE_IMAGE is a public OCI digest, not a credential
 #
-# Separate local-only Capsule controller. It deliberately does not copy or import the hosted
-# app.py/runsc/PG/R2/Brain implementation.
+# Separate local-only Capsule controller. It does not copy the hosted app.py/runsc/PG/R2 control
+# plane; only the narrow LangGraph runtime protocol and Controller-owned Power loop are shared.
 FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
 ARG SOURCE_DATE_EPOCH=0
 
@@ -37,7 +37,7 @@ RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-install-project --no-
     rm -rf /root/.cache/uv
 
 COPY local_app.py local_audit.py local_registry.py local_token_store.py local_healthcheck.py capsule_storage.py \
-    inference_config.py ./
+    assistant_chat.py brain_runtime_client.py chat_orchestrator.py inference_config.py ./
 
 # A normal source build remains possible, but cannot start until release automation supplies the
 # published Hello Pulse digest with `--build-arg HELLO_PULSE_IMAGE=repo@sha256:...`.

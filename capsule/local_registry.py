@@ -10,6 +10,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 REGISTRY_PATH = Path("/etc/shimpz/local-assistants.json")
 _DIGEST_REF = re.compile(
@@ -27,6 +28,9 @@ class RegistryError(RuntimeError):
 class PowerSpec:
     method: str
     path: str
+    summary: str
+    input_schema: dict[str, object]
+    approval: Literal["none", "once", "each-run"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +39,7 @@ class AssistantSpec:
     image: str
     rpc_command: str
     health_path: str
+    rules: str
     powers: dict[str, PowerSpec]
 
 
@@ -64,7 +69,20 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
         image=_digest_ref(raw["hello_pulse_image"]),
         rpc_command="/usr/local/bin/shimpz-assistant-rpc",
         health_path="/healthz",
-        powers={"hello": PowerSpec(method="POST", path="/v1/operations/hello")},
+        rules="Return a friendly greeting by using only the declared hello Power.",
+        powers={
+            "hello": PowerSpec(
+                method="POST",
+                path="/v1/operations/hello",
+                summary="Return a friendly greeting for an optional name.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 80}},
+                    "additionalProperties": False,
+                },
+                approval="none",
+            )
+        },
     )
     return {hello.assistant_id: hello}
 

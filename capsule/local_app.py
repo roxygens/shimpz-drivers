@@ -14,19 +14,23 @@ import hmac
 import json
 import os
 import re
+import secrets
 import select
 import socket
 import struct
 import sys
 import threading
 import time
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import assistant_chat
+import brain_runtime_client
 import capsule_storage
+import chat_orchestrator
 import docker
 import inference_config
 import local_audit
@@ -59,6 +63,7 @@ MAX_CAPSULE_ID_LENGTH = 40
 MAX_ASSISTANT_ID_LENGTH = 48
 MAX_SPACE_ID_LENGTH = 48
 MAX_BODY_BYTES = 16 * 1024
+MAX_CHAT_BODY_BYTES = 24 * 1024
 MAX_RESPONSE_BYTES = 32 * 1024
 MAX_API_RESPONSE_BYTES = 128 * 1024
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -67,6 +72,10 @@ MAX_PATH_BYTES = 512
 REQUEST_TIMEOUT_SECONDS = 10
 RPC_TIMEOUT_SECONDS = 8
 HEALTH_TIMEOUT_SECONDS = 15
+MAX_CHAT_MESSAGE_CHARS = 16_000
+MAX_CHAT_FILES = 8
+MIN_API_KEY_BYTES = 16
+MAX_API_KEY_BYTES = 8 * 1024
 
 ASSISTANT_UID = "10001:10001"
 ASSISTANT_MEMORY = 128 * 1024 * 1024
@@ -111,6 +120,44 @@ def validate_capsule_name(value: object) -> str:
     return value
 
 
+def validate_assistant_id(value: object) -> str:
+    if not isinstance(value, str) or len(value) > MAX_ASSISTANT_ID_LENGTH or _ASSISTANT_ID.fullmatch(value) is None:
+        raise ApiProblem(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "invalid Assistant id",
+            code="invalid-assistant-id",
+        )
+    return value
+
+
+def validate_model_credential_headers(
+    providers: list[str],
+    api_keys: list[str],
+) -> tuple[str, str]:
+    """Validate the private Admin hand-off without copying a secret into an error."""
+    if len(providers) != 1 or providers[0] not in inference_config.PROVIDERS or len(api_keys) != 1:
+        raise ApiProblem(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "one private model credential is required",
+            code="invalid-model-credential",
+        )
+    api_key = api_keys[0]
+    if not isinstance(api_key, str) or api_key.strip() != api_key or not api_key.isascii():
+        raise ApiProblem(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "private model credential is invalid",
+            code="invalid-model-credential",
+        )
+    encoded = api_key.encode("ascii")
+    if not MIN_API_KEY_BYTES <= len(encoded) <= MAX_API_KEY_BYTES or any(not 33 <= byte <= 126 for byte in encoded):
+        raise ApiProblem(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "private model credential is invalid",
+            code="invalid-model-credential",
+        )
+    return providers[0], api_key
+
+
 def validate_space_id(value: str) -> str:
     if len(value) > MAX_SPACE_ID_LENGTH or _SPACE_ID.fullmatch(value) is None:
         raise RuntimeError("SHIMPZ_SPACE_ID must be a lowercase, dash-separated identifier")
@@ -136,14 +183,21 @@ class LocalController:
         registry: dict[str, AssistantSpec],
         storage: capsule_storage.CapsuleStorage,
         inference_store: inference_config.InferenceConfigStore | None = None,
+        brain_runtime: brain_runtime_client.BrainRuntimeClient | None = None,
     ) -> None:
         self.client = client
         self.space_id = validate_space_id(space_id)
         self.registry = registry
         self.storage = storage
         self.inference_store = inference_store or inference_config.InferenceConfigStore(INFERENCE_ROOT)
+        self.brain_runtime = brain_runtime or brain_runtime_client.BrainRuntimeClient()
         self._blocked_power_workloads: set[str] = set()
         self._locks = tuple(threading.RLock() for _ in range(64))
+        self._active_chat_guard = threading.Lock()
+        self._chat_locks: dict[str, threading.Lock] = {}
+        self._active_chat_tokens: dict[str, str] = {}
+        self._active_power_containers: dict[str, tuple[str, object]] = {}
+        self._cancelled_chat_tokens: set[str] = set()
         daemon_info = self._require_default_seccomp()
         self.cpuset_cpus = half_cpu_set(daemon_info.get("NCPU"))
 
@@ -160,6 +214,46 @@ class LocalController:
     def _lock(self, capsule_id: str) -> threading.RLock:
         slot = hashlib.sha256(capsule_id.encode("ascii")).digest()[0] % len(self._locks)
         return self._locks[slot]
+
+    def _chat_lock(self, capsule_id: str) -> threading.Lock:
+        with self._active_chat_guard:
+            return self._chat_locks.setdefault(capsule_id, threading.Lock())
+
+    def _chat_cancelled(self, token: str) -> bool:
+        with self._active_chat_guard:
+            return token in self._cancelled_chat_tokens
+
+    def _commit_chat_terminal(self, capsule_id: str, token: str) -> bool:
+        """Commit a reply only when Stop did not win this Controller-owned turn."""
+        with self._active_chat_guard:
+            if token in self._cancelled_chat_tokens or self._active_chat_tokens.get(capsule_id) != token:
+                return False
+            self._active_chat_tokens.pop(capsule_id, None)
+            return True
+
+    @contextmanager
+    def _exclusive_chat_turn(self, capsule_id: str):
+        lock = self._chat_lock(capsule_id)
+        if not lock.acquire(blocking=False):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Capsule already has an active chat turn",
+                code="chat-active",
+            )
+        token = secrets.token_hex(16)
+        with self._active_chat_guard:
+            self._active_chat_tokens[capsule_id] = token
+        try:
+            yield token
+        finally:
+            with self._active_chat_guard:
+                if self._active_chat_tokens.get(capsule_id) == token:
+                    self._active_chat_tokens.pop(capsule_id, None)
+                active = self._active_power_containers.get(capsule_id)
+                if active is not None and active[0] == token:
+                    self._active_power_containers.pop(capsule_id, None)
+                self._cancelled_chat_tokens.discard(token)
+            lock.release()
 
     def _base_labels(self, capsule_id: str, kind: str) -> dict[str, str]:
         return {
@@ -356,6 +450,238 @@ class LocalController:
             except inference_config.InferenceConfigError as exc:
                 self._raise_inference_problem(exc)
         return {"capsule": capsule_id, "provider": config.provider, "model": config.model}
+
+    def _chat_file_metadata(self, capsule_id: str, file_ids: object) -> list[dict[str, object]]:
+        if not isinstance(file_ids, list) or len(file_ids) > MAX_CHAT_FILES:
+            raise ApiProblem(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                f"files must contain at most {MAX_CHAT_FILES} opaque ids",
+                code="invalid-files",
+            )
+        try:
+            return self.storage.metadata(capsule_id, file_ids)
+        except capsule_storage.StorageNotFoundError as exc:
+            raise ApiProblem(HTTPStatus.NOT_FOUND, "selected file not found", code="file-not-found") from exc
+        except capsule_storage.StorageInputError as exc:
+            raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc), code="invalid-files") from exc
+        except capsule_storage.StorageError as exc:
+            self._raise_storage_problem(exc)
+
+    def _chat_setup(
+        self,
+        capsule_id: str,
+        assistant_id: str,
+        file_ids: object,
+        provider: str,
+    ) -> tuple[AssistantSpec, list[dict[str, object]], inference_config.InferenceConfig]:
+        spec = self._resolve(assistant_id)
+        with self._lock(capsule_id):
+            network = self._network(capsule_id)
+            container = self._assistant_container(capsule_id, assistant_id)
+            self._validate_container(container, capsule_id, spec, network.name)
+            if container.id in self._blocked_power_workloads:
+                raise ApiProblem(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "Assistant Power execution is blocked until this Assistant is reinstalled",
+                    code="assistant-power-blocked",
+                )
+            container.reload()
+            if container.status != "running":
+                raise ApiProblem(HTTPStatus.CONFLICT, "Assistant is not running", code="assistant-not-running")
+            files = self._chat_file_metadata(capsule_id, file_ids)
+            try:
+                config = self.inference_store.load(capsule_id)
+            except inference_config.InferenceConfigError as exc:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Capsule model provider is not configured",
+                    code="inference-not-configured",
+                ) from exc
+            if config.provider != provider:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "configured model provider changed; retry",
+                    code="inference-provider-mismatch",
+                )
+        return spec, files, config
+
+    def _invoke_chat_power(
+        self,
+        capsule_id: str,
+        token: str,
+        assistant_id: str,
+        power: str,
+        payload: object,
+    ) -> object:
+        with self._lock(capsule_id):
+            spec = self._resolve(assistant_id)
+            network = self._network(capsule_id)
+            container = self._assistant_container(capsule_id, assistant_id)
+            self._validate_container(container, capsule_id, spec, network.name)
+            with self._active_chat_guard:
+                if (
+                    self._active_chat_tokens.get(capsule_id) != token
+                    or token in self._cancelled_chat_tokens
+                    or capsule_id in self._active_power_containers
+                ):
+                    raise chat_orchestrator.ChatStoppedError("chat turn stopped")
+                self._active_power_containers[capsule_id] = (token, container)
+            try:
+                invocation = self.invoke(capsule_id, assistant_id, power, payload)
+            except ApiProblem:
+                if self._chat_cancelled(token):
+                    raise chat_orchestrator.ChatStoppedError("chat turn stopped") from None
+                raise
+            finally:
+                with self._active_chat_guard:
+                    active = self._active_power_containers.get(capsule_id)
+                    if active is not None and active[0] == token:
+                        self._active_power_containers.pop(capsule_id, None)
+            if self._chat_cancelled(token):
+                raise chat_orchestrator.ChatStoppedError("chat turn stopped")
+        return invocation["result"]
+
+    def chat(
+        self,
+        capsule_id: str,
+        body: object,
+        provider: str,
+        api_key: str,
+    ) -> dict[str, object]:
+        capsule_id = validate_capsule_id(capsule_id)
+        if not isinstance(body, dict) or set(body) != {"assistant", "message", "files"}:
+            raise ApiProblem(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "chat requires only assistant, message, and files",
+                code="invalid-body",
+            )
+        assistant_id = validate_assistant_id(body["assistant"])
+        message = body["message"]
+        if (
+            not isinstance(message, str)
+            or not message.strip()
+            or len(message) > MAX_CHAT_MESSAGE_CHARS
+            or "\0" in message
+        ):
+            raise ApiProblem(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "message must be non-empty and within its size limit",
+                code="invalid-message",
+            )
+        with self._exclusive_chat_turn(capsule_id) as token:
+            spec, files, config = self._chat_setup(capsule_id, assistant_id, body["files"], provider)
+            context = brain_runtime_client.RuntimeContext(
+                thread_id=f"local:{self.space_id}:{capsule_id}:{assistant_id}:default",
+                assistant_id=assistant_id,
+                rules=spec.rules,
+                powers=tuple(
+                    brain_runtime_client.RuntimePower(
+                        id=power_id,
+                        summary=power.summary,
+                        input_schema=power.input_schema,
+                        approval=power.approval,
+                    )
+                    for power_id, power in sorted(spec.powers.items())
+                ),
+                provider=config.provider,
+                model=config.model,
+                api_key=api_key,
+            )
+            prompt = assistant_chat.build_prompt(
+                assistant_id,
+                spec.rules,
+                {power_id: power.summary for power_id, power in spec.powers.items()},
+                message,
+                files,
+            )
+            last_result: object | None = None
+
+            def invoke_power(power: str, payload) -> object:
+                nonlocal last_result
+                last_result = self._invoke_chat_power(
+                    capsule_id,
+                    token,
+                    assistant_id,
+                    power,
+                    payload,
+                )
+                return last_result
+
+            try:
+                outcome = chat_orchestrator.run(
+                    self.brain_runtime,
+                    context,
+                    prompt,
+                    invoke_power,
+                    cancelled=lambda: self._chat_cancelled(token),
+                )
+            except chat_orchestrator.ChatStoppedError as exc:
+                raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped") from exc
+            except chat_orchestrator.ApprovalRequiredError as exc:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Assistant Power requires approval",
+                    code="power-approval-required",
+                ) from exc
+            except chat_orchestrator.ChatOrchestrationError as exc:
+                raise ApiProblem(
+                    HTTPStatus.BAD_GATEWAY,
+                    "Brain could not complete the Assistant turn",
+                    code="brain-runtime-failed",
+                ) from exc
+            except brain_runtime_client.BrainRuntimeError as exc:
+                raise ApiProblem(
+                    HTTPStatus.BAD_GATEWAY,
+                    "Brain runtime is unavailable",
+                    code="brain-runtime-failed",
+                ) from exc
+
+            # Re-prove the Assistant identity before committing a model result. Stop and concurrent
+            # uninstall/destroy therefore win over a stale terminal response.
+            _terminal_spec, _terminal_files, terminal_config = self._chat_setup(
+                capsule_id,
+                assistant_id,
+                body["files"],
+                provider,
+            )
+            if terminal_config != config:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "configured model changed; retry",
+                    code="inference-config-changed",
+                )
+            if not self._commit_chat_terminal(capsule_id, token):
+                raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
+            response: dict[str, object] = {
+                "capsule": capsule_id,
+                "assistant": assistant_id,
+                "reply": outcome.reply,
+                "power": outcome.powers[-1] if outcome.powers else None,
+            }
+            if last_result is not None:
+                response["result"] = last_result
+            return response
+
+    def stop_chat(self, capsule_id: str) -> dict[str, object]:
+        capsule_id = validate_capsule_id(capsule_id)
+        self._network(capsule_id)
+        power_stopped = False
+        with self._active_chat_guard:
+            token = self._active_chat_tokens.get(capsule_id)
+            if token is not None:
+                self._cancelled_chat_tokens.add(token)
+            active = self._active_power_containers.get(capsule_id)
+            if token is not None and active is not None and active[0] == token:
+                self._fail_stop_power(active[1])
+                power_stopped = True
+        accepted = token is not None
+        return {
+            "capsule": capsule_id,
+            "requested": accepted,
+            "accepted": accepted,
+            "confirmed": power_stopped,
+            "forced_restart": False,
+        }
 
     def put_file(
         self,
@@ -1200,6 +1526,12 @@ class Handler(BaseHTTPRequestHandler):
             )
         return body["assistant"]
 
+    def _model_credential_headers(self) -> tuple[str, str]:
+        return validate_model_credential_headers(
+            self.headers.get_all("X-Shimpz-Model-Provider", failobj=[]),
+            self.headers.get_all("X-Shimpz-Model-Api-Key", failobj=[]),
+        )
+
     def _reject_body(self) -> None:
         if self.headers.get_all("Transfer-Encoding", failobj=[]):
             raise ApiProblem(HTTPStatus.BAD_REQUEST, "this request cannot have a body", code="unexpected-body")
@@ -1295,6 +1627,61 @@ class Handler(BaseHTTPRequestHandler):
             )
         return None
 
+    def _chat_route(self, parts: list[str]) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
+        if len(parts) not in {4, 5} or parts[:2] != ["v1", "capsules"] or parts[3] != "chat":
+            return None
+        capsule_id = validate_capsule_id(parts[2])
+        if len(parts) == 4 and self.command == "POST":
+            provider, api_key = self._model_credential_headers()
+            body = self._body(max_bytes=MAX_CHAT_BODY_BYTES)
+            assistant = body.get("assistant") if isinstance(body.get("assistant"), str) else None
+            return (
+                HTTPStatus.OK,
+                self.server.controller.chat(capsule_id, body, provider, api_key),
+                "chat",
+                capsule_id,
+                assistant,
+            )
+        if len(parts) == 5 and parts[4] == "stop" and self.command == "POST":
+            if self._body() != {}:
+                raise ApiProblem(
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    "chat stop requires an empty object",
+                    code="invalid-body",
+                )
+            return (
+                HTTPStatus.OK,
+                self.server.controller.stop_chat(capsule_id),
+                "chat-stop",
+                capsule_id,
+                None,
+            )
+        return None
+
+    def _capsule_route(
+        self, parts: list[str]
+    ) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
+        if len(parts) == 4 and parts[:2] == ["v1", "capsules"] and parts[3] == "create":
+            capsule_id = validate_capsule_id(parts[2])
+            if self.command == "POST":
+                return (
+                    HTTPStatus.OK,
+                    self.server.controller.create_capsule(capsule_id, self._capsule_create_body()),
+                    "capsule-create",
+                    capsule_id,
+                    None,
+                )
+        if len(parts) == 3 and parts[:2] == ["v1", "capsules"] and self.command == "DELETE":
+            capsule_id = validate_capsule_id(parts[2])
+            return (
+                HTTPStatus.OK,
+                self.server.controller.destroy_capsule(capsule_id),
+                "capsule-destroy",
+                capsule_id,
+                None,
+            )
+        return None
+
     def _route(self) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None]:
         parts = self._path_parts()
         controller = self.server.controller
@@ -1310,21 +1697,12 @@ class Handler(BaseHTTPRequestHandler):
         inference_route = self._inference_route(parts)
         if inference_route is not None:
             return inference_route
-        if len(parts) == 4 and parts[:2] == ["v1", "capsules"] and parts[3] == "create":
-            capsule_id = validate_capsule_id(parts[2])
-            if self.command == "POST":
-                name = self._capsule_create_body()
-                return (
-                    HTTPStatus.OK,
-                    controller.create_capsule(capsule_id, name),
-                    "capsule-create",
-                    capsule_id,
-                    None,
-                )
-        if len(parts) == 3 and parts[:2] == ["v1", "capsules"]:
-            capsule_id = validate_capsule_id(parts[2])
-            if self.command == "DELETE":
-                return HTTPStatus.OK, controller.destroy_capsule(capsule_id), "capsule-destroy", capsule_id, None
+        chat_route = self._chat_route(parts)
+        if chat_route is not None:
+            return chat_route
+        capsule_route = self._capsule_route(parts)
+        if capsule_route is not None:
+            return capsule_route
         if len(parts) == 4 and parts[:2] == ["v1", "capsules"] and parts[3] == "assistants":
             capsule_id = validate_capsule_id(parts[2])
             if self.command == "GET":
