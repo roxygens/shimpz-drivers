@@ -172,6 +172,7 @@ class DockerFlowTests(unittest.TestCase):
         runtime_token_volume = f"shimpz-local-runtime-token-{unique}"
         audit_volume = f"shimpz-local-audit-{unique}"
         storage_volume = f"shimpz-local-storage-{unique}"
+        inference_volume = f"shimpz-local-inference-{unique}"
         space_id = f"test-space-{unique}"
         foreign_network = f"shimpz-foreign-{unique}"
         trusted_ref = ""
@@ -262,6 +263,7 @@ class DockerFlowTests(unittest.TestCase):
             self._run("volume", "create", runtime_token_volume)
             self._run("volume", "create", audit_volume)
             self._run("volume", "create", storage_volume)
+            self._run("volume", "create", inference_volume)
             socket_gid = str(Path("/var/run/docker.sock").stat().st_gid)
             self._run(
                 "run",
@@ -287,6 +289,8 @@ class DockerFlowTests(unittest.TestCase):
                 "/tmp:rw,noexec,nosuid,nodev,size=32m",
                 "--group-add",
                 socket_gid,
+                "--group-add",
+                "10016",
                 "--volume",
                 "/var/run/docker.sock:/var/run/docker.sock",
                 "--volume",
@@ -297,6 +301,8 @@ class DockerFlowTests(unittest.TestCase):
                 f"{audit_volume}:/var/log/shimpz-local",
                 "--volume",
                 f"{storage_volume}:/var/lib/shimpz-local/storage",
+                "--volume",
+                f"{inference_volume}:/var/lib/shimpz-local/inference",
                 "--env",
                 f"SHIMPZ_SPACE_ID={space_id}",
                 "--publish",
@@ -319,7 +325,8 @@ class DockerFlowTests(unittest.TestCase):
                 "/v1/capsules/demo_capsule/create",
                 {"name": "Demo Capsule"},
             )
-            self.assertEqual((status, created["created"]), (200, True))
+            self.assertEqual(status, 200, created)
+            self.assertTrue(created.get("created"), created)
             _, created_again = self._api(
                 port,
                 token,
@@ -664,6 +671,7 @@ class DockerFlowTests(unittest.TestCase):
                 runtime_token_volume,
                 audit_volume,
                 storage_volume,
+                inference_volume,
             )
             if trusted_ref:
                 self._remove("image", "rm", "--force", trusted_ref)
