@@ -323,7 +323,6 @@ class R2BridgeTests(unittest.TestCase):
             _patched(
                 _owned_teardown_brain=lambda *_args: (True, brain),
                 _stop_teardown_brain=stop,
-                _purge_teardown_credentials=lambda _brain: events.append("artifact-remove") or True,
             ),
             mock.patch.object(app.cleanup_state, "begin", return_value=record),
             mock.patch.object(app.cleanup_state, "finish") as finish,

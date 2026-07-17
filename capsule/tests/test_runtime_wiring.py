@@ -33,6 +33,12 @@ def _calls(function: ast.FunctionDef) -> set[str]:
 
 
 class RuntimeWiringTests(unittest.TestCase):
+    def test_controller_contains_no_provider_cli_or_oauth_bridge(self) -> None:
+        source = APP.read_text(encoding="utf-8").lower()
+        for legacy in ("claude", "codex", "oauth", "shimpz-chat-exec", "shimpz-chat-stop"):
+            with self.subTest(legacy=legacy):
+                self.assertNotIn(legacy, source)
+
     def test_chat_uses_runtime_and_controller_owned_power_execution(self) -> None:
         calls = _calls(_function("_chat_in_turn"))
         self.assertIn("chat_orchestrator.run", calls)
