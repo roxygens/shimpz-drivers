@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 
 import capsule_storage
 import docker
+import inference_config
 import local_audit
 import local_token_store
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
@@ -73,6 +74,7 @@ ASSISTANT_NANO_CPUS = 250_000_000
 ASSISTANT_PIDS = 64
 STATELESS_RECOVERY_ASSISTANTS = frozenset({"hello-pulse"})
 STORAGE_ROOT = Path("/var/lib/shimpz-local/storage")
+INFERENCE_ROOT = Path("/var/lib/shimpz-local/inference")
 _FILE_UPLOAD_SLOTS = threading.BoundedSemaphore(1)
 
 
@@ -133,11 +135,13 @@ class LocalController:
         space_id: str,
         registry: dict[str, AssistantSpec],
         storage: capsule_storage.CapsuleStorage,
+        inference_store: inference_config.InferenceConfigStore | None = None,
     ) -> None:
         self.client = client
         self.space_id = validate_space_id(space_id)
         self.registry = registry
         self.storage = storage
+        self.inference_store = inference_store or inference_config.InferenceConfigStore(INFERENCE_ROOT)
         self._blocked_power_workloads: set[str] = set()
         self._locks = tuple(threading.RLock() for _ in range(64))
         daemon_info = self._require_default_seccomp()
@@ -258,6 +262,10 @@ class LocalController:
             except capsule_storage.StorageError as exc:
                 self._raise_storage_problem(exc)
             try:
+                self.inference_store.delete(capsule_id)
+            except inference_config.InferenceConfigError as exc:
+                self._raise_inference_problem(exc)
+            try:
                 labels = self._base_labels(capsule_id, "capsule")
                 labels[CAPSULE_NAME_LABEL] = name
                 network = self.client.networks.create(
@@ -306,6 +314,48 @@ class LocalController:
             "Capsule storage failed its safety checks",
             code="storage-safety-failed",
         ) from exc
+
+    @staticmethod
+    def _raise_inference_problem(exc: inference_config.InferenceConfigError) -> None:
+        raise ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Capsule model provider metadata is unavailable",
+            code="inference-store-failed",
+        ) from exc
+
+    def inference_status(self, capsule_id: str) -> dict[str, str]:
+        capsule_id = validate_capsule_id(capsule_id)
+        with self._lock(capsule_id):
+            self._network(capsule_id)
+            try:
+                config = self.inference_store.load(capsule_id)
+            except inference_config.InferenceConfigError as exc:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Capsule model provider is not configured",
+                    code="inference-not-configured",
+                ) from exc
+        return {"capsule": capsule_id, "provider": config.provider, "model": config.model}
+
+    def configure_inference(self, capsule_id: str, body: object) -> dict[str, str]:
+        capsule_id = validate_capsule_id(capsule_id)
+        if not isinstance(body, dict) or set(body) != {"provider", "model"}:
+            raise ApiProblem(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "inference requires only provider and model",
+                code="invalid-body",
+            )
+        try:
+            config = inference_config.normalize(body["provider"], body["model"])
+        except inference_config.InferenceConfigError as exc:
+            raise ApiProblem(HTTPStatus.BAD_REQUEST, str(exc), code="invalid-inference") from exc
+        with self._lock(capsule_id):
+            self._network(capsule_id)
+            try:
+                self.inference_store.save(capsule_id, config)
+            except inference_config.InferenceConfigError as exc:
+                self._raise_inference_problem(exc)
+        return {"capsule": capsule_id, "provider": config.provider, "model": config.model}
 
     def put_file(
         self,
@@ -897,6 +947,10 @@ class LocalController:
                     storage_removed = self.storage.destroy(capsule_id)
                 except capsule_storage.StorageError as exc:
                     self._raise_storage_problem(exc)
+                try:
+                    self.inference_store.delete(capsule_id)
+                except inference_config.InferenceConfigError as exc:
+                    self._raise_inference_problem(exc)
                 return {
                     "id": capsule_id,
                     "destroyed": False,
@@ -907,6 +961,10 @@ class LocalController:
                 storage_removed = self.storage.destroy(capsule_id)
             except capsule_storage.StorageError as exc:
                 self._raise_storage_problem(exc)
+            try:
+                self.inference_store.delete(capsule_id)
+            except inference_config.InferenceConfigError as exc:
+                self._raise_inference_problem(exc)
             try:
                 network.remove()
             except DockerException as exc:
@@ -986,11 +1044,16 @@ class LocalController:
                     self._blocked_power_workloads.discard(container.id)
                 storage_removed = self.storage.destroy_all()
                 for network in networks:
+                    capsule_id = network.attrs["Labels"][CAPSULE_LABEL]
+                    self.inference_store.delete(capsule_id)
+                for network in networks:
                     network.remove()
             except ApiProblem:
                 raise
             except capsule_storage.StorageError as exc:
                 self._raise_storage_problem(exc)
+            except inference_config.InferenceConfigError as exc:
+                self._raise_inference_problem(exc)
             except DockerException as exc:
                 raise ApiProblem(
                     HTTPStatus.SERVICE_UNAVAILABLE,
@@ -1208,10 +1271,34 @@ class Handler(BaseHTTPRequestHandler):
             )
         return None
 
+    def _inference_route(
+        self, parts: list[str]
+    ) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
+        if len(parts) != 4 or parts[:2] != ["v1", "capsules"] or parts[3] != "inference":
+            return None
+        capsule_id = validate_capsule_id(parts[2])
+        if self.command == "GET":
+            return (
+                HTTPStatus.OK,
+                self.server.controller.inference_status(capsule_id),
+                "inference-status",
+                capsule_id,
+                None,
+            )
+        if self.command == "PUT":
+            return (
+                HTTPStatus.OK,
+                self.server.controller.configure_inference(capsule_id, self._body()),
+                "inference-configure",
+                capsule_id,
+                None,
+            )
+        return None
+
     def _route(self) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None]:
         parts = self._path_parts()
         controller = self.server.controller
-        if self.command != "POST":
+        if self.command not in {"POST", "PUT"}:
             self._reject_body()
 
         fixed_route = self._fixed_route(parts)
@@ -1220,6 +1307,9 @@ class Handler(BaseHTTPRequestHandler):
         file_route = self._file_route(parts)
         if file_route is not None:
             return file_route
+        inference_route = self._inference_route(parts)
+        if inference_route is not None:
+            return inference_route
         if len(parts) == 4 and parts[:2] == ["v1", "capsules"] and parts[3] == "create":
             capsule_id = validate_capsule_id(parts[2])
             if self.command == "POST":

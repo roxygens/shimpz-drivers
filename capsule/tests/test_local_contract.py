@@ -10,6 +10,7 @@ from pathlib import Path
 CAPSULE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CAPSULE))
 
+import inference_config
 import local_app
 import local_registry
 
@@ -176,6 +177,31 @@ class LocalContractTests(unittest.TestCase):
             self.assertFalse(local_app._FILE_UPLOAD_SLOTS.acquire(blocking=False))
         finally:
             local_app._FILE_UPLOAD_SLOTS.release()
+
+    def test_inference_configuration_persists_only_provider_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = object.__new__(local_app.LocalController)
+            controller._locks = tuple(__import__("threading").RLock() for _ in range(64))
+            controller.inference_store = inference_config.InferenceConfigStore(Path(directory) / "inference")
+            controller._network = lambda _capsule_id: object()
+
+            configured = controller.configure_inference(
+                "capsule_1",
+                {"provider": "openai", "model": "gpt-5.5"},
+            )
+
+            self.assertEqual(
+                configured,
+                {"capsule": "capsule_1", "provider": "openai", "model": "gpt-5.5"},
+            )
+            self.assertEqual(controller.inference_status("capsule_1"), configured)
+            stored = next((Path(directory) / "inference").iterdir()).read_text(encoding="utf-8")
+            self.assertNotIn("api_key", stored)
+            with self.assertRaises(local_app.ApiProblem):
+                controller.configure_inference(
+                    "capsule_1",
+                    {"provider": "openai", "model": "gpt-5.5", "api_key": "never"},
+                )
 
 
 if __name__ == "__main__":
