@@ -1,21 +1,18 @@
-"""Resolve and decrypt one account Brain credential for immediate Capsule-volume injection.
+"""Deliver one account model API key to the LangGraph runtime in memory.
 
-The capsule driver receives neither the encryption key nor the seal token. It first obtains only an
-opaque envelope from accounts, then presents that envelope plus a one-use X25519 public key to the
+The Capsule controller receives neither the encryption key nor the seal token. It first obtains only
+an opaque envelope from accounts, then presents that envelope plus a one-use X25519 public key to the
 separately authorized delivery API. The endpoint returns only AES-GCM ciphertext. Plaintext exists
-transiently in this process only to inject the Capsule's private ``/config`` volume; it is never placed
-in an HTTP response, Docker environment metadata, argv, labels, or logs.
+transiently in this process so it can be sent to the private Brain runtime for one turn; it is never
+written to a Capsule volume, HTTP response, Docker metadata, argv, labels, or logs.
 """
 
 from __future__ import annotations
 
 import base64
 import http.client
-import io
 import json
 import os
-import shlex
-import tarfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -47,10 +44,17 @@ DELIVERY_SALT_BYTES = 16
 DELIVERY_NONCE_BYTES = 12
 DELIVERY_KEY_BYTES = 32
 MAX_SECRET_BYTES = 64 * 1024
+SUPPORTED_PROVIDERS = frozenset({"anthropic", "openai"})
+SUPPORTED_AUTH_TYPE = "api_key"
 
 
 class BrainCredentialError(Exception):
     """Credential control plane failed without exposing secret-bearing response material."""
+
+
+def _require_provider(provider: str) -> None:
+    if provider not in SUPPORTED_PROVIDERS:
+        raise BrainCredentialError("Brain credential provider is unsupported")
 
 
 def _b64encode(value: bytes) -> str:
@@ -186,7 +190,8 @@ def _post(base_url: str, path: str, payload: dict, token_file: Path) -> tuple[in
 
 
 def resolve(account_id: str, provider: str) -> tuple[str, str, int] | None:
-    """Return ``(auth_type, plaintext, generation)`` via an encrypted one-use delivery."""
+    """Return ``('api_key', plaintext, generation)`` via one encrypted delivery."""
+    _require_provider(provider)
     status, resolved = _post(
         ACCOUNTS_URL,
         "/v1/internal/brains/resolve",
@@ -201,7 +206,7 @@ def resolve(account_id: str, provider: str) -> tuple[str, str, int] | None:
     envelope = resolved.get("secret_ref")
     generation = resolved.get("generation")
     if (
-        auth_type not in {"api_key", "oauth"}
+        auth_type != SUPPORTED_AUTH_TYPE
         or not isinstance(envelope, dict)
         or not isinstance(generation, int)
         or isinstance(generation, bool)
@@ -229,7 +234,8 @@ def resolve(account_id: str, provider: str) -> tuple[str, str, int] | None:
 
 
 def generation_is_current(account_id: str, provider: str, generation: int) -> bool:
-    """Post-injection lease check; False means revoke/replace won the race."""
+    """Check the in-memory key lease; False means revoke/replace won the race."""
+    _require_provider(provider)
     if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
         raise BrainCredentialError("Brain credential generation is invalid")
     status, result = _post(
@@ -248,77 +254,3 @@ def generation_is_current(account_id: str, provider: str, generation: int) -> bo
     if status == 409 and valid is False:
         return False
     raise BrainCredentialError("Brain credential generation check failed")
-
-
-def _tar_directory(archive: tarfile.TarFile, name: str) -> None:
-    info = tarfile.TarInfo(name)
-    info.type = tarfile.DIRTYPE
-    info.mode = 0o700
-    info.uid = info.gid = 1000
-    archive.addfile(info)
-
-
-def _tar_file(archive: tarfile.TarFile, name: str, content: bytes) -> None:
-    info = tarfile.TarInfo(name)
-    info.size = len(content)
-    info.mode = 0o600
-    info.uid = info.gid = 1000
-    archive.addfile(info, io.BytesIO(content))
-
-
-def credential_file(provider: str, auth_type: str, secret: str) -> tuple[str, bytes]:
-    """Return the one provider credential path and its validated serialized bytes."""
-    if provider not in {"claude-code", "codex"} or auth_type not in {
-        "api_key",
-        "oauth",
-    }:
-        raise BrainCredentialError("Brain credential metadata is unsupported")
-    if not secret or "\0" in secret:
-        raise BrainCredentialError("Brain credential is invalid")
-
-    if auth_type == "api_key":
-        variable = "ANTHROPIC_API_KEY" if provider == "claude-code" else "OPENAI_API_KEY"
-        target = ".shimpz/brain-credential.sh"
-        content = f"{variable}={shlex.quote(secret)}\n".encode()
-    elif provider == "claude-code":
-        try:
-            parsed = json.loads(secret)
-        except json.JSONDecodeError:
-            target = ".shimpz/brain-credential.sh"
-            content = f"CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(secret)}\n".encode()
-        else:
-            if not isinstance(parsed, dict):
-                raise BrainCredentialError("Claude OAuth credential must be an object or token")
-            target = ".claude/.credentials.json"
-            content = json.dumps(parsed, separators=(",", ":")).encode()
-    else:
-        try:
-            parsed = json.loads(secret)
-        except json.JSONDecodeError as exc:
-            raise BrainCredentialError("Codex OAuth credential must be an auth.json object") from exc
-        if not isinstance(parsed, dict):
-            raise BrainCredentialError("Codex OAuth credential must be an auth.json object")
-        target = ".codex/auth.json"
-        content = json.dumps(parsed, separators=(",", ":")).encode()
-    return target, content
-
-
-def credential_archive(provider: str, auth_type: str, secret: str) -> bytes:
-    """Build a mode-0600 credential archive rooted at the Capsule's private ``/config`` volume."""
-    target, content = credential_file(provider, auth_type, secret)
-
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
-        parent = target.rsplit("/", 1)[0]
-        _tar_directory(archive, parent)
-        _tar_file(archive, target, content)
-    return buffer.getvalue()
-
-
-def resolve_archive(account_id: str, provider: str) -> tuple[bytes, int] | None:
-    """Resolve, package, and retain the generation needed for a post-injection check."""
-    credential = resolve(account_id, provider)
-    if credential is None:
-        return None
-    auth_type, secret, generation = credential
-    return credential_archive(provider, auth_type, secret), generation
