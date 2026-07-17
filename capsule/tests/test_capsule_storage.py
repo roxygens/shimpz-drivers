@@ -33,6 +33,14 @@ class CapsuleStorageTests(unittest.TestCase):
         self.assertNotEqual(first["id"], second["id"])
         with self.assertRaises(capsule_storage.StorageNotFoundError):
             storage.get("beta", first["id"])
+        selected = storage.metadata("alpha", [first["id"]])[0]
+        self.assertEqual(
+            set(selected),
+            {"id", "name", "media_type", "size"},
+        )
+        self.assertEqual(selected["name"], "brief.txt")
+        with self.assertRaises(capsule_storage.StorageNotFoundError):
+            storage.metadata("beta", [first["id"]])
 
         alpha_directory = self.root / "alpha"
         self.assertEqual({path.name for path in alpha_directory.iterdir()}, {"files.sqlite3"})
@@ -52,6 +60,31 @@ class CapsuleStorageTests(unittest.TestCase):
         listing = storage.list("alpha")
         self.assertEqual(listing["used_bytes"], 10)
         self.assertEqual(len(listing["files"]), 2)
+
+    def test_quota_resolver_is_capsule_scoped_and_server_trusted(self) -> None:
+        limits = {"alpha": 4, "beta": 8}
+        storage = capsule_storage.CapsuleStorage(self.root, quota_for=limits.__getitem__)
+        alpha = storage.put("alpha", "alpha.bin", b"1234")
+        beta = storage.put("beta", "beta.bin", b"12345678")
+        self.assertEqual((alpha["limit_bytes"], beta["limit_bytes"]), (4, 8))
+        with self.assertRaises(capsule_storage.StorageQuotaError):
+            storage.put("alpha", "overflow.bin", b"x")
+
+    def test_plan_downgrade_blocks_writes_but_keeps_cleanup_available(self) -> None:
+        limits = {"alpha": 8}
+        storage = capsule_storage.CapsuleStorage(self.root, quota_for=limits.__getitem__)
+        stored = storage.put("alpha", "before-downgrade.bin", b"12345678")
+
+        limits["alpha"] = 4
+        listing = storage.list("alpha")
+        self.assertEqual(listing["used_bytes"], 8)
+        self.assertEqual(listing["remaining_bytes"], 0)
+        with self.assertRaises(capsule_storage.StorageQuotaError):
+            storage.put("alpha", "blocked.bin", b"x")
+
+        self.assertTrue(storage.delete("alpha", stored["id"])["deleted"])
+        replacement = storage.put("alpha", "within-new-plan.bin", b"1234")
+        self.assertEqual(replacement["remaining_bytes"], 0)
 
     def test_concurrent_writes_cannot_overbook_quota(self) -> None:
         storage = capsule_storage.CapsuleStorage(self.root, limit_bytes=10)
@@ -82,6 +115,11 @@ class CapsuleStorageTests(unittest.TestCase):
         self.assertTrue(storage.destroy("alpha"))
         self.assertFalse(storage.destroy("alpha"))
         self.assertEqual(storage.get("beta", beta["id"])[1], b"abcdefgh")
+
+        storage.put("orphan", "orphan.bin", b"x")
+        self.assertEqual(storage.destroy_all(), 2)
+        self.assertEqual(storage.list("beta")["files"], [])
+        self.assertEqual(storage.list("orphan")["files"], [])
 
     def test_file_count_and_metadata_are_bounded(self) -> None:
         storage = capsule_storage.CapsuleStorage(
