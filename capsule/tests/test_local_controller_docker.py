@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -168,6 +170,7 @@ class DockerFlowTests(unittest.TestCase):
         controller_tag = f"shimpz-capsule-driver-local-test:{unique}"
         token_volume = f"shimpz-local-token-{unique}"
         audit_volume = f"shimpz-local-audit-{unique}"
+        storage_volume = f"shimpz-local-storage-{unique}"
         space_id = f"test-space-{unique}"
         foreign_network = f"shimpz-foreign-{unique}"
         trusted_ref = ""
@@ -256,6 +259,7 @@ class DockerFlowTests(unittest.TestCase):
             )
             self._run("volume", "create", token_volume)
             self._run("volume", "create", audit_volume)
+            self._run("volume", "create", storage_volume)
             socket_gid = str(Path("/var/run/docker.sock").stat().st_gid)
             self._run(
                 "run",
@@ -287,6 +291,8 @@ class DockerFlowTests(unittest.TestCase):
                 f"{token_volume}:/run/shimpz-local",
                 "--volume",
                 f"{audit_volume}:/var/log/shimpz-local",
+                "--volume",
+                f"{storage_volume}:/var/lib/shimpz-local/storage",
                 "--env",
                 f"SHIMPZ_SPACE_ID={space_id}",
                 "--publish",
@@ -300,7 +306,7 @@ class DockerFlowTests(unittest.TestCase):
             status, catalog = self._api(port, token, "GET", "/v1/assistants")
             self.assertEqual(status, 200)
             self.assertEqual(catalog["assistants"][0]["id"], "hello-pulse")
-            self.assertEqual(catalog["assistants"][0]["operations"], ["hello"])
+            self.assertEqual(catalog["assistants"][0]["powers"], ["hello"])
 
             status, created = self._api(
                 port,
@@ -323,6 +329,73 @@ class DockerFlowTests(unittest.TestCase):
                 capsules["capsules"],
                 [{"id": "demo_capsule", "name": "Demo Capsule", "status": "running"}],
             )
+
+            file_status, uploaded = self._api(
+                port,
+                token,
+                "POST",
+                "/v1/capsules/demo_capsule/files",
+                {
+                    "filename": "brief.txt",
+                    "media_type": "text/plain",
+                    "content_b64": base64.b64encode(b"Capsule private data").decode("ascii"),
+                },
+            )
+            self.assertEqual(file_status, 200)
+            file_id = uploaded["file"]["id"]
+            self.assertRegex(file_id, r"^[0-9a-f]{32}$")
+            self.assertEqual(uploaded["file"]["limit_bytes"], 100 * 1024 * 1024)
+            _, files = self._api(port, token, "GET", "/v1/capsules/demo_capsule/files")
+            self.assertEqual(files["files"][0]["id"], file_id)
+            self.assertEqual(files["used_bytes"], len(b"Capsule private data"))
+            self.assertEqual(
+                self._run(
+                    "exec",
+                    controller,
+                    "test",
+                    "-f",
+                    "/var/lib/shimpz-local/storage/demo_capsule/files.sqlite3",
+                    check=False,
+                ).returncode,
+                0,
+            )
+
+            self._run("restart", controller)
+            port, token = self._wait_controller(controller)
+            _, files_after_restart = self._api(port, token, "GET", "/v1/capsules/demo_capsule/files")
+            self.assertEqual(files_after_restart["files"][0]["id"], file_id)
+
+            # A daemon-side network loss must not let a new lifecycle inherit the old opaque data.
+            self._api(
+                port,
+                token,
+                "POST",
+                "/v1/capsules/orphan_capsule/create",
+                {"name": "Orphan Capsule"},
+            )
+            self._api(
+                port,
+                token,
+                "POST",
+                "/v1/capsules/orphan_capsule/files",
+                {
+                    "filename": "stale.txt",
+                    "content_b64": base64.b64encode(b"must not survive").decode("ascii"),
+                },
+            )
+            prefix = hashlib.sha256(space_id.encode("ascii")).hexdigest()[:12]
+            self._run("network", "rm", f"shimpz-local-{prefix}-capsule-orphan_capsule")
+            _, recreated = self._api(
+                port,
+                token,
+                "POST",
+                "/v1/capsules/orphan_capsule/create",
+                {"name": "Orphan Capsule"},
+            )
+            self.assertTrue(recreated["created"])
+            _, orphan_files = self._api(port, token, "GET", "/v1/capsules/orphan_capsule/files")
+            self.assertEqual(orphan_files["files"], [])
+            self._api(port, token, "DELETE", "/v1/capsules/orphan_capsule")
 
             # An unknown ID is rejected while the trusted image is still absent from the daemon.
             unknown_status, _ = self._api(
@@ -416,7 +489,7 @@ class DockerFlowTests(unittest.TestCase):
                 port,
                 token,
                 "POST",
-                "/v1/capsules/demo_capsule/assistants/hello-pulse/operations/hello",
+                "/v1/capsules/demo_capsule/assistants/hello-pulse/powers/hello",
                 {"name": "Captain"},
             )
             self.assertEqual(invoked["result"], {"message": "Hello, Captain. Your Capsule is alive."})
@@ -424,7 +497,7 @@ class DockerFlowTests(unittest.TestCase):
                 port,
                 token,
                 "POST",
-                "/v1/capsules/demo_capsule/assistants/hello-pulse/operations/shell",
+                "/v1/capsules/demo_capsule/assistants/hello-pulse/powers/shell",
                 {},
             )
             self.assertEqual(unknown_operation, 404)
@@ -443,8 +516,27 @@ class DockerFlowTests(unittest.TestCase):
                 "/v1/capsules/demo_capsule/assistants/hello-pulse",
             )
             self.assertFalse(removed_again["uninstalled"])
+            _, deleted_file = self._api(
+                port,
+                token,
+                "DELETE",
+                f"/v1/capsules/demo_capsule/files/{file_id}",
+            )
+            self.assertTrue(deleted_file["deleted"])
             _, destroyed = self._api(port, token, "DELETE", "/v1/capsules/demo_capsule")
             self.assertTrue(destroyed["destroyed"])
+            self.assertTrue(destroyed["storage_removed"])
+            self.assertNotEqual(
+                self._run(
+                    "exec",
+                    controller,
+                    "test",
+                    "-e",
+                    "/var/lib/shimpz-local/storage/demo_capsule",
+                    check=False,
+                ).returncode,
+                0,
+            )
             _, destroyed_again = self._api(port, token, "DELETE", "/v1/capsules/demo_capsule")
             self.assertFalse(destroyed_again["destroyed"])
 
@@ -475,11 +567,32 @@ class DockerFlowTests(unittest.TestCase):
                 "/v1/capsules/reset_capsule/assistants",
                 {"assistant": "hello-pulse"},
             )
+            self._api(
+                port,
+                token,
+                "POST",
+                "/v1/capsules/reset_capsule/files",
+                {
+                    "filename": "reset.txt",
+                    "content_b64": base64.b64encode(b"remove me").decode("ascii"),
+                },
+            )
             reset_status, reset = self._api(port, token, "DELETE", "/v1/space")
             self.assertEqual(reset_status, 200)
             self.assertEqual((reset["assistants_removed"], reset["capsules_removed"]), (1, 1))
             _, reset_again = self._api(port, token, "DELETE", "/v1/space")
             self.assertEqual((reset_again["assistants_removed"], reset_again["capsules_removed"]), (0, 0))
+            self.assertNotEqual(
+                self._run(
+                    "exec",
+                    controller,
+                    "test",
+                    "-e",
+                    "/var/lib/shimpz-local/storage/reset_capsule",
+                    check=False,
+                ).returncode,
+                0,
+            )
             self.assertEqual(self._run("network", "inspect", foreign_network, check=False).returncode, 0)
 
             audit = self._run(
@@ -530,7 +643,7 @@ class DockerFlowTests(unittest.TestCase):
             self._remove("rm", "--force", controller)
             self._remove("rm", "--force", registry)
             self._remove("network", "rm", foreign_network)
-            self._remove("volume", "rm", "--force", token_volume, audit_volume)
+            self._remove("volume", "rm", "--force", token_volume, audit_volume, storage_volume)
             if trusted_ref:
                 self._remove("image", "rm", "--force", trusted_ref)
             self._remove("image", "rm", "--force", fixture_tag, controller_tag)

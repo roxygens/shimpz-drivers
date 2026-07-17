@@ -24,7 +24,7 @@ class RegistryError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class OperationSpec:
+class PowerSpec:
     method: str
     path: str
 
@@ -35,7 +35,7 @@ class AssistantSpec:
     image: str
     rpc_command: str
     health_path: str
-    operations: dict[str, OperationSpec]
+    powers: dict[str, PowerSpec]
 
 
 def _digest_ref(value: object) -> str:
@@ -64,7 +64,7 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
         image=_digest_ref(raw["hello_pulse_image"]),
         rpc_command="/usr/local/bin/shimpz-assistant-rpc",
         health_path="/healthz",
-        operations={"hello": OperationSpec(method="POST", path="/v1/operations/hello")},
+        powers={"hello": PowerSpec(method="POST", path="/v1/operations/hello")},
     )
     return {hello.assistant_id: hello}
 
@@ -81,15 +81,15 @@ def validate_hello_input(payload: object) -> dict[str, str]:
     return {"name": name}
 
 
-def validate_operation_input(assistant_id: str, operation: str, payload: object) -> dict[str, str]:
-    if assistant_id == "hello-pulse" and operation == "hello":
+def validate_power_input(assistant_id: str, power: str, payload: object) -> dict[str, str]:
+    if assistant_id == "hello-pulse" and power == "hello":
         return validate_hello_input(payload)
-    raise ValueError("the operation has no declared input contract")
+    raise ValueError("the Power has no declared input contract")
 
 
-def validate_operation_output(assistant_id: str, operation: str, payload: object) -> dict[str, str]:
-    if assistant_id != "hello-pulse" or operation != "hello":
-        raise ValueError("the operation has no declared output contract")
+def validate_power_output(assistant_id: str, power: str, payload: object) -> dict[str, str]:
+    if assistant_id != "hello-pulse" or power != "hello":
+        raise ValueError("the Power has no declared output contract")
     if not isinstance(payload, dict) or set(payload) != {"message"}:
         raise ValueError("the Assistant returned an invalid result")
     message = payload["message"]

@@ -23,9 +23,15 @@ are never audited.
 - Required environment: `SHIMPZ_SPACE_ID`, a stable lowercase/dash-separated ID (maximum 48 bytes).
 - Internal HTTP port: `7077`; publish it only on the private Compose network, never a host interface.
 - Process identity: UID/GID `10001:10001`, with fixed supplementary token GID `10010`.
-- Writable controller volumes: `/run/shimpz-local` for the token and `/var/log/shimpz-local` for the
-  bounded audit journal. The rest of the controller root filesystem may be read-only, with `/tmp` as a
-  small `noexec,nosuid,nodev` tmpfs.
+- Writable controller volumes: `/run/shimpz-local` for the token, `/var/log/shimpz-local` for the
+  bounded audit journal, and `/var/lib/shimpz-local/storage` for opaque per-Capsule blobs. Storage is
+  never mounted into the Admin or an Assistant. The rest of the controller root filesystem may be
+  read-only, with `/tmp` as a small `noexec,nosuid,nodev` tmpfs.
+- Each Capsule starts with an exact 100 MiB payload quota, at most 256 files, and at most 25 MiB per
+  upload. The trusted controller enforces quota transactionally and applies a SQLite page ceiling;
+  plan-specific limits can later replace the trusted quota resolver without changing the API. This
+  is intentionally not described as a portable kernel project quota: Docker Desktop and ordinary
+  Linux Docker volumes do not expose one consistently, while no workload receives any storage mount.
 - Docker access: bind `/var/run/docker.sock` read/write only into this controller and add the socket's
   numeric host GID with Compose `group_add`. The Admin must never mount the socket.
 - On the first start, the controller atomically creates 32 random bytes as 64 lowercase hex characters
@@ -40,19 +46,23 @@ All routes require the bearer token, including health and read routes.
 
 | Method | Path | Body | Result |
 | --- | --- | --- | --- |
-| `GET` | `/v1/assistants` | none | `{assistants:[{id,title,summary,operations}]}` |
+| `GET` | `/v1/assistants` | none | `{assistants:[{id,title,summary,powers}]}` |
 | `GET` | `/v1/capsules` | none | `{capsules:[{id,name,status:"running"}]}` |
 | `POST` | `/v1/capsules/{capsule}/create` | `{name:"My Capsule"}` | idempotently creates an empty Capsule |
 | `DELETE` | `/v1/capsules/{capsule}` | none | idempotently removes its Assistants, then its network |
 | `GET` | `/v1/capsules/{capsule}/assistants` | none | `{assistants:[{assistant,status}]}` |
 | `POST` | `/v1/capsules/{capsule}/assistants` | `{assistant:"hello-pulse"}` | idempotently installs the allowlisted digest |
 | `DELETE` | `/v1/capsules/{capsule}/assistants/{assistant}` | none | idempotently uninstalls it |
-| `POST` | `/v1/capsules/{capsule}/assistants/hello-pulse/operations/hello` | `{name:"Captain"}` | invokes only the declared operation |
+| `POST` | `/v1/capsules/{capsule}/assistants/hello-pulse/powers/hello` | `{name:"Captain"}` | invokes only the declared Power |
+| `GET` | `/v1/capsules/{capsule}/files` | none | lists opaque metadata and the 100 MiB logical quota |
+| `POST` | `/v1/capsules/{capsule}/files` | `{filename,media_type?,content_b64}` | stores one opaque object, up to 25 MiB |
+| `DELETE` | `/v1/capsules/{capsule}/files/{opaque_id}` | none | deletes one object from that Capsule only |
 | `DELETE` | `/v1/space` | none | idempotent installer reset for this `SPACE_ID` |
 
 `DELETE /v1/space` accepts no resource IDs. It acquires every Capsule mutation lock, selects only
 resources with the full managed/profile/`SPACE_ID`/kind label set, verifies their deterministic names,
-removes Assistant containers first, and removes Capsule networks second. It does not remove shared
+removes Assistant containers first, every safely shaped directory in the dedicated storage volume second,
+and Capsule networks last. This also removes storage orphaned by a prior daemon failure. It does not remove shared
 images, the controller itself, or any Docker resource without the exact ownership values. The installer
 must call it before removing the controller and its token volume; retries are safe after a partial
 daemon failure.

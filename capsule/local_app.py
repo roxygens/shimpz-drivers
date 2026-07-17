@@ -2,11 +2,13 @@
 
 This is intentionally separate from the hosted Capsule controller.  An empty Capsule is
 one labeled internal network; its only runnable resources are build-allowlisted,
-digest-pinned first-party Assistants with a fixed operation contract.
+digest-pinned first-party Assistants with a fixed Power contract.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -21,8 +23,10 @@ import time
 from contextlib import ExitStack, suppress
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlsplit
 
+import capsule_storage
 import docker
 import local_audit
 import local_token_store
@@ -32,8 +36,8 @@ from local_registry import (
     AssistantSpec,
     RegistryError,
     load_registry,
-    validate_operation_input,
-    validate_operation_output,
+    validate_power_input,
+    validate_power_output,
 )
 
 LISTEN_PORT = 7077
@@ -55,6 +59,9 @@ MAX_ASSISTANT_ID_LENGTH = 48
 MAX_SPACE_ID_LENGTH = 48
 MAX_BODY_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 32 * 1024
+MAX_API_RESPONSE_BYTES = 128 * 1024
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_FILE_BODY_BYTES = 4 * ((MAX_UPLOAD_BYTES + 2) // 3) + 8192
 MAX_PATH_BYTES = 512
 REQUEST_TIMEOUT_SECONDS = 10
 RPC_TIMEOUT_SECONDS = 8
@@ -65,6 +72,8 @@ ASSISTANT_MEMORY = 128 * 1024 * 1024
 ASSISTANT_NANO_CPUS = 250_000_000
 ASSISTANT_PIDS = 64
 STATELESS_RECOVERY_ASSISTANTS = frozenset({"hello-pulse"})
+STORAGE_ROOT = Path("/var/lib/shimpz-local/storage")
+_FILE_UPLOAD_SLOTS = threading.BoundedSemaphore(1)
 
 
 class ApiProblem(RuntimeError):
@@ -118,10 +127,18 @@ def half_cpu_set(processors: int) -> str:
 
 
 class LocalController:
-    def __init__(self, client: docker.DockerClient, space_id: str, registry: dict[str, AssistantSpec]) -> None:
+    def __init__(
+        self,
+        client: docker.DockerClient,
+        space_id: str,
+        registry: dict[str, AssistantSpec],
+        storage: capsule_storage.CapsuleStorage,
+    ) -> None:
         self.client = client
         self.space_id = validate_space_id(space_id)
         self.registry = registry
+        self.storage = storage
+        self._blocked_power_workloads: set[str] = set()
         self._locks = tuple(threading.RLock() for _ in range(64))
         daemon_info = self._require_default_seccomp()
         self.cpuset_cpus = half_cpu_set(daemon_info.get("NCPU"))
@@ -235,6 +252,12 @@ class LocalController:
                     )
                 return {"id": capsule_id, "name": name, "status": "running", "created": False}
             try:
+                # A Capsule identity starts empty even after a daemon crash removed its network
+                # before the previous lifecycle could clean the dedicated storage volume.
+                self.storage.destroy(capsule_id)
+            except capsule_storage.StorageError as exc:
+                self._raise_storage_problem(exc)
+            try:
                 labels = self._base_labels(capsule_id, "capsule")
                 labels[CAPSULE_NAME_LABEL] = name
                 network = self.client.networks.create(
@@ -265,6 +288,60 @@ class LocalController:
                 return {"id": capsule_id, "name": name, "status": "running", "created": False}
             self._validate_network(network, capsule_id)
             return {"id": capsule_id, "name": name, "status": "running", "created": True}
+
+    @staticmethod
+    def _raise_storage_problem(exc: capsule_storage.StorageError) -> None:
+        if isinstance(exc, capsule_storage.StorageQuotaError):
+            raise ApiProblem(
+                HTTPStatus.INSUFFICIENT_STORAGE,
+                str(exc),
+                code="storage-quota-exceeded",
+            ) from exc
+        if isinstance(exc, capsule_storage.StorageNotFoundError):
+            raise ApiProblem(HTTPStatus.NOT_FOUND, "file not found", code="file-not-found") from exc
+        if isinstance(exc, capsule_storage.StorageInputError):
+            raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc), code="invalid-file") from exc
+        raise ApiProblem(
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            "Capsule storage failed its safety checks",
+            code="storage-safety-failed",
+        ) from exc
+
+    def put_file(
+        self,
+        capsule_id: str,
+        filename: object,
+        content: bytes,
+        media_type: object,
+    ) -> dict[str, object]:
+        capsule_id = validate_capsule_id(capsule_id)
+        with self._lock(capsule_id):
+            self._network(capsule_id)
+            try:
+                stored = self.storage.put(capsule_id, filename, content, media_type)
+            except capsule_storage.StorageError as exc:
+                self._raise_storage_problem(exc)
+        return {"capsule": capsule_id, "file": stored}
+
+    def list_files(self, capsule_id: str) -> dict[str, object]:
+        capsule_id = validate_capsule_id(capsule_id)
+        with self._lock(capsule_id):
+            self._network(capsule_id)
+            try:
+                listing = self.storage.list(capsule_id)
+            except capsule_storage.StorageError as exc:
+                self._raise_storage_problem(exc)
+        return {"capsule": capsule_id, **listing}
+
+    def delete_file(self, capsule_id: str, file_id: object) -> dict[str, object]:
+        capsule_id = validate_capsule_id(capsule_id)
+        with self._lock(capsule_id):
+            self._network(capsule_id)
+            try:
+                result = self.storage.delete(capsule_id, file_id)
+            except capsule_storage.StorageError as exc:
+                self._raise_storage_problem(exc)
+        return {"capsule": capsule_id, **result}
 
     def _assistant_filters(self, capsule_id: str) -> dict[str, list[str] | bool]:
         return {
@@ -392,6 +469,33 @@ class LocalController:
         else:
             stream.close()
 
+    def _fail_stop_power(self, container) -> None:
+        """Stop, then kill if needed, and prove an ambiguous local Power cannot keep running."""
+        try:
+            container.stop(timeout=3)
+        except NotFound:
+            return
+        except DockerException:
+            pass
+        try:
+            container.reload()
+            if container.status != "running":
+                return
+            container.kill()
+            container.reload()
+            if container.status != "running":
+                return
+        except NotFound:
+            return
+        except DockerException:
+            pass
+        self._blocked_power_workloads.add(container.id)
+        raise ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Assistant Power termination could not be proved; reinstall the Assistant",
+            code="assistant-power-blocked",
+        )
+
     @staticmethod
     def _read_exact(raw_socket: socket.socket, amount: int, deadline: float) -> bytes:
         output = bytearray()
@@ -404,6 +508,30 @@ class LocalController:
                 raise EOFError
             output.extend(chunk)
         return bytes(output)
+
+    def _read_rpc_frames(self, raw_socket: socket.socket, deadline: float) -> tuple[bytes, int]:
+        stdout = bytearray()
+        stderr_bytes = 0
+        while True:
+            try:
+                header = self._read_exact(raw_socket, 8, deadline)
+            except EOFError:
+                break
+            stream_id, length = struct.unpack(">BxxxL", header)
+            if stream_id not in {1, 2}:
+                raise ValueError("invalid Docker exec stream")
+            if length > MAX_RESPONSE_BYTES + 1:
+                raise ValueError("oversized Docker exec frame")
+            chunk = self._read_exact(raw_socket, length, deadline)
+            if stream_id == 1:
+                stdout.extend(chunk)
+                if len(stdout) > MAX_RESPONSE_BYTES:
+                    raise ValueError("oversized Assistant response")
+            else:
+                stderr_bytes += len(chunk)
+                if stderr_bytes > MAX_RESPONSE_BYTES:
+                    raise ValueError("oversized Assistant error")
+        return bytes(stdout), stderr_bytes
 
     def _rpc(self, container, spec: AssistantSpec, method: str, path: str, payload: dict) -> object:
         encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
@@ -427,45 +555,45 @@ class LocalController:
             raw_socket.sendall(encoded)
             raw_socket.shutdown(socket.SHUT_WR)
             deadline = time.monotonic() + RPC_TIMEOUT_SECONDS
-            stdout = bytearray()
-            stderr_bytes = 0
-            while True:
-                try:
-                    header = self._read_exact(raw_socket, 8, deadline)
-                except EOFError:
-                    break
-                stream_id, length = struct.unpack(">BxxxL", header)
-                if length > MAX_RESPONSE_BYTES + 1:
-                    raise ValueError("oversized Docker exec frame")
-                chunk = self._read_exact(raw_socket, length, deadline)
-                if stream_id == 1:
-                    stdout.extend(chunk)
-                    if len(stdout) > MAX_RESPONSE_BYTES:
-                        raise ValueError("oversized Assistant response")
-                else:
-                    stderr_bytes += len(chunk)
-                    if stderr_bytes > MAX_RESPONSE_BYTES:
-                        raise ValueError("oversized Assistant error")
+            stdout, stderr_bytes = self._read_rpc_frames(raw_socket, deadline)
         except TimeoutError as exc:
+            self._fail_stop_power(container)
             raise ApiProblem(
                 HTTPStatus.GATEWAY_TIMEOUT,
-                "Assistant operation timed out",
+                "Assistant Power timed out",
                 code="assistant-timeout",
             ) from exc
         except (DockerException, OSError, ValueError, KeyError) as exc:
-            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant operation failed", code="assistant-rpc-failed") from exc
+            self._fail_stop_power(container)
+            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant Power failed", code="assistant-rpc-failed") from exc
         finally:
             if "stream" in locals():
-                self._close_exec_stream(stream)
+                with suppress(Exception):
+                    self._close_exec_stream(stream)
 
         try:
             details = self.client.api.exec_inspect(exec_id)
-            exit_code = details.get("ExitCode")
+        except DockerException as exc:
+            self._fail_stop_power(container)
+            raise ApiProblem(
+                HTTPStatus.BAD_GATEWAY,
+                "Assistant Power status is ambiguous",
+                code="assistant-rpc-failed",
+            ) from exc
+        exit_code = details.get("ExitCode")
+        if not isinstance(exit_code, int):
+            self._fail_stop_power(container)
+            raise ApiProblem(
+                HTTPStatus.BAD_GATEWAY,
+                "Assistant Power status is ambiguous",
+                code="assistant-rpc-failed",
+            )
+        try:
             decoded = json.loads(bytes(stdout))
-        except (DockerException, UnicodeError, json.JSONDecodeError) as exc:
-            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant operation failed", code="assistant-rpc-failed") from exc
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant Power failed", code="assistant-rpc-failed") from exc
         if exit_code != 0 or stderr_bytes:
-            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant operation failed", code="assistant-rpc-failed")
+            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant Power failed", code="assistant-rpc-failed")
         return decoded
 
     def _wait_ready(self, container, spec: AssistantSpec) -> None:
@@ -491,8 +619,8 @@ class LocalController:
                 {
                     "id": spec.assistant_id,
                     "title": "Hello Pulse",
-                    "summary": "A tiny first-party Assistant that proves the local install and operation flow.",
-                    "operations": sorted(spec.operations),
+                    "summary": "A tiny first-party Assistant that proves the local install and Power flow.",
+                    "powers": sorted(spec.powers),
                 }
                 for spec in sorted(self.registry.values(), key=lambda item: item.assistant_id)
             ]
@@ -654,35 +782,73 @@ class LocalController:
                     "Docker could not uninstall the Assistant",
                     code="docker-remove-failed",
                 ) from exc
+            self._blocked_power_workloads.discard(container.id)
             return {"assistant": assistant_id, "uninstalled": True}
 
-    def invoke(self, capsule_id: str, assistant_id: str, operation: str, payload: object) -> dict[str, object]:
+    def invoke(self, capsule_id: str, assistant_id: str, power: str, payload: object) -> dict[str, object]:
         capsule_id = validate_capsule_id(capsule_id)
         spec = self._resolve(assistant_id)
-        operation_spec = spec.operations.get(operation)
-        if operation_spec is None:
-            raise ApiProblem(HTTPStatus.NOT_FOUND, "operation is not declared", code="operation-not-declared")
+        power_spec = spec.powers.get(power)
+        if power_spec is None:
+            raise ApiProblem(HTTPStatus.NOT_FOUND, "Power is not declared", code="power-not-declared")
         try:
-            safe_payload = validate_operation_input(assistant_id, operation, payload)
+            safe_payload = validate_power_input(assistant_id, power, payload)
         except ValueError as exc:
-            raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc), code="invalid-operation-input") from exc
+            raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc), code="invalid-power-input") from exc
         with self._lock(capsule_id):
             network = self._network(capsule_id)
             container = self._assistant_container(capsule_id, assistant_id)
             self._validate_container(container, capsule_id, spec, network.name)
+            if container.id in self._blocked_power_workloads:
+                raise ApiProblem(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "Assistant Power execution is blocked until this Assistant is reinstalled",
+                    code="assistant-power-blocked",
+                )
             container.reload()
             if container.status != "running":
                 raise ApiProblem(HTTPStatus.CONFLICT, "Assistant is not running", code="assistant-not-running")
-            raw_result = self._rpc(container, spec, operation_spec.method, operation_spec.path, safe_payload)
+            local_audit.record(
+                "assistant-power",
+                result="ok",
+                capsule=capsule_id,
+                assistant=assistant_id,
+                detail=f"started:{power}",
+            )
+            try:
+                raw_result = self._rpc(container, spec, power_spec.method, power_spec.path, safe_payload)
+            except ApiProblem:
+                local_audit.record(
+                    "assistant-power",
+                    result="error",
+                    capsule=capsule_id,
+                    assistant=assistant_id,
+                    detail=f"failed:{power}",
+                )
+                raise
         try:
-            result = validate_operation_output(assistant_id, operation, raw_result)
+            result = validate_power_output(assistant_id, power, raw_result)
         except ValueError as exc:
+            local_audit.record(
+                "assistant-power",
+                result="error",
+                capsule=capsule_id,
+                assistant=assistant_id,
+                detail=f"invalid-output:{power}",
+            )
             raise ApiProblem(
                 HTTPStatus.BAD_GATEWAY,
                 "the Assistant returned an invalid result",
-                code="invalid-operation-output",
+                code="invalid-power-output",
             ) from exc
-        return {"assistant": assistant_id, "operation": operation, "result": result}
+        local_audit.record(
+            "assistant-power",
+            result="ok",
+            capsule=capsule_id,
+            assistant=assistant_id,
+            detail=f"completed:{power}",
+        )
+        return {"assistant": assistant_id, "power": power, "result": result}
 
     def destroy_capsule(self, capsule_id: str) -> dict[str, object]:
         capsule_id = validate_capsule_id(capsule_id)
@@ -715,9 +881,23 @@ class LocalController:
                         "Docker could not destroy the Capsule",
                         code="docker-remove-failed",
                     ) from exc
+                self._blocked_power_workloads.discard(container.id)
                 removed += 1
             if network is None:
-                return {"id": capsule_id, "destroyed": False, "assistants_removed": removed}
+                try:
+                    storage_removed = self.storage.destroy(capsule_id)
+                except capsule_storage.StorageError as exc:
+                    self._raise_storage_problem(exc)
+                return {
+                    "id": capsule_id,
+                    "destroyed": False,
+                    "assistants_removed": removed,
+                    "storage_removed": storage_removed,
+                }
+            try:
+                storage_removed = self.storage.destroy(capsule_id)
+            except capsule_storage.StorageError as exc:
+                self._raise_storage_problem(exc)
             try:
                 network.remove()
             except DockerException as exc:
@@ -726,7 +906,12 @@ class LocalController:
                     "Docker could not destroy the Capsule",
                     code="docker-remove-failed",
                 ) from exc
-            return {"id": capsule_id, "destroyed": True, "assistants_removed": removed}
+            return {
+                "id": capsule_id,
+                "destroyed": True,
+                "assistants_removed": removed,
+                "storage_removed": storage_removed,
+            }
 
     def _validate_reset_container(self, container) -> None:
         container.reload()
@@ -789,10 +974,14 @@ class LocalController:
                     self._validate_network(network, capsule_id)
                 for container in containers:
                     container.remove(force=True)
+                    self._blocked_power_workloads.discard(container.id)
+                storage_removed = self.storage.destroy_all()
                 for network in networks:
                     network.remove()
             except ApiProblem:
                 raise
+            except capsule_storage.StorageError as exc:
+                self._raise_storage_problem(exc)
             except DockerException as exc:
                 raise ApiProblem(
                     HTTPStatus.SERVICE_UNAVAILABLE,
@@ -803,6 +992,7 @@ class LocalController:
                 "reset": True,
                 "assistants_removed": len(containers),
                 "capsules_removed": len(networks),
+                "storage_removed": storage_removed,
             }
 
 
@@ -851,7 +1041,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, status: HTTPStatus, payload: dict[str, object]) -> None:
         encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        if len(encoded) > MAX_RESPONSE_BYTES:
+        if len(encoded) > MAX_API_RESPONSE_BYTES:
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             encoded = b'{"error":"response exceeded its limit"}'
         self.send_response(status)
@@ -866,7 +1056,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(encoded)
 
-    def _body(self) -> dict[str, object]:
+    def _body(self, *, max_bytes: int = MAX_BODY_BYTES) -> dict[str, object]:
         if self.headers.get_all("Transfer-Encoding", failobj=[]):
             raise ApiProblem(HTTPStatus.BAD_REQUEST, "chunked requests are not accepted", code="chunked-request")
         lengths = self.headers.get_all("Content-Length", failobj=[])
@@ -876,7 +1066,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(lengths[0])
         except ValueError as exc:
             raise ApiProblem(HTTPStatus.BAD_REQUEST, "invalid Content-Length", code="content-length") from exc
-        if length < 2 or length > MAX_BODY_BYTES:
+        if length < 2 or length > max_bytes:
             raise ApiProblem(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request is too large", code="body-too-large")
         content_types = self.headers.get_all("Content-Type", failobj=[])
         if len(content_types) != 1:
@@ -894,6 +1084,29 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, "a JSON object is required", code="invalid-body")
         return body
+
+    def _file_body(self) -> tuple[object, bytes, object]:
+        body = self._body(max_bytes=MAX_FILE_BODY_BYTES)
+        if set(body) not in ({"filename", "content_b64"}, {"filename", "content_b64", "media_type"}):
+            raise ApiProblem(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "file upload requires filename, content_b64, and optional media_type",
+                code="invalid-body",
+            )
+        encoded = body["content_b64"]
+        if not isinstance(encoded, str):
+            raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid file content", code="invalid-file")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, UnicodeError, ValueError) as exc:
+            raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid file content", code="invalid-file") from exc
+        if not content or len(content) > MAX_UPLOAD_BYTES:
+            raise ApiProblem(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                f"file must contain 1 to {MAX_UPLOAD_BYTES} bytes",
+                code="file-too-large",
+            )
+        return body["filename"], content, body.get("media_type")
 
     def _capsule_create_body(self) -> str:
         body = self._body()
@@ -951,6 +1164,43 @@ class Handler(BaseHTTPRequestHandler):
             return HTTPStatus.OK, controller.reset_space(), "space-reset", None, None
         return None
 
+    def _file_route(
+        self, parts: list[str]
+    ) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
+        if len(parts) not in {4, 5} or parts[:2] != ["v1", "capsules"] or parts[3] != "files":
+            return None
+        controller = self.server.controller
+        capsule_id = validate_capsule_id(parts[2])
+        if len(parts) == 4 and self.command == "GET":
+            return HTTPStatus.OK, controller.list_files(capsule_id), "file-list", capsule_id, None
+        if len(parts) == 4 and self.command == "POST":
+            if not _FILE_UPLOAD_SLOTS.acquire(blocking=False):
+                raise ApiProblem(
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    "another Capsule file upload is in progress",
+                    code="file-upload-busy",
+                )
+            try:
+                filename, content, media_type = self._file_body()
+                return (
+                    HTTPStatus.OK,
+                    controller.put_file(capsule_id, filename, content, media_type),
+                    "file-upload",
+                    capsule_id,
+                    None,
+                )
+            finally:
+                _FILE_UPLOAD_SLOTS.release()
+        if len(parts) == 5 and self.command == "DELETE":
+            return (
+                HTTPStatus.OK,
+                controller.delete_file(capsule_id, parts[4]),
+                "file-delete",
+                capsule_id,
+                None,
+            )
+        return None
+
     def _route(self) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None]:
         parts = self._path_parts()
         controller = self.server.controller
@@ -960,6 +1210,9 @@ class Handler(BaseHTTPRequestHandler):
         fixed_route = self._fixed_route(parts)
         if fixed_route is not None:
             return fixed_route
+        file_route = self._file_route(parts)
+        if file_route is not None:
+            return file_route
         if len(parts) == 4 and parts[:2] == ["v1", "capsules"] and parts[3] == "create":
             capsule_id = validate_capsule_id(parts[2])
             if self.command == "POST":
@@ -1003,16 +1256,16 @@ class Handler(BaseHTTPRequestHandler):
             len(parts) == 7
             and parts[:2] == ["v1", "capsules"]
             and parts[3] == "assistants"
-            and parts[5] == "operations"
+            and parts[5] == "powers"
             and self.command == "POST"
         ):
             capsule_id = validate_capsule_id(parts[2])
             assistant_id = parts[4]
-            operation = parts[6]
+            power = parts[6]
             payload = self._body()
             return (
                 HTTPStatus.OK,
-                controller.invoke(capsule_id, assistant_id, operation, payload),
+                controller.invoke(capsule_id, assistant_id, power, payload),
                 "assistant-invoke",
                 capsule_id,
                 assistant_id,
@@ -1069,7 +1322,8 @@ def main() -> int:
         registry = load_registry()
         token = local_token_store.ensure_token()
         client = docker.from_env(timeout=REQUEST_TIMEOUT_SECONDS)
-        controller = LocalController(client, space_id, registry)
+        storage = capsule_storage.CapsuleStorage(STORAGE_ROOT)
+        controller = LocalController(client, space_id, registry, storage)
         server = BoundedServer(("0.0.0.0", LISTEN_PORT), Handler, controller, token)
     except (KeyError, RegistryError, RuntimeError, DockerException) as exc:
         print(f"capsule-driver-local: startup failed: {exc}", file=sys.stderr, flush=True)

@@ -25,7 +25,7 @@ class LocalContractTests(unittest.TestCase):
         digest = "127.0.0.1:5000/shimpz/hello-pulse@sha256:" + "a" * 64
         registry = self._registry(digest)
         self.assertEqual(registry["hello-pulse"].image, digest)
-        self.assertEqual(set(registry["hello-pulse"].operations), {"hello"})
+        self.assertEqual(set(registry["hello-pulse"].powers), {"hello"})
 
         invalid = (
             "ghcr.io/roxygens/shimpz-space:latest",
@@ -78,6 +78,50 @@ class LocalContractTests(unittest.TestCase):
         self.assertTrue(local_app._is_replaceable_readiness_failure("hello-pulse", readiness))
         self.assertFalse(local_app._is_replaceable_readiness_failure("future-stateful-assistant", readiness))
         self.assertFalse(local_app._is_replaceable_readiness_failure("hello-pulse", ownership))
+
+    def test_ambiguous_power_rpc_is_fail_stopped_or_permanently_blocked(self) -> None:
+        controller = object.__new__(local_app.LocalController)
+        controller._blocked_power_workloads = set()
+
+        class Stoppable:
+            id = "stoppable"
+            status = "running"
+
+            def stop(self, *, timeout: int) -> None:
+                self.status = "exited"
+
+            def reload(self) -> None:
+                return None
+
+            def kill(self) -> None:
+                raise AssertionError("a proved stop must not be killed")
+
+        stopped = Stoppable()
+        controller._fail_stop_power(stopped)
+        self.assertEqual(stopped.status, "exited")
+        self.assertNotIn(stopped.id, controller._blocked_power_workloads)
+
+        class Ambiguous:
+            id = "ambiguous"
+
+            def stop(self, *, timeout: int) -> None:
+                raise local_app.DockerException("ambiguous stop")
+
+            def reload(self) -> None:
+                raise local_app.DockerException("ambiguous inspect")
+
+        ambiguous = Ambiguous()
+        with self.assertRaises(local_app.ApiProblem) as caught:
+            controller._fail_stop_power(ambiguous)
+        self.assertEqual(caught.exception.code, "assistant-power-blocked")
+        self.assertIn(ambiguous.id, controller._blocked_power_workloads)
+
+    def test_large_upload_admission_is_single_slot(self) -> None:
+        self.assertTrue(local_app._FILE_UPLOAD_SLOTS.acquire(blocking=False))
+        try:
+            self.assertFalse(local_app._FILE_UPLOAD_SLOTS.acquire(blocking=False))
+        finally:
+            local_app._FILE_UPLOAD_SLOTS.release()
 
 
 if __name__ == "__main__":
