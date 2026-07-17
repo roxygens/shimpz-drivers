@@ -58,6 +58,14 @@ class RuntimeWiringTests(unittest.TestCase):
         calls = _calls(_function("main"))
         self.assertIn("brain_runtime_token_store.ensure", calls)
 
+    def test_inference_configuration_is_metadata_only(self) -> None:
+        calls = _calls(_function("_configure_inference"))
+        self.assertIn("inference_config.normalize", calls)
+        self.assertIn("_inference_store.save", calls)
+        self.assertIn("_require_current_authorization", calls)
+        self.assertNotIn("brain_credentials_client.resolve", calls)
+        self.assertNotIn("_replace_brain", calls)
+
 
 if __name__ == "__main__":
     unittest.main()

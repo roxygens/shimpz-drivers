@@ -4034,6 +4034,33 @@ def _status(cid: str, lease: _AuthorizationLease) -> dict:
         return _describe(_require_current_authorization(cid, lease, require_isolation=False))
 
 
+def _inference_status(cid: str, lease: _AuthorizationLease) -> dict:
+    with _lock_for(cid):
+        _require_current_authorization(cid, lease)
+        try:
+            config = _inference_store.load(cid)
+        except inference_config.InferenceConfigError as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "Capsule model provider is not configured") from exc
+    return {"capsule": cid, "provider": config.provider, "model": config.model}
+
+
+def _configure_inference(cid: str, body: object, lease: _AuthorizationLease) -> dict:
+    if not isinstance(body, dict) or set(body) != {"provider", "model"}:
+        raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "inference requires provider and model")
+    try:
+        config = inference_config.normalize(body["provider"], body["model"])
+    except inference_config.InferenceConfigError as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+    with _lock_for(cid):
+        _require_current_authorization(cid, lease)
+        try:
+            _inference_store.save(cid, config)
+        except inference_config.InferenceConfigError as exc:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Capsule model provider could not be saved") from exc
+    audit.log("inference_configure", cid, result="ok", provider=config.provider, model=config.model)
+    return {"capsule": cid, "provider": config.provider, "model": config.model}
+
+
 def _logs(cid: str, lines: int, lease: _AuthorizationLease) -> dict:
     with _lock_for(cid):
         container = _require_current_authorization(cid, lease, require_isolation=False)
@@ -4315,8 +4342,8 @@ class Handler(BaseHTTPRequestHandler):
             if sub == "apps":
                 self._route_apps(method, parts, cid, principal, lease)
                 return
-            if sub == "brain":
-                self._route_brain(method, parts, cid, principal, lease)
+            if sub == "inference":
+                self._route_inference(method, parts, cid, lease)
                 return
             if sub == "chat":
                 self._route_chat(method, parts, cid, principal, lease)
@@ -4391,6 +4418,21 @@ class Handler(BaseHTTPRequestHandler):
                 deleted=result["deleted"],
             )
             self._send_json(HTTPStatus.OK, {**result, "trace_id": trace})
+            return
+        raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
+
+    def _route_inference(
+        self,
+        method: str,
+        parts: list[str],
+        cid: str,
+        lease: _AuthorizationLease,
+    ) -> None:
+        if len(parts) == 4 and method == "GET":
+            self._send_json(HTTPStatus.OK, _inference_status(cid, lease))
+            return
+        if len(parts) == 4 and method == "PUT":
+            self._send_json(HTTPStatus.OK, _configure_inference(cid, self._read_body(), lease))
             return
         raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
 
