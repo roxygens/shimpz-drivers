@@ -149,6 +149,54 @@ class _RouteHarness:
         self.sent.append((status, payload))
 
 
+class HostedCredentialLeaseTests(unittest.TestCase):
+    def test_revoked_generation_during_turn_cannot_commit_reply(self) -> None:
+        checks: list[tuple[str, str, int]] = []
+        commit = mock.Mock(return_value=True)
+        contract = types.SimpleNamespace(rules="Use only declared Powers.", powers={})
+        store = types.SimpleNamespace(load=lambda _cid: types.SimpleNamespace(provider="openai", model="gpt-5.5"))
+
+        def require_current(owner: str, provider: str, generation: int) -> None:
+            checks.append((owner, provider, generation))
+            if len(checks) == 2:
+                raise app.ApiError(HTTPStatus.CONFLICT, "model credential changed or was revoked; retry")
+
+        with (
+            _patched(
+                _installed_assistant=lambda _cid, _assistant: (
+                    "hello-pulse",
+                    contract,
+                    object(),
+                ),
+                _chat_file_metadata=lambda _cid, _files: [],
+                _inference_store=store,
+                _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
+                _require_model_credential_current=require_current,
+                _brain_runtime=object(),
+                _commit_chat_terminal=commit,
+            ),
+            mock.patch.object(
+                app.chat_orchestrator,
+                "run",
+                return_value=app.chat_orchestrator.ChatOutcome(reply="late reply", powers=()),
+            ),
+            self.assertRaises(app.ApiError) as caught,
+        ):
+            app._chat_in_turn(
+                "capsule_1",
+                "hello-pulse",
+                "hello",
+                [],
+                "turn-token",
+                object(),
+                "account_1",
+            )
+
+        self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+        self.assertEqual(checks, [("account_1", "openai", 7), ("account_1", "openai", 7)])
+        commit.assert_not_called()
+
+
 class R2BridgeTests(unittest.TestCase):
     def test_driver_operation_rechecks_owner_inside_lock_before_lazy_provision(self) -> None:
         events: list[str] = []
