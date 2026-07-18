@@ -688,13 +688,13 @@ class LocalController:
                         code="invalid-power-input",
                     ) from exc
 
-            def invoke_power(assistant_id: str, power: str, payload) -> object:
+            def invoke_power(request: brain_runtime_client.PowerRequest) -> object:
                 return self._invoke_chat_power(
                     capsule_id,
                     token,
-                    assistant_id,
-                    power,
-                    payload,
+                    request.assistant_id,
+                    request.power,
+                    request.input,
                 )
 
             initial_identity = (

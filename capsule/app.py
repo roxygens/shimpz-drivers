@@ -1761,19 +1761,19 @@ def _chat_in_turn(
     def validate_power(assistant_id: str, power: str, power_input) -> object:
         return _validate_assistant_power_input(bindings, assistant_id, power, power_input)
 
-    def invoke_power(assistant_id: str, power: str, power_input) -> object:
+    def invoke_power(request: brain_runtime_client.PowerRequest) -> object:
         require_current_credential()
-        active = bindings.get(assistant_id)
+        active = bindings.get(request.assistant_id)
         if active is None:
             raise ApiError(HTTPStatus.CONFLICT, "Brain requested an unavailable Assistant")
         invocation = _invoke_assistant_power(
             cid,
             token,
-            assistant_id,
+            request.assistant_id,
             active.contract,
             active.container,
-            power,
-            power_input,
+            request.power,
+            request.input,
         )
         return invocation["result"]
 

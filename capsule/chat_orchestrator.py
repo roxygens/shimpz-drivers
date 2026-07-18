@@ -39,24 +39,18 @@ class ChatOutcome:
     powers: tuple[InvokedPower, ...]
 
 
-PowerInvoker = Callable[[str, str, Mapping[str, Any]], object]
+PowerInvoker = Callable[[brain_runtime_client.PowerRequest], object]
 PowerValidator = Callable[[str, str, Mapping[str, Any]], Mapping[str, Any]]
+BatchHook = Callable[[tuple[brain_runtime_client.PowerRequest, ...]], None]
 CancellationCheck = Callable[[], bool]
 ContextCheck = Callable[[], None]
-
-
-@dataclass(frozen=True, slots=True)
-class _ValidatedPower:
-    request: brain_runtime_client.PowerRequest
-    power: brain_runtime_client.RuntimePower
-    input: Mapping[str, Any]
 
 
 def _validate_batch(
     requests: tuple[brain_runtime_client.PowerRequest, ...],
     declared: Mapping[tuple[str, str], brain_runtime_client.RuntimePower],
     validate_power: PowerValidator,
-) -> tuple[_ValidatedPower, ...]:
+) -> tuple[brain_runtime_client.PowerRequest, ...]:
     """Validate a complete suspension before allowing its first side effect."""
     if not requests:
         raise ChatOrchestrationError("Brain suspended without a Power request")
@@ -74,12 +68,20 @@ def _validate_batch(
             raise ApprovalRequiredError(request)
         contracts.append((request, power))
 
-    validated: list[_ValidatedPower] = []
+    validated: list[brain_runtime_client.PowerRequest] = []
     for request, power in contracts:
         safe_input = validate_power(request.assistant_id, power.id, request.input)
         if not isinstance(safe_input, Mapping):
             raise ChatOrchestrationError("Power validator returned an invalid input contract")
-        validated.append(_ValidatedPower(request=request, power=power, input=dict(safe_input)))
+        validated.append(
+            brain_runtime_client.PowerRequest(
+                interrupt_id=request.interrupt_id,
+                assistant_id=request.assistant_id,
+                power=power.id,
+                input=dict(safe_input),
+                approval=request.approval,
+            )
+        )
     return tuple(validated)
 
 
@@ -90,6 +92,8 @@ def run(
     validate_power: PowerValidator,
     invoke_power: PowerInvoker,
     *,
+    prepare_batch: BatchHook = lambda _batch: None,
+    batch_delivered: BatchHook = lambda _batch: None,
     cancelled: CancellationCheck = lambda: False,
     validate_context: ContextCheck = lambda: None,
 ) -> ChatOutcome:
@@ -113,23 +117,26 @@ def run(
 
         validate_context()
         batch = _validate_batch(turn.powers, declared, validate_power)
-        batch_interrupts = {item.request.interrupt_id for item in batch}
+        batch_interrupts = {request.interrupt_id for request in batch}
         if not seen_interrupts.isdisjoint(batch_interrupts):
             raise ChatOrchestrationError("Brain repeated a Power interrupt across rounds")
         seen_interrupts.update(batch_interrupts)
+        prepare_batch(batch)
         results: dict[str, object] = {}
-        for item in batch:
+        for request in batch:
             if cancelled():
                 raise ChatStoppedError("chat turn stopped")
             validate_context()
-            results[item.request.interrupt_id] = invoke_power(
-                item.request.assistant_id,
-                item.power.id,
-                item.input,
-            )
-            invoked.append(InvokedPower(assistant_id=item.request.assistant_id, power=item.power.id))
+            results[request.interrupt_id] = invoke_power(request)
+            invoked.append(InvokedPower(assistant_id=request.assistant_id, power=request.power))
 
         validate_context()
-        turn = runtime.resume(context, results)
+        resumed = runtime.resume(context, results)
+        if resumed.status == "power-required" and not seen_interrupts.isdisjoint(
+            request.interrupt_id for request in resumed.powers
+        ):
+            raise ChatOrchestrationError("Brain repeated a Power interrupt across rounds")
+        batch_delivered(batch)
+        turn = resumed
 
     raise ChatOrchestrationError("Brain did not complete the chat turn")

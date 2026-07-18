@@ -243,8 +243,18 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             self.assertEqual([assistant.id for assistant in context.assistants], ["places", "weather"])
             self.assertEqual(context.thread_id, app._brain_thread_id("capsule_1", ANCHOR_ID))
             self.assertTrue(callable(validate_power))
-            invoke_power("places", "search", {"name": "Berlin"})
-            invoke_power("weather", "current", {"latitude": 52.52, "longitude": 13.41})
+            invoke_power(
+                app.brain_runtime_client.PowerRequest("place-1", "places", "search", {"name": "Berlin"}, "none")
+            )
+            invoke_power(
+                app.brain_runtime_client.PowerRequest(
+                    "weather-1",
+                    "weather",
+                    "current",
+                    {"latitude": 52.52, "longitude": 13.41},
+                    "none",
+                )
+            )
             return app.chat_orchestrator.ChatOutcome(
                 reply="Berlin weather is ready.",
                 powers=(
