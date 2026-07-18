@@ -99,6 +99,7 @@ def run(
     validate_context()
     turn = runtime.start(context, message)
     invoked: list[InvokedPower] = []
+    seen_interrupts: set[str] = set()
     declared = {(assistant.id, power.id): power for assistant in context.assistants for power in assistant.powers}
 
     for _round in range(MAX_POWER_ROUNDS + 1):
@@ -112,6 +113,10 @@ def run(
 
         validate_context()
         batch = _validate_batch(turn.powers, declared, validate_power)
+        batch_interrupts = {item.request.interrupt_id for item in batch}
+        if not seen_interrupts.isdisjoint(batch_interrupts):
+            raise ChatOrchestrationError("Brain repeated a Power interrupt across rounds")
+        seen_interrupts.update(batch_interrupts)
         results: dict[str, object] = {}
         for item in batch:
             if cancelled():

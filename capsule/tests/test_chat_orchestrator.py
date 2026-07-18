@@ -134,6 +134,23 @@ class ChatOrchestratorTests(unittest.TestCase):
         self.assertEqual([item.power for item in outcome.powers], ["hello", "hello"])
         self.assertEqual(len(runtime.resumes), 2)
 
+    def test_repeated_suspension_cannot_replay_a_completed_power(self):
+        repeated = suspended(interrupt_id="same-interrupt")
+        runtime = FakeRuntime([repeated, repeated])
+        invoked = []
+
+        with self.assertRaisesRegex(chat_orchestrator.ChatOrchestrationError, "across rounds"):
+            chat_orchestrator.run(
+                runtime,
+                context(),
+                "Run once",
+                accept_input,
+                lambda assistant, power, payload: invoked.append((assistant, power, payload)) or {"message": "ok"},
+            )
+
+        self.assertEqual(invoked, [("hello-pulse", "hello", {"name": "Ada"})])
+        self.assertEqual(len(runtime.resumes), 1)
+
     def test_undeclared_power_or_changed_approval_fails_before_invocation(self):
         invoked = []
         for turn in (suspended("shell"), suspended(approval="each-run")):
