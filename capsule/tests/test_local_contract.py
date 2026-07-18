@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from email.message import Message
 from http import HTTPStatus
@@ -40,6 +42,10 @@ class LocalContractTests(unittest.TestCase):
             inference_config.normalize("openai", "gpt-5.5"),
         )
         controller.brain_runtime = runtime
+        controller.power_state = local_app.power_journal.PowerJournal(
+            Path(directory) / "power-journal" / "journal.sqlite3"
+        )
+        self.addCleanup(controller.power_state.close)
         controller._blocked_power_workloads = set()
         controller._locks = tuple(threading.RLock() for _ in range(64))
         controller._active_chat_guard = threading.Lock()
@@ -151,8 +157,33 @@ class LocalContractTests(unittest.TestCase):
             "--groups 10010,10016",
             "/run/shimpz-brain-runtime",
             "chmod 0750 /run/shimpz-brain-runtime",
+            "power_journal.py",
+            "/var/lib/shimpz-local/power-journal",
         ):
             self.assertIn(marker, dockerfile)
+        self.assertIn("SHIMPZ_LOCAL_POWER_JOURNAL_PATH", source)
+
+    def test_local_controller_accepts_an_injected_power_journal(self) -> None:
+        image = "127.0.0.1:5000/shimpz/hello-pulse@sha256:" + "a" * 64
+        injected = SimpleNamespace()
+        client = SimpleNamespace(
+            info=lambda: {"SecurityOptions": ["name=seccomp"], "NCPU": 2},
+        )
+
+        controller = local_app.LocalController(
+            client,
+            "local-space",
+            self._registry(image),
+            SimpleNamespace(),
+            brain_runtime=SimpleNamespace(),
+            power_state=injected,
+        )
+
+        self.assertIs(controller.power_state, injected)
+        self.assertEqual(
+            local_app.LOCAL_POWER_JOURNAL_PATH,
+            Path("/var/lib/shimpz-local/power-journal/journal.sqlite3"),
+        )
 
     def test_ambiguous_power_rpc_is_fail_stopped_or_permanently_blocked(self) -> None:
         controller = object.__new__(local_app.LocalController)
@@ -466,6 +497,7 @@ class LocalContractTests(unittest.TestCase):
         controller.brain_runtime = SimpleNamespace(
             delete_thread=lambda thread_id: events.append(("thread-delete", thread_id))
         )
+        controller.power_state = SimpleNamespace(purge=lambda generation: events.append(("power-purge", generation)))
         controller.storage = SimpleNamespace(destroy=lambda _cid: events.append("storage-destroy") or True)
         controller.inference_store = SimpleNamespace(delete=lambda _cid: events.append("inference-delete"))
 
@@ -482,6 +514,7 @@ class LocalContractTests(unittest.TestCase):
                 "containers-read",
                 "container-validated",
                 ("thread-delete", expected_thread),
+                ("power-purge", "a" * 64),
                 ("container-remove", True),
                 "storage-destroy",
                 "inference-delete",
@@ -532,6 +565,9 @@ class LocalContractTests(unittest.TestCase):
             raise brain_runtime_client.BrainRuntimeError("private-checkpoint-data")
 
         controller.brain_runtime = SimpleNamespace(delete_thread=fail_delete)
+        controller.power_state = SimpleNamespace(
+            purge=lambda _generation: self.fail("journal purge ran after Brain deletion failed")
+        )
         controller.storage = SimpleNamespace(destroy=lambda _cid: events.append("storage-destroy"))
         controller.inference_store = SimpleNamespace(delete=lambda _cid: events.append("inference-delete"))
 
@@ -542,6 +578,59 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(caught.exception.message, "Team conversation state could not be deleted")
         self.assertNotIn("private-checkpoint-data", str(caught.exception))
         self.assertEqual(events, [])
+        self.assertFalse(lock.locked())
+
+    def test_destroy_journal_failure_is_redacted_before_teardown(self) -> None:
+        events: list[object] = []
+        controller = object.__new__(local_app.LocalController)
+        controller.space_id = "local-space"
+        controller._active_chat_guard = threading.Lock()
+        controller._active_chat_tokens = {}
+        controller._cancelled_chat_tokens = set()
+        controller._active_power_containers = {}
+        controller._blocked_power_workloads = set()
+        lock = threading.Lock()
+        network = SimpleNamespace(
+            id="a" * 64,
+            name="capsule-network",
+            remove=lambda: events.append("network-remove"),
+        )
+        container = SimpleNamespace(
+            id="assistant-container",
+            labels={local_app.ASSISTANT_LABEL: "hello-pulse"},
+            remove=lambda *, force: events.append(("container-remove", force)),
+        )
+        controller._chat_lock = lambda _cid: lock
+        controller._lock = lambda _cid: threading.RLock()
+        controller._network = lambda _cid, *, required=False: network
+        controller._assistant_filters = lambda _cid: {}
+        controller._validate_container = lambda *_args: None
+        controller.registry = {"hello-pulse": object()}
+        controller.client = SimpleNamespace(containers=SimpleNamespace(list=lambda **_filters: [container]))
+        controller.brain_runtime = SimpleNamespace(
+            delete_thread=lambda thread_id: events.append(("thread-delete", thread_id))
+        )
+
+        def fail_purge(generation: str) -> None:
+            events.append(("power-purge", generation))
+            raise local_app.power_journal.PowerJournalError("private-journal-path")
+
+        controller.power_state = SimpleNamespace(purge=fail_purge)
+        controller.storage = SimpleNamespace(destroy=lambda _cid: events.append("storage-destroy"))
+        controller.inference_store = SimpleNamespace(delete=lambda _cid: events.append("inference-delete"))
+
+        with self.assertRaises(local_app.ApiProblem) as caught:
+            controller.destroy_capsule("capsule_1")
+
+        expected_thread = local_app._brain_thread_id("local-space", "capsule_1", "a" * 64)
+        self.assertEqual(caught.exception.status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(caught.exception.code, "power-state-unavailable")
+        self.assertEqual(caught.exception.message, "Team Power execution state could not be deleted")
+        self.assertNotIn("private-journal-path", str(caught.exception))
+        self.assertEqual(
+            events,
+            [("thread-delete", expected_thread), ("power-purge", "a" * 64)],
+        )
         self.assertFalse(lock.locked())
 
     def test_team_identity_drift_stops_before_the_provider_call(self) -> None:
@@ -602,6 +691,110 @@ class LocalContractTests(unittest.TestCase):
 
         self.assertEqual(invoked, [("capsule_1", "hello-pulse", {"name": "Captain"})])
         self.assertEqual(response, {"capsule": "capsule_1", "team": "Marketing", "reply": "Done"})
+
+    def test_chat_reuses_a_completed_power_after_resume_failure_then_delivers(self) -> None:
+        request = brain_runtime_client.PowerRequest(
+            interrupt_id="power-1",
+            assistant_id="hello-pulse",
+            power="hello",
+            input={"name": "Captain"},
+            approval="none",
+        )
+
+        class Runtime:
+            resumes = 0
+
+            def start(self, _context, _message):
+                return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=(request,))
+
+            def resume(self, _context, results):
+                self.resumes += 1
+                if results != {"power-1": {"message": "Hello, Captain!"}}:
+                    raise AssertionError("cached Power result changed")
+                if self.resumes == 1:
+                    raise brain_runtime_client.BrainRuntimeError("private-resume-failure")
+                return brain_runtime_client.RuntimeTurn(status="completed", reply="Done", powers=())
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime())
+            invocations: list[object] = []
+            controller.invoke = lambda _cid, assistant, power, payload: (
+                invocations.append(payload)
+                or {"assistant": assistant, "power": power, "result": {"message": "Hello, Captain!"}}
+            )
+            with self.assertRaises(local_app.ApiProblem) as first:
+                controller.chat(
+                    "capsule_1",
+                    {"message": "Greet me", "files": []},
+                    "openai",
+                    "sk-test-0123456789",
+                )
+
+            response = controller.chat(
+                "capsule_1",
+                {"message": "Greet me", "files": []},
+                "openai",
+                "sk-test-0123456789",
+            )
+            with closing(sqlite3.connect(controller.power_state.path)) as connection:
+                pending = connection.execute("SELECT COUNT(*) FROM batches").fetchone()
+
+        self.assertEqual(first.exception.code, "brain-runtime-failed")
+        self.assertNotIn("private-resume-failure", str(first.exception))
+        self.assertEqual(invocations, [{"name": "Captain"}])
+        self.assertEqual(response["reply"], "Done")
+        self.assertEqual(pending, (0,))
+
+    def test_chat_refuses_to_repeat_an_uncertain_power_execution(self) -> None:
+        request = brain_runtime_client.PowerRequest(
+            interrupt_id="power-1",
+            assistant_id="hello-pulse",
+            power="hello",
+            input={"name": "Captain"},
+            approval="none",
+        )
+
+        class Runtime:
+            def start(self, _context, _message):
+                return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=(request,))
+
+            def resume(self, _context, _results):
+                raise AssertionError("an uncertain Power must never reach resume")
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime())
+            invocations: list[object] = []
+
+            def fail_rpc(*_args):
+                invocations.append("rpc")
+                raise local_app.ApiProblem(
+                    HTTPStatus.BAD_GATEWAY,
+                    "private Assistant failure",
+                    code="assistant-rpc-failed",
+                )
+
+            controller.invoke = fail_rpc
+            with self.assertRaises(local_app.ApiProblem) as first:
+                controller.chat(
+                    "capsule_1",
+                    {"message": "Greet me", "files": []},
+                    "openai",
+                    "sk-test-0123456789",
+                )
+            with self.assertRaises(local_app.ApiProblem) as retry:
+                controller.chat(
+                    "capsule_1",
+                    {"message": "Greet me", "files": []},
+                    "openai",
+                    "sk-test-0123456789",
+                )
+
+        self.assertEqual(first.exception.code, "assistant-rpc-failed")
+        self.assertEqual(retry.exception.status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(retry.exception.code, "power-state-unavailable")
+        self.assertEqual(retry.exception.message, "Team Power execution state is unavailable")
+        self.assertNotIn("private Assistant failure", str(retry.exception))
+        self.assertEqual(invocations, ["rpc"])
 
     def test_chat_fails_closed_before_a_power_that_requires_approval(self) -> None:
         class Runtime:

@@ -173,6 +173,7 @@ class DockerFlowTests(unittest.TestCase):
         audit_volume = f"shimpz-local-audit-{unique}"
         storage_volume = f"shimpz-local-storage-{unique}"
         inference_volume = f"shimpz-local-inference-{unique}"
+        power_journal_volume = f"shimpz-local-power-journal-{unique}"
         space_id = f"test-space-{unique}"
         foreign_network = f"shimpz-foreign-{unique}"
         trusted_ref = ""
@@ -264,6 +265,7 @@ class DockerFlowTests(unittest.TestCase):
             self._run("volume", "create", audit_volume)
             self._run("volume", "create", storage_volume)
             self._run("volume", "create", inference_volume)
+            self._run("volume", "create", power_journal_volume)
             socket_gid = str(Path("/var/run/docker.sock").stat().st_gid)
             self._run(
                 "run",
@@ -303,6 +305,8 @@ class DockerFlowTests(unittest.TestCase):
                 f"{storage_volume}:/var/lib/shimpz-local/storage",
                 "--volume",
                 f"{inference_volume}:/var/lib/shimpz-local/inference",
+                "--volume",
+                f"{power_journal_volume}:/var/lib/shimpz-local/power-journal",
                 "--env",
                 f"SHIMPZ_SPACE_ID={space_id}",
                 "--publish",
@@ -310,6 +314,15 @@ class DockerFlowTests(unittest.TestCase):
                 controller_tag,
             )
             port, token = self._wait_controller(controller)
+            journal_mode = self._run(
+                "exec",
+                controller,
+                "/opt/venv/bin/python",
+                "-c",
+                "import os,stat; s=os.stat('/var/lib/shimpz-local/power-journal/journal.sqlite3'); "
+                "print(oct(stat.S_IMODE(s.st_mode)),s.st_uid,s.st_gid,s.st_nlink)",
+            ).stdout.strip()
+            self.assertEqual(journal_mode, "0o600 10001 10001 1")
 
             unauthenticated, _ = self._api(port, None, "GET", "/v1/assistants")
             self.assertEqual(unauthenticated, 401)
@@ -672,6 +685,7 @@ class DockerFlowTests(unittest.TestCase):
                 audit_volume,
                 storage_volume,
                 inference_volume,
+                power_journal_volume,
             )
             if trusted_ref:
                 self._remove("image", "rm", "--force", trusted_ref)
