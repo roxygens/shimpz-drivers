@@ -10,7 +10,7 @@ import time
 import uuid
 from pathlib import Path
 
-AUDIT_PATH = Path("/var/log/team-driver/audit.jsonl")
+AUDIT_PATH = Path("/var/log/shimpz-local/audit.jsonl")
 MAX_BYTES = 1024 * 1024
 BACKUPS = 2
 _LOCK = threading.Lock()

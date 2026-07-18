@@ -7,7 +7,7 @@ import http.client
 import json
 from pathlib import Path
 
-TOKEN_PATH = Path("/run/shimpz-teamdriver/token")
+TOKEN_PATH = Path("/run/shimpz-local/token")
 
 
 def main() -> int:

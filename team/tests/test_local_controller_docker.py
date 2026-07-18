@@ -172,7 +172,7 @@ class DockerFlowTests(unittest.TestCase):
                     container,
                     "/opt/venv/bin/python",
                     "-c",
-                    "from pathlib import Path; print(Path('/run/shimpz-teamdriver/token').read_text())",
+                    "from pathlib import Path; print(Path('/run/shimpz-local/token').read_text())",
                     check=False,
                 )
                 if token_result.returncode == 0 and len(token_result.stdout.strip()) == 64:
@@ -339,17 +339,17 @@ class DockerFlowTests(unittest.TestCase):
                 "--volume",
                 "/var/run/docker.sock:/var/run/docker.sock",
                 "--volume",
-                f"{token_volume}:/run/shimpz-teamdriver",
+                f"{token_volume}:/run/shimpz-local",
                 "--volume",
                 f"{runtime_token_volume}:/run/shimpz-brain-runtime",
                 "--volume",
-                f"{audit_volume}:/var/log/team-driver",
+                f"{audit_volume}:/var/log/shimpz-local",
                 "--volume",
-                f"{storage_volume}:/var/lib/team-driver/storage",
+                f"{storage_volume}:/var/lib/shimpz-local/storage",
                 "--volume",
-                f"{inference_volume}:/var/lib/team-driver/inference",
+                f"{inference_volume}:/var/lib/shimpz-local/inference",
                 "--volume",
-                f"{power_journal_volume}:/var/lib/team-driver/power-journal",
+                f"{power_journal_volume}:/var/lib/shimpz-local/power-journal",
                 "--env",
                 f"SHIMPZ_SPACE_ID={space_id}",
                 "--env",
@@ -364,7 +364,7 @@ class DockerFlowTests(unittest.TestCase):
                 controller,
                 "/opt/venv/bin/python",
                 "-c",
-                "import os,stat; s=os.stat('/var/lib/team-driver/power-journal/journal.sqlite3'); "
+                "import os,stat; s=os.stat('/var/lib/shimpz-local/power-journal/journal.sqlite3'); "
                 "print(oct(stat.S_IMODE(s.st_mode)),s.st_uid,s.st_gid,s.st_nlink)",
             ).stdout.strip()
             self.assertEqual(journal_mode, "0o600 10001 10001 1")
@@ -423,7 +423,7 @@ class DockerFlowTests(unittest.TestCase):
                     controller,
                     "test",
                     "-f",
-                    "/var/lib/team-driver/storage/demo_team/files.sqlite3",
+                    "/var/lib/shimpz-local/storage/demo_team/files.sqlite3",
                     check=False,
                 ).returncode,
                 0,
@@ -601,7 +601,7 @@ class DockerFlowTests(unittest.TestCase):
                     controller,
                     "test",
                     "-e",
-                    "/var/lib/team-driver/storage/demo_team",
+                    "/var/lib/shimpz-local/storage/demo_team",
                     check=False,
                 ).returncode,
                 0,
@@ -657,7 +657,7 @@ class DockerFlowTests(unittest.TestCase):
                     controller,
                     "test",
                     "-e",
-                    "/var/lib/team-driver/storage/reset_team",
+                    "/var/lib/shimpz-local/storage/reset_team",
                     check=False,
                 ).returncode,
                 0,
@@ -669,7 +669,7 @@ class DockerFlowTests(unittest.TestCase):
                 controller,
                 "/opt/venv/bin/python",
                 "-c",
-                "from pathlib import Path; print(Path('/var/log/team-driver/audit.jsonl').read_text())",
+                "from pathlib import Path; print(Path('/var/log/shimpz-local/audit.jsonl').read_text())",
             ).stdout
             self.assertIn('"operation":"space-reset"', audit)
             self.assertIn('"operation":"assistant-invoke"', audit)
@@ -681,7 +681,7 @@ class DockerFlowTests(unittest.TestCase):
                 controller,
                 "/opt/venv/bin/python",
                 "-c",
-                "import os,stat; s=os.stat('/run/shimpz-teamdriver/token'); "
+                "import os,stat; s=os.stat('/run/shimpz-local/token'); "
                 "print(oct(stat.S_IMODE(s.st_mode)),s.st_uid,s.st_gid,s.st_nlink)",
             ).stdout.strip()
             self.assertEqual(token_mode, "0o440 10001 10010 1")

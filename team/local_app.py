@@ -87,12 +87,12 @@ ASSISTANT_MEMORY = 128 * 1024 * 1024
 ASSISTANT_NANO_CPUS = 250_000_000
 ASSISTANT_PIDS = 64
 STATELESS_RECOVERY_ASSISTANTS = frozenset({"hello-pulse"})
-STORAGE_ROOT = Path("/var/lib/team-driver/storage")
-INFERENCE_ROOT = Path("/var/lib/team-driver/inference")
+STORAGE_ROOT = Path("/var/lib/shimpz-local/storage")
+INFERENCE_ROOT = Path("/var/lib/shimpz-local/inference")
 LOCAL_POWER_JOURNAL_PATH = Path(
     os.environ.get(
         "SHIMPZ_LOCAL_POWER_JOURNAL_PATH",
-        "/var/lib/team-driver/power-journal/journal.sqlite3",
+        "/var/lib/shimpz-local/power-journal/journal.sqlite3",
     )
 )
 _FILE_UPLOAD_SLOTS = threading.BoundedSemaphore(1)

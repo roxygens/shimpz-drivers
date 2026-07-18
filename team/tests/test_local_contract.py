@@ -20,10 +20,24 @@ sys.path.insert(0, str(TEAM))
 import brain_runtime_client
 import inference_config
 import local_app
+import local_audit
+import local_healthcheck
 import local_registry
+import local_token_store
 
 
 class LocalContractTests(unittest.TestCase):
+    def test_local_state_defaults_match_the_installer_mount_contract(self) -> None:
+        self.assertEqual(local_token_store.TOKEN_PATH, Path("/run/shimpz-local/token"))
+        self.assertEqual(local_healthcheck.TOKEN_PATH, local_token_store.TOKEN_PATH)
+        self.assertEqual(local_audit.AUDIT_PATH, Path("/var/log/shimpz-local/audit.jsonl"))
+        self.assertEqual(local_app.STORAGE_ROOT, Path("/var/lib/shimpz-local/storage"))
+        self.assertEqual(local_app.INFERENCE_ROOT, Path("/var/lib/shimpz-local/inference"))
+        self.assertEqual(
+            local_app.LOCAL_POWER_JOURNAL_PATH,
+            Path("/var/lib/shimpz-local/power-journal/journal.sqlite3"),
+        )
+
     def _registry(self, image: str) -> dict[str, local_registry.AssistantSpec]:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "registry.json"
@@ -158,7 +172,7 @@ class LocalContractTests(unittest.TestCase):
             "/run/shimpz-brain-runtime",
             "chmod 0750 /run/shimpz-brain-runtime",
             "power_journal.py",
-            "/var/lib/team-driver/power-journal",
+            "/var/lib/shimpz-local/power-journal",
         ):
             self.assertIn(marker, dockerfile)
         self.assertIn("SHIMPZ_LOCAL_POWER_JOURNAL_PATH", source)
@@ -182,7 +196,7 @@ class LocalContractTests(unittest.TestCase):
         self.assertIs(controller.power_state, injected)
         self.assertEqual(
             local_app.LOCAL_POWER_JOURNAL_PATH,
-            Path("/var/lib/team-driver/power-journal/journal.sqlite3"),
+            Path("/var/lib/shimpz-local/power-journal/journal.sqlite3"),
         )
 
     def test_ambiguous_power_rpc_is_fail_stopped_or_permanently_blocked(self) -> None:

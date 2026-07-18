@@ -23,8 +23,8 @@ are never audited.
 - Required environment: `SHIMPZ_SPACE_ID`, a stable lowercase/dash-separated ID (maximum 48 bytes).
 - Internal HTTP port: `7077`; publish it only on the private Compose network, never a host interface.
 - Process identity: UID/GID `10001:10001`, with fixed supplementary token GID `10010`.
-- Writable controller volumes: `/run/shimpz-teamdriver` for the token, `/var/log/team-driver` for the
-  bounded audit journal, and `/var/lib/team-driver/storage` for opaque per-Team blobs. Storage is
+- Writable controller volumes: `/run/shimpz-local` for the token, `/var/log/shimpz-local` for the
+  bounded audit journal, and `/var/lib/shimpz-local/storage` for opaque per-Team blobs. Storage is
   never mounted into the Admin or an Assistant. The rest of the controller root filesystem may be
   read-only, with `/tmp` as a small `noexec,nosuid,nodev` tmpfs.
 - Each Team starts with an exact 100 MiB payload quota, at most 256 files, and at most 25 MiB per
@@ -35,7 +35,7 @@ are never audited.
 - Docker access: bind `/var/run/docker.sock` read/write only into this controller and add the socket's
   numeric host GID with Compose `group_add`. The Admin must never mount the socket.
 - On the first start, the controller atomically creates 32 random bytes as 64 lowercase hex characters
-  at `/run/shimpz-teamdriver/token`, owned by `10001:10010`, mode `0440`, one hard link. The Admin mounts the
+  at `/run/shimpz-local/token`, owned by `10001:10010`, mode `0440`, one hard link. The Admin mounts the
   same setgid token volume read-only and joins GID `10010`; the bearer is never supplied through environment.
 - Image healthcheck: the bundled probe reads that token and performs authenticated `GET /healthz` on
   loopback. The endpoint returns `{status:"ok",trace_id:"…"}` and is not public/unauthenticated.
