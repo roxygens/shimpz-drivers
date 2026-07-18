@@ -28,13 +28,20 @@ class ChatStoppedError(ChatOrchestrationError):
 
 
 @dataclass(frozen=True, slots=True)
+class InvokedPower:
+    assistant_id: str
+    power: str
+
+
+@dataclass(frozen=True, slots=True)
 class ChatOutcome:
     reply: str
-    powers: tuple[str, ...]
+    powers: tuple[InvokedPower, ...]
 
 
-PowerInvoker = Callable[[str, Mapping[str, Any]], object]
+PowerInvoker = Callable[[str, str, Mapping[str, Any]], object]
 CancellationCheck = Callable[[], bool]
+ContextCheck = Callable[[], None]
 
 
 def run(
@@ -44,18 +51,25 @@ def run(
     invoke_power: PowerInvoker,
     *,
     cancelled: CancellationCheck = lambda: False,
+    validate_context: ContextCheck = lambda: None,
 ) -> ChatOutcome:
     """Run a bounded turn; every model-requested Power returns through Controller validation."""
     if cancelled():
         raise ChatStoppedError("chat turn stopped")
+    validate_context()
     turn = runtime.start(context, message)
-    invoked: list[str] = []
-    declared = {power.id: power for power in context.powers}
+    invoked: list[InvokedPower] = []
+    declared = {
+        (assistant.id, power.id): power
+        for assistant in context.assistants
+        for power in assistant.powers
+    }
 
     for _round in range(MAX_POWER_ROUNDS + 1):
         if cancelled():
             raise ChatStoppedError("chat turn stopped")
         if turn.status == "completed":
+            validate_context()
             return ChatOutcome(reply=turn.reply, powers=tuple(invoked))
         if _round == MAX_POWER_ROUNDS:
             raise ChatOrchestrationError("Brain exceeded the Power round limit")
@@ -64,18 +78,20 @@ def run(
         for request in turn.powers:
             if cancelled():
                 raise ChatStoppedError("chat turn stopped")
-            power = declared.get(request.power)
+            validate_context()
+            power = declared.get((request.assistant_id, request.power))
             if power is None or request.approval != power.approval:
                 raise ChatOrchestrationError("Brain requested an undeclared Power contract")
             if request.interrupt_id in results:
                 raise ChatOrchestrationError("Brain repeated a Power interrupt id")
             if power.approval != "none":
                 raise ApprovalRequiredError(request)
-            results[request.interrupt_id] = invoke_power(power.id, request.input)
-            invoked.append(power.id)
+            results[request.interrupt_id] = invoke_power(request.assistant_id, power.id, request.input)
+            invoked.append(InvokedPower(assistant_id=request.assistant_id, power=power.id))
 
         if not results:
             raise ChatOrchestrationError("Brain suspended without a Power request")
+        validate_context()
         turn = runtime.resume(context, results)
 
     raise ChatOrchestrationError("Brain did not complete the chat turn")

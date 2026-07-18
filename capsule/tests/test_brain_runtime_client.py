@@ -37,18 +37,23 @@ class _Connection:
 def context(secret: str) -> brain_runtime_client.RuntimeContext:
     return brain_runtime_client.RuntimeContext(
         thread_id="capsule:hello-pulse:conversation-1",
-        assistant_id="hello-pulse",
-        rules="Return a friendly greeting.",
-        powers=(
-            brain_runtime_client.RuntimePower(
-                id="hello",
-                summary="Return a greeting.",
-                input_schema={
-                    "type": "object",
-                    "properties": {"name": {"type": "string"}},
-                    "additionalProperties": False,
-                },
-                approval="none",
+        team_name="Marketing",
+        assistants=(
+            brain_runtime_client.RuntimeAssistant(
+                id="hello-pulse",
+                rules="Return a friendly greeting.",
+                powers=(
+                    brain_runtime_client.RuntimePower(
+                        id="hello",
+                        summary="Return a greeting.",
+                        input_schema={
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                            "additionalProperties": False,
+                        },
+                        approval="none",
+                    ),
+                ),
             ),
         ),
         provider="openai",
@@ -84,7 +89,10 @@ class BrainRuntimeClientTests(unittest.TestCase):
         method, path, raw_body, headers = connection.requests[0]
         self.assertEqual((method, path), ("POST", "/v1/turns"))
         self.assertEqual(headers["Authorization"], f"Bearer {self.token}")
-        self.assertEqual(json.loads(raw_body)["provider"]["api_key"], self.secret)
+        payload = json.loads(raw_body)
+        self.assertEqual(payload["provider"]["api_key"], self.secret)
+        self.assertEqual(payload["team_name"], "Marketing")
+        self.assertEqual(payload["assistants"][0]["id"], "hello-pulse")
         self.assertTrue(connection.closed)
 
     def test_power_suspension_is_parsed_without_gaining_execution_authority(self):
@@ -96,6 +104,7 @@ class BrainRuntimeClientTests(unittest.TestCase):
                     "powers": [
                         {
                             "interrupt_id": "interrupt-1",
+                            "assistant_id": "hello-pulse",
                             "power": "hello",
                             "input": {"name": "Ada"},
                             "approval": "each-run",
@@ -108,6 +117,7 @@ class BrainRuntimeClientTests(unittest.TestCase):
         result = client.start(context(self.secret), "Greet Ada")
 
         self.assertEqual(result.powers[0].power, "hello")
+        self.assertEqual(result.powers[0].assistant_id, "hello-pulse")
         self.assertEqual(result.powers[0].input, {"name": "Ada"})
         self.assertEqual(result.powers[0].approval, "each-run")
 

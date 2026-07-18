@@ -35,11 +35,17 @@ class RuntimePower:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeContext:
-    thread_id: str
-    assistant_id: str
+class RuntimeAssistant:
+    id: str
     rules: str
     powers: tuple[RuntimePower, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeContext:
+    thread_id: str
+    team_name: str
+    assistants: tuple[RuntimeAssistant, ...]
     provider: Literal["anthropic", "openai"]
     model: str
     api_key: str = field(repr=False)
@@ -48,6 +54,7 @@ class RuntimeContext:
 @dataclass(frozen=True, slots=True)
 class PowerRequest:
     interrupt_id: str
+    assistant_id: str
     power: str
     input: Mapping[str, Any]
     approval: Literal["none", "once", "each-run"]
@@ -104,16 +111,22 @@ class BrainRuntimeClient:
     def _context(context: RuntimeContext) -> dict[str, object]:
         return {
             "thread_id": context.thread_id,
-            "assistant_id": context.assistant_id,
-            "rules": context.rules,
-            "powers": [
+            "team_name": context.team_name,
+            "assistants": [
                 {
-                    "id": power.id,
-                    "summary": power.summary,
-                    "input_schema": dict(power.input_schema),
-                    "approval": power.approval,
+                    "id": assistant.id,
+                    "rules": assistant.rules,
+                    "powers": [
+                        {
+                            "id": power.id,
+                            "summary": power.summary,
+                            "input_schema": dict(power.input_schema),
+                            "approval": power.approval,
+                        }
+                        for power in assistant.powers
+                    ],
                 }
-                for power in context.powers
+                for assistant in context.assistants
             ],
             "provider": {
                 "provider": context.provider,
@@ -168,15 +181,24 @@ class BrainRuntimeClient:
             raise BrainRuntimeError("Brain runtime returned an invalid response")
         powers: list[PowerRequest] = []
         for raw in raw_powers:
-            if not isinstance(raw, dict) or set(raw) != {"interrupt_id", "power", "input", "approval"}:
+            if not isinstance(raw, dict) or set(raw) != {
+                "interrupt_id",
+                "assistant_id",
+                "power",
+                "input",
+                "approval",
+            }:
                 raise BrainRuntimeError("Brain runtime returned an invalid response")
             interrupt_id = raw["interrupt_id"]
+            assistant_id = raw["assistant_id"]
             power = raw["power"]
             power_input = raw["input"]
             approval = raw["approval"]
             if (
                 not isinstance(interrupt_id, str)
                 or SAFE_ID_RE.fullmatch(interrupt_id) is None
+                or not isinstance(assistant_id, str)
+                or POWER_ID_RE.fullmatch(assistant_id) is None
                 or not isinstance(power, str)
                 or POWER_ID_RE.fullmatch(power) is None
                 or not isinstance(power_input, dict)
@@ -186,6 +208,7 @@ class BrainRuntimeClient:
             powers.append(
                 PowerRequest(
                     interrupt_id=interrupt_id,
+                    assistant_id=assistant_id,
                     power=power,
                     input=power_input,
                     approval=approval,

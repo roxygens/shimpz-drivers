@@ -9,15 +9,20 @@ import chat_orchestrator
 def context(*powers: brain_runtime_client.RuntimePower) -> brain_runtime_client.RuntimeContext:
     return brain_runtime_client.RuntimeContext(
         thread_id="capsule:assistant:conversation",
-        assistant_id="hello-pulse",
-        rules="Use only declared Powers.",
-        powers=powers
-        or (
-            brain_runtime_client.RuntimePower(
-                id="hello",
-                summary="Return a greeting.",
-                input_schema={"type": "object", "additionalProperties": False},
-                approval="none",
+        team_name="Marketing",
+        assistants=(
+            brain_runtime_client.RuntimeAssistant(
+                id="hello-pulse",
+                rules="Use only declared Powers.",
+                powers=powers
+                or (
+                    brain_runtime_client.RuntimePower(
+                        id="hello",
+                        summary="Return a greeting.",
+                        input_schema={"type": "object", "additionalProperties": False},
+                        approval="none",
+                    ),
+                ),
             ),
         ),
         provider="openai",
@@ -33,6 +38,7 @@ def completed(reply: str = "Done") -> brain_runtime_client.RuntimeTurn:
 def suspended(
     power: str = "hello",
     *,
+    assistant_id: str = "hello-pulse",
     interrupt_id: str = "interrupt-1",
     approval: str = "none",
 ) -> brain_runtime_client.RuntimeTurn:
@@ -42,6 +48,7 @@ def suspended(
         powers=(
             brain_runtime_client.PowerRequest(
                 interrupt_id=interrupt_id,
+                assistant_id=assistant_id,
                 power=power,
                 input={"name": "Ada"},
                 approval=approval,
@@ -71,7 +78,7 @@ class ChatOrchestratorTests(unittest.TestCase):
             FakeRuntime([completed("Hello")]),
             context(),
             "Hello",
-            lambda power, payload: invoked.append((power, payload)),
+            lambda assistant, power, payload: invoked.append((assistant, power, payload)),
         )
 
         self.assertEqual(outcome.reply, "Hello")
@@ -86,13 +93,17 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Greet Ada",
-            lambda power, payload: invoked.append((power, payload)) or {"message": "Hello, Ada."},
+            lambda assistant, power, payload: invoked.append((assistant, power, payload))
+            or {"message": "Hello, Ada."},
         )
 
-        self.assertEqual(invoked, [("hello", {"name": "Ada"})])
+        self.assertEqual(invoked, [("hello-pulse", "hello", {"name": "Ada"})])
         self.assertEqual(runtime.resumes, [{"interrupt-1": {"message": "Hello, Ada."}}])
         self.assertEqual(outcome.reply, "Hello, Ada.")
-        self.assertEqual(outcome.powers, ("hello",))
+        self.assertEqual(
+            outcome.powers,
+            (chat_orchestrator.InvokedPower(assistant_id="hello-pulse", power="hello"),),
+        )
 
     def test_multiple_power_rounds_remain_bounded_and_controller_brokered(self):
         runtime = FakeRuntime(
@@ -107,10 +118,10 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Run twice",
-            lambda _power, _payload: {"message": "ok"},
+            lambda _assistant, _power, _payload: {"message": "ok"},
         )
 
-        self.assertEqual(outcome.powers, ("hello", "hello"))
+        self.assertEqual([item.power for item in outcome.powers], ["hello", "hello"])
         self.assertEqual(len(runtime.resumes), 2)
 
     def test_undeclared_power_or_changed_approval_fails_before_invocation(self):
@@ -121,7 +132,7 @@ class ChatOrchestratorTests(unittest.TestCase):
                     FakeRuntime([turn]),
                     context(),
                     "Do it",
-                    lambda power, payload: invoked.append((power, payload)),
+                    lambda assistant, power, payload: invoked.append((assistant, power, payload)),
                 )
         self.assertEqual(invoked, [])
 
@@ -139,7 +150,7 @@ class ChatOrchestratorTests(unittest.TestCase):
                 FakeRuntime([suspended(approval="each-run")]),
                 context(protected),
                 "Do it",
-                lambda power, payload: invoked.append((power, payload)),
+                lambda assistant, power, payload: invoked.append((assistant, power, payload)),
             )
 
         self.assertEqual(raised.exception.request.power, "hello")
@@ -149,7 +160,13 @@ class ChatOrchestratorTests(unittest.TestCase):
         runtime = FakeRuntime([completed()])
 
         with self.assertRaises(chat_orchestrator.ChatStoppedError):
-            chat_orchestrator.run(runtime, context(), "Stop", lambda _power, _payload: {}, cancelled=lambda: True)
+            chat_orchestrator.run(
+                runtime,
+                context(),
+                "Stop",
+                lambda _assistant, _power, _payload: {},
+                cancelled=lambda: True,
+            )
         self.assertEqual(runtime.resumes, [])
 
     def test_power_round_limit_stops_an_unbounded_model_loop(self):
@@ -162,8 +179,60 @@ class ChatOrchestratorTests(unittest.TestCase):
                 FakeRuntime(turns),
                 context(),
                 "Loop",
-                lambda _power, _payload: {"message": "ok"},
+                lambda _assistant, _power, _payload: {"message": "ok"},
             )
+
+    def test_two_assistants_can_own_the_same_local_power_id(self):
+        shared = brain_runtime_client.RuntimePower(
+            id="lookup",
+            summary="Look up data.",
+            input_schema={"type": "object"},
+            approval="none",
+        )
+        base = context()
+        team = brain_runtime_client.RuntimeContext(
+            thread_id=base.thread_id,
+            team_name=base.team_name,
+            assistants=(
+                brain_runtime_client.RuntimeAssistant("places", "Find places.", (shared,)),
+                brain_runtime_client.RuntimeAssistant("weather", "Find weather.", (shared,)),
+            ),
+            provider=base.provider,
+            model=base.model,
+            api_key=base.api_key,
+        )
+        runtime = FakeRuntime(
+            [
+                suspended("lookup", assistant_id="places", interrupt_id="place-1"),
+                suspended("lookup", assistant_id="weather", interrupt_id="weather-1"),
+                completed("Integrated."),
+            ]
+        )
+        invoked = []
+
+        outcome = chat_orchestrator.run(
+            runtime,
+            team,
+            "Find Berlin's weather",
+            lambda assistant, power, payload: invoked.append((assistant, power, payload)) or {"ok": True},
+        )
+
+        self.assertEqual([item.assistant_id for item in outcome.powers], ["places", "weather"])
+        self.assertEqual([item[:2] for item in invoked], [("places", "lookup"), ("weather", "lookup")])
+
+    def test_context_is_revalidated_around_every_side_effect_and_resume(self):
+        runtime = FakeRuntime([suspended(), completed()])
+        validations = []
+
+        chat_orchestrator.run(
+            runtime,
+            context(),
+            "Greet Ada",
+            lambda _assistant, _power, _payload: {"message": "ok"},
+            validate_context=lambda: validations.append("valid"),
+        )
+
+        self.assertEqual(len(validations), 4)
 
 
 if __name__ == "__main__":
