@@ -128,6 +128,26 @@ _capacity_lock = threading.Lock()
 _storage_lock = threading.Lock()
 _storage_instance: capsule_storage.CapsuleStorage | None = None
 _brain_runtime = brain_runtime_client.BrainRuntimeClient()
+
+
+def _validated_team_name(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 80
+        or value.strip() != value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError("Team name must contain 1 to 80 trimmed characters")
+    return value
+
+
+def _team_name_from_anchor(container) -> str:
+    try:
+        return _validated_team_name((container.labels or {}).get("capsule.name"))
+    except ValueError as exc:
+        raise ApiError(HTTPStatus.CONFLICT, "Team identity failed its persisted contract") from exc
+
+
 _inference_store = inference_config.InferenceConfigStore()
 
 
@@ -1327,6 +1347,13 @@ ASSISTANT_RPC_TIMEOUT_SECONDS = 8
 MAX_CHAT_FILES = 8
 
 
+@dataclass(frozen=True, slots=True)
+class _ActiveAssistant:
+    assistant_id: str
+    contract: marketplace.AssistantContract
+    container: object
+
+
 def _close_exec_stream(stream) -> None:
     """Close docker-py's owning HTTP response before its raw socket (Python 3.14 safe)."""
     response = getattr(stream, "_response", None)
@@ -1361,6 +1388,35 @@ def _installed_assistant(cid: str, assistant_id: object):
         raise ApiError(HTTPStatus.CONFLICT, "installed Assistant failed its identity contract")
     _require_running_capsule_isolation(container)
     return assistant_id, contract, container
+
+
+def _active_team_assistants(cid: str) -> tuple[_ActiveAssistant, ...]:
+    active: list[_ActiveAssistant] = []
+    seen: set[str] = set()
+    try:
+        installed = _capsule_app_containers(cid)
+    except docker.errors.DockerException as exc:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "installed Assistants could not be listed") from exc
+    for candidate in installed:
+        assistant_id = (candidate.labels or {}).get("capsule.app")
+        spec = marketplace.APPS.get(assistant_id) if isinstance(assistant_id, str) else None
+        if spec is None or spec.assistant is None:
+            continue
+        try:
+            candidate.reload()
+        except docker.errors.DockerException as exc:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "installed Assistant could not be inspected") from exc
+        if candidate.status != "running":
+            continue
+        if assistant_id in seen:
+            raise ApiError(HTTPStatus.CONFLICT, "duplicate installed Assistant identity")
+        current_id, contract, container = _installed_assistant(cid, assistant_id)
+        seen.add(current_id)
+        active.append(_ActiveAssistant(current_id, contract, container))
+    active.sort(key=lambda item: item.assistant_id)
+    if not active:
+        raise ApiError(HTTPStatus.CONFLICT, "install and start at least one Assistant before chatting with this Team")
+    return tuple(active)
 
 
 def _read_rpc_exact(raw_socket: socket.socket, amount: int, deadline: float) -> bytes:
@@ -1613,16 +1669,34 @@ def _require_model_credential_current(owner: str, provider: str, generation: int
         raise ApiError(HTTPStatus.CONFLICT, "model credential changed or was revoked; retry")
 
 
+def _current_team_anchor(cid: str, container_id: str, owner: str):
+    container = _get_container(manifests.capsule_container_name(cid))
+    if container is None:
+        raise ApiError(HTTPStatus.CONFLICT, "Team identity changed during the chat turn")
+    try:
+        container.reload()
+    except docker.errors.DockerException as exc:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Team identity could not be inspected") from exc
+    if (
+        container.id != container_id
+        or not network_policy.brain_identity_valid(container.attrs, cid)
+        or str(container.labels.get("capsule.owner", "")) != owner
+    ):
+        raise ApiError(HTTPStatus.CONFLICT, "Team identity changed during the chat turn")
+    _require_running_capsule_isolation(container)
+    return container
+
+
 def _chat_in_turn(
     cid: str,
-    assistant: object,
     message: str,
     file_ids: object,
     token: str,
     container,
     owner: str,
 ) -> dict:
-    assistant_id, contract, assistant_container = _installed_assistant(cid, assistant)
+    team_name = _team_name_from_anchor(container)
+    assistants = _active_team_assistants(cid)
     files = _chat_file_metadata(cid, file_ids)
     try:
         config = _inference_store.load(cid)
@@ -1635,44 +1709,73 @@ def _chat_in_turn(
 
     require_current_credential()
     runtime_context = brain_runtime_client.RuntimeContext(
-        thread_id=f"{cid}:{assistant_id}:default",
-        assistant_id=assistant_id,
-        rules=contract.rules,
-        powers=tuple(
-            brain_runtime_client.RuntimePower(
-                id=power_id,
-                summary=power.summary,
-                input_schema=power.input_schema,
-                approval=power.approval,
+        thread_id=f"{cid}:default",
+        team_name=team_name,
+        assistants=tuple(
+            brain_runtime_client.RuntimeAssistant(
+                id=active.assistant_id,
+                rules=active.contract.rules,
+                powers=tuple(
+                    brain_runtime_client.RuntimePower(
+                        id=power_id,
+                        summary=power.summary,
+                        input_schema=power.input_schema,
+                        approval=power.approval,
+                    )
+                    for power_id, power in sorted(active.contract.powers.items())
+                ),
             )
-            for power_id, power in sorted(contract.powers.items())
+            for active in assistants
         ),
         provider=config.provider,
         model=config.model,
         api_key=api_key,
     )
-    prompt = assistant_chat.build_prompt(
-        assistant_id,
-        contract.rules,
-        {power_id: power.summary for power_id, power in contract.powers.items()},
-        message,
-        files,
-    )
-    last_invocation: dict[str, object] | None = None
+    prompt = assistant_chat.build_prompt(message, files)
+    bindings = {active.assistant_id: active for active in assistants}
 
-    def invoke_power(power: str, power_input) -> object:
-        nonlocal last_invocation
+    def invoke_power(assistant_id: str, power: str, power_input) -> object:
         require_current_credential()
-        last_invocation = _invoke_assistant_power(
+        active = bindings.get(assistant_id)
+        if active is None:
+            raise ApiError(HTTPStatus.CONFLICT, "Brain requested an unavailable Assistant")
+        invocation = _invoke_assistant_power(
             cid,
             token,
             assistant_id,
-            contract,
-            assistant_container,
+            active.contract,
+            active.container,
             power,
             power_input,
         )
-        return last_invocation["result"]
+        return invocation["result"]
+
+    initial_identity = (
+        container.id,
+        team_name,
+        tuple((active.assistant_id, active.container.id) for active in assistants),
+        files,
+        config,
+    )
+
+    def validate_context() -> None:
+        require_current_credential()
+        current_anchor = _current_team_anchor(cid, container.id, owner)
+        current_assistants = _active_team_assistants(cid)
+        current_files = _chat_file_metadata(cid, file_ids)
+        try:
+            current_config = _inference_store.load(cid)
+        except inference_config.InferenceConfigError as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "Team model configuration changed; retry") from exc
+        current_identity = (
+            current_anchor.id,
+            _team_name_from_anchor(current_anchor),
+            tuple((active.assistant_id, active.container.id) for active in current_assistants),
+            current_files,
+            current_config,
+        )
+        if current_identity != initial_identity:
+            raise ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry")
 
     try:
         outcome = chat_orchestrator.run(
@@ -1681,6 +1784,7 @@ def _chat_in_turn(
             prompt,
             invoke_power,
             cancelled=lambda: _token_cancelled(token),
+            validate_context=validate_context,
         )
     except chat_orchestrator.ChatStoppedError as exc:
         raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped") from exc
@@ -1696,29 +1800,24 @@ def _chat_in_turn(
     require_current_credential()
     if not _commit_chat_terminal(cid, token):
         raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
-    response = {
+    return {
         "capsule": cid,
-        "assistant": assistant_id,
+        "team": team_name,
         "reply": outcome.reply[:CHAT_OUTPUT_CAP],
-        "power": outcome.powers[-1] if outcome.powers else None,
     }
-    if last_invocation is not None:
-        response["result"] = last_invocation["result"]
-    return response
 
 
 def _chat(
     cid: str,
-    assistant: object,
     message: str,
     file_ids: object,
     lease: _AuthorizationLease,
 ) -> dict:
-    """One tool-free model decision followed by at most one controller-brokered Power."""
+    """Run one bounded Team turn across every active, Controller-brokered Assistant Power."""
     # The slot comes first. A losing concurrent request must not run even the local credential probe,
     # much less provider status or a second provider CLI.
     with _exclusive_chat_turn(cid, lease) as (token, container):
-        return _chat_in_turn(cid, assistant, message, file_ids, token, container, lease.owner)
+        return _chat_in_turn(cid, message, file_ids, token, container, lease.owner)
 
 
 def _stop_active_power(cid: str, token: str | None) -> bool:
@@ -2005,7 +2104,10 @@ def _teardown(cid: str, *, owner: str, brain_id: str) -> _CleanupResult:
 
 
 def _create(cid: str, body: dict, owner: str = "") -> dict:
-    name = str(body.get("name") or cid).strip() or cid
+    try:
+        name = _validated_team_name(body.get("name", cid))
+    except ValueError as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
     try:
         inference = inference_config.normalize(body.get("provider"), body.get("model"))
     except inference_config.InferenceConfigError as exc:
@@ -2034,10 +2136,13 @@ def _create(cid: str, body: dict, owner: str = "") -> dict:
             # data can be destroyed/recreated; production migration must be an explicit release step.
             _require_capsule_runtime()
             _require_capsule_isolation(existing)
+            existing_name = _team_name_from_anchor(existing)
+            if "name" in body and name != existing_name:
+                raise ApiError(HTTPStatus.CONFLICT, "Team name differs from the persisted identity")
             _inference_store.save(cid, inference)
             return {
                 "capsule": cid,
-                "name": name,
+                "name": existing_name,
                 "provider": inference.provider,
                 "model": inference.model,
                 "status": existing.status,
@@ -2309,7 +2414,6 @@ class Handler(BaseHTTPRequestHandler):
     def _stream_chat(
         self,
         cid: str,
-        assistant: object,
         message: str,
         file_ids: object,
         lease: _AuthorizationLease,
@@ -2330,12 +2434,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
             try:
-                result = _chat_in_turn(cid, assistant, message, file_ids, token, container, lease.owner)
+                result = _chat_in_turn(cid, message, file_ids, token, container, lease.owner)
                 terminal = {
                     "type": "done",
                     "reply": result["reply"],
-                    "assistant": result["assistant"],
-                    "power": result["power"],
+                    "team": result["team"],
                 }
                 emit(terminal)
             except ApiError as exc:
@@ -2360,8 +2463,6 @@ class Handler(BaseHTTPRequestHandler):
             cid,
             result="ok" if terminal["type"] == "done" else "error",
             streamed=True,
-            assistant=assistant if isinstance(assistant, str) else "invalid",
-            power=terminal.get("power"),
             status=terminal.get("status"),
             reason=stream_error,
         )
@@ -2656,29 +2757,23 @@ class Handler(BaseHTTPRequestHandler):
         sub2 = parts[4] if len(parts) > 4 else ""
         if method == "POST" and sub2 in {"", "stream"}:
             body = self._read_body()
-            if not isinstance(body, dict) or set(body) not in (
-                {"assistant", "message"},
-                {"assistant", "message", "files"},
-            ):
+            if not isinstance(body, dict) or set(body) not in ({"message"}, {"message", "files"}):
                 raise ApiError(
                     HTTPStatus.UNPROCESSABLE_ENTITY,
-                    "chat requires assistant, message, and optional files",
+                    "Team chat requires message and optional files",
                 )
-            assistant = body["assistant"]
             message = validate.validate_chat_message(body["message"])
             file_ids = body.get("files")
             if sub2 == "stream":
                 _enforce_rate("stream", principal)
-                self._stream_chat(cid, assistant, message, file_ids, lease)
+                self._stream_chat(cid, message, file_ids, lease)
                 return
             _enforce_rate("chat", principal)
-            result = _chat(cid, assistant, message, file_ids, lease)
+            result = _chat(cid, message, file_ids, lease)
             audit.log(
                 "chat",
                 cid,
                 result="ok",
-                assistant=result["assistant"],
-                power=result["power"],
                 chars_in=len(message),
                 chars_out=len(result["reply"]),
             )

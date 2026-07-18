@@ -150,10 +150,21 @@ class _RouteHarness:
 
 
 class HostedCredentialLeaseTests(unittest.TestCase):
+    def test_team_name_contract_rejects_padding_controls_and_oversize_values(self) -> None:
+        self.assertEqual(app._validated_team_name("Marketing"), "Marketing")
+        for invalid in ("", " Marketing", "Marketing ", "Marketing\n", "x" * 81, None):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                app._validated_team_name(invalid)
+
     def test_revoked_generation_during_turn_cannot_commit_reply(self) -> None:
         checks: list[tuple[str, str, int]] = []
         commit = mock.Mock(return_value=True)
         contract = types.SimpleNamespace(rules="Use only declared Powers.", powers={})
+        assistant_container = types.SimpleNamespace(id="assistant-container")
+        anchor = types.SimpleNamespace(
+            id="team-container",
+            labels={"capsule.name": "Marketing", "capsule.owner": "account_1"},
+        )
         store = types.SimpleNamespace(load=lambda _cid: types.SimpleNamespace(provider="openai", model="gpt-5.5"))
 
         def require_current(owner: str, provider: str, generation: int) -> None:
@@ -163,10 +174,12 @@ class HostedCredentialLeaseTests(unittest.TestCase):
 
         with (
             _patched(
-                _installed_assistant=lambda _cid, _assistant: (
-                    "hello-pulse",
-                    contract,
-                    object(),
+                _active_team_assistants=lambda _cid: (
+                    app._ActiveAssistant(
+                        "hello-pulse",
+                        contract,
+                        assistant_container,
+                    ),
                 ),
                 _chat_file_metadata=lambda _cid, _files: [],
                 _inference_store=store,
@@ -184,17 +197,78 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         ):
             app._chat_in_turn(
                 "capsule_1",
-                "hello-pulse",
                 "hello",
                 [],
                 "turn-token",
-                object(),
+                anchor,
                 "account_1",
             )
 
         self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
         self.assertEqual(checks, [("account_1", "openai", 7), ("account_1", "openai", 7)])
         commit.assert_not_called()
+
+    def test_hosted_team_context_contains_and_routes_two_active_assistants(self) -> None:
+        place_power = types.SimpleNamespace(summary="Find a place.", input_schema={"type": "object"}, approval="none")
+        weather_power = types.SimpleNamespace(
+            summary="Read current weather.",
+            input_schema={"type": "object"},
+            approval="none",
+        )
+        place_contract = types.SimpleNamespace(rules="Resolve place names.", powers={"search": place_power})
+        weather_contract = types.SimpleNamespace(rules="Read weather data.", powers={"current": weather_power})
+        place_container = types.SimpleNamespace(id="places-container")
+        weather_container = types.SimpleNamespace(id="weather-container")
+        anchor = types.SimpleNamespace(
+            id="team-container",
+            labels={"capsule.name": "Marketing", "capsule.owner": "account_1"},
+        )
+        store = types.SimpleNamespace(load=lambda _cid: types.SimpleNamespace(provider="openai", model="gpt-test"))
+        invoked: list[tuple[str, str, object]] = []
+
+        def run(_runtime, context, _prompt, invoke_power, **_kwargs):
+            self.assertEqual([assistant.id for assistant in context.assistants], ["places", "weather"])
+            invoke_power("places", "search", {"name": "Berlin"})
+            invoke_power("weather", "current", {"latitude": 52.52, "longitude": 13.41})
+            return app.chat_orchestrator.ChatOutcome(
+                reply="Berlin weather is ready.",
+                powers=(
+                    app.chat_orchestrator.InvokedPower("places", "search"),
+                    app.chat_orchestrator.InvokedPower("weather", "current"),
+                ),
+            )
+
+        def invoke(_cid, _token, assistant_id, _contract, _container, power, payload):
+            invoked.append((assistant_id, power, payload))
+            return {"result": {"ok": True}}
+
+        with (
+            _patched(
+                _active_team_assistants=lambda _cid: (
+                    app._ActiveAssistant("places", place_contract, place_container),
+                    app._ActiveAssistant("weather", weather_contract, weather_container),
+                ),
+                _chat_file_metadata=lambda _cid, _files: [],
+                _inference_store=store,
+                _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
+                _require_model_credential_current=lambda *_args: None,
+                _brain_runtime=object(),
+                _invoke_assistant_power=invoke,
+                _commit_chat_terminal=lambda _cid, _token: True,
+            ),
+            mock.patch.object(app.chat_orchestrator, "run", side_effect=run),
+        ):
+            result = app._chat_in_turn(
+                "capsule_1",
+                "Find Berlin weather",
+                [],
+                "turn-token",
+                anchor,
+                "account_1",
+            )
+
+        self.assertEqual([item[:2] for item in invoked], [("places", "search"), ("weather", "current")])
+        self.assertEqual(result, {"capsule": "capsule_1", "team": "Marketing", "reply": "Berlin weather is ready."})
 
 
 class R2BridgeTests(unittest.TestCase):
