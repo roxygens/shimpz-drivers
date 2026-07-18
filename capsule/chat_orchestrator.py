@@ -40,14 +40,54 @@ class ChatOutcome:
 
 
 PowerInvoker = Callable[[str, str, Mapping[str, Any]], object]
+PowerValidator = Callable[[str, str, Mapping[str, Any]], Mapping[str, Any]]
 CancellationCheck = Callable[[], bool]
 ContextCheck = Callable[[], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedPower:
+    request: brain_runtime_client.PowerRequest
+    power: brain_runtime_client.RuntimePower
+    input: Mapping[str, Any]
+
+
+def _validate_batch(
+    requests: tuple[brain_runtime_client.PowerRequest, ...],
+    declared: Mapping[tuple[str, str], brain_runtime_client.RuntimePower],
+    validate_power: PowerValidator,
+) -> tuple[_ValidatedPower, ...]:
+    """Validate a complete suspension before allowing its first side effect."""
+    if not requests:
+        raise ChatOrchestrationError("Brain suspended without a Power request")
+
+    seen_interrupts: set[str] = set()
+    contracts: list[tuple[brain_runtime_client.PowerRequest, brain_runtime_client.RuntimePower]] = []
+    for request in requests:
+        power = declared.get((request.assistant_id, request.power))
+        if power is None or request.approval != power.approval:
+            raise ChatOrchestrationError("Brain requested an undeclared Power contract")
+        if request.interrupt_id in seen_interrupts:
+            raise ChatOrchestrationError("Brain repeated a Power interrupt id")
+        seen_interrupts.add(request.interrupt_id)
+        if power.approval != "none":
+            raise ApprovalRequiredError(request)
+        contracts.append((request, power))
+
+    validated: list[_ValidatedPower] = []
+    for request, power in contracts:
+        safe_input = validate_power(request.assistant_id, power.id, request.input)
+        if not isinstance(safe_input, Mapping):
+            raise ChatOrchestrationError("Power validator returned an invalid input contract")
+        validated.append(_ValidatedPower(request=request, power=power, input=dict(safe_input)))
+    return tuple(validated)
 
 
 def run(
     runtime: brain_runtime_client.BrainRuntimeClient,
     context: brain_runtime_client.RuntimeContext,
     message: str,
+    validate_power: PowerValidator,
     invoke_power: PowerInvoker,
     *,
     cancelled: CancellationCheck = lambda: False,
@@ -70,23 +110,20 @@ def run(
         if _round == MAX_POWER_ROUNDS:
             raise ChatOrchestrationError("Brain exceeded the Power round limit")
 
+        validate_context()
+        batch = _validate_batch(turn.powers, declared, validate_power)
         results: dict[str, object] = {}
-        for request in turn.powers:
+        for item in batch:
             if cancelled():
                 raise ChatStoppedError("chat turn stopped")
             validate_context()
-            power = declared.get((request.assistant_id, request.power))
-            if power is None or request.approval != power.approval:
-                raise ChatOrchestrationError("Brain requested an undeclared Power contract")
-            if request.interrupt_id in results:
-                raise ChatOrchestrationError("Brain repeated a Power interrupt id")
-            if power.approval != "none":
-                raise ApprovalRequiredError(request)
-            results[request.interrupt_id] = invoke_power(request.assistant_id, power.id, request.input)
-            invoked.append(InvokedPower(assistant_id=request.assistant_id, power=power.id))
+            results[item.request.interrupt_id] = invoke_power(
+                item.request.assistant_id,
+                item.power.id,
+                item.input,
+            )
+            invoked.append(InvokedPower(assistant_id=item.request.assistant_id, power=item.power.id))
 
-        if not results:
-            raise ChatOrchestrationError("Brain suspended without a Power request")
         validate_context()
         turn = runtime.resume(context, results)
 

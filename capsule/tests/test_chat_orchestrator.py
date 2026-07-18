@@ -57,6 +57,14 @@ def suspended(
     )
 
 
+def suspension(*requests: brain_runtime_client.PowerRequest) -> brain_runtime_client.RuntimeTurn:
+    return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=requests)
+
+
+def accept_input(_assistant: str, _power: str, payload):
+    return payload
+
+
 class FakeRuntime:
     def __init__(self, turns):
         self.turns = iter(turns)
@@ -78,6 +86,7 @@ class ChatOrchestratorTests(unittest.TestCase):
             FakeRuntime([completed("Hello")]),
             context(),
             "Hello",
+            accept_input,
             lambda assistant, power, payload: invoked.append((assistant, power, payload)),
         )
 
@@ -93,6 +102,7 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Greet Ada",
+            accept_input,
             lambda assistant, power, payload: invoked.append((assistant, power, payload)) or {"message": "Hello, Ada."},
         )
 
@@ -117,6 +127,7 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Run twice",
+            accept_input,
             lambda _assistant, _power, _payload: {"message": "ok"},
         )
 
@@ -131,6 +142,7 @@ class ChatOrchestratorTests(unittest.TestCase):
                     FakeRuntime([turn]),
                     context(),
                     "Do it",
+                    accept_input,
                     lambda assistant, power, payload: invoked.append((assistant, power, payload)),
                 )
         self.assertEqual(invoked, [])
@@ -149,6 +161,7 @@ class ChatOrchestratorTests(unittest.TestCase):
                 FakeRuntime([suspended(approval="each-run")]),
                 context(protected),
                 "Do it",
+                accept_input,
                 lambda assistant, power, payload: invoked.append((assistant, power, payload)),
             )
 
@@ -163,6 +176,7 @@ class ChatOrchestratorTests(unittest.TestCase):
                 runtime,
                 context(),
                 "Stop",
+                accept_input,
                 lambda _assistant, _power, _payload: {},
                 cancelled=lambda: True,
             )
@@ -178,6 +192,7 @@ class ChatOrchestratorTests(unittest.TestCase):
                 FakeRuntime(turns),
                 context(),
                 "Loop",
+                accept_input,
                 lambda _assistant, _power, _payload: {"message": "ok"},
             )
 
@@ -213,6 +228,7 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             team,
             "Find Berlin's weather",
+            accept_input,
             lambda assistant, power, payload: invoked.append((assistant, power, payload)) or {"ok": True},
         )
 
@@ -227,11 +243,59 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Greet Ada",
+            accept_input,
             lambda _assistant, _power, _payload: {"message": "ok"},
             validate_context=lambda: validations.append("valid"),
         )
 
-        self.assertEqual(len(validations), 4)
+        self.assertEqual(len(validations), 5)
+
+    def test_invalid_later_request_prevents_every_batch_side_effect(self):
+        first = suspended(interrupt_id="first").powers[0]
+        invalid = suspended("shell", interrupt_id="second").powers[0]
+        invoked = []
+
+        with self.assertRaisesRegex(chat_orchestrator.ChatOrchestrationError, "undeclared"):
+            chat_orchestrator.run(
+                FakeRuntime([suspension(first, invalid)]),
+                context(),
+                "Run the batch",
+                accept_input,
+                lambda assistant, power, payload: invoked.append((assistant, power, payload)),
+            )
+
+        self.assertEqual(invoked, [])
+
+    def test_every_batch_input_is_validated_before_the_first_side_effect(self):
+        hello = context().assistants[0].powers[0]
+        lookup = brain_runtime_client.RuntimePower(
+            id="lookup",
+            summary="Look up data.",
+            input_schema={"type": "object"},
+            approval="none",
+        )
+        first = suspended(interrupt_id="first").powers[0]
+        second = suspended("lookup", interrupt_id="second").powers[0]
+        validated = []
+        invoked = []
+
+        def validate(assistant, power, payload):
+            validated.append((assistant, power, payload))
+            if power == "lookup":
+                raise ValueError("invalid lookup input")
+            return payload
+
+        with self.assertRaisesRegex(ValueError, "invalid lookup input"):
+            chat_orchestrator.run(
+                FakeRuntime([suspension(first, second)]),
+                context(hello, lookup),
+                "Run the batch",
+                validate,
+                lambda assistant, power, payload: invoked.append((assistant, power, payload)),
+            )
+
+        self.assertEqual([item[1] for item in validated], ["hello", "lookup"])
+        self.assertEqual(invoked, [])
 
 
 if __name__ == "__main__":

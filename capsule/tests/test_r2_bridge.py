@@ -226,8 +226,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         store = types.SimpleNamespace(load=lambda _cid: types.SimpleNamespace(provider="openai", model="gpt-test"))
         invoked: list[tuple[str, str, object]] = []
 
-        def run(_runtime, context, _prompt, invoke_power, **_kwargs):
+        def run(_runtime, context, _prompt, validate_power, invoke_power, **_kwargs):
             self.assertEqual([assistant.id for assistant in context.assistants], ["places", "weather"])
+            self.assertTrue(callable(validate_power))
             invoke_power("places", "search", {"name": "Berlin"})
             invoke_power("weather", "current", {"latitude": 52.52, "longitude": 13.41})
             return app.chat_orchestrator.ChatOutcome(

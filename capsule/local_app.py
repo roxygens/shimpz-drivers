@@ -638,6 +638,23 @@ class LocalController:
                 api_key=api_key,
             )
             prompt = assistant_chat.build_prompt(message, files)
+            bindings = {active.spec.assistant_id: active.spec for active in assistants}
+
+            def validate_power(assistant_id: str, power: str, payload) -> object:
+                if assistant_id not in bindings:
+                    raise ApiProblem(
+                        HTTPStatus.CONFLICT,
+                        "Brain requested an unavailable Assistant",
+                        code="assistant-unavailable",
+                    )
+                try:
+                    return validate_power_input(assistant_id, power, payload)
+                except ValueError as exc:
+                    raise ApiProblem(
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        str(exc),
+                        code="invalid-power-input",
+                    ) from exc
 
             def invoke_power(assistant_id: str, power: str, payload) -> object:
                 return self._invoke_chat_power(
@@ -681,6 +698,7 @@ class LocalController:
                     self.brain_runtime,
                     context,
                     prompt,
+                    validate_power,
                     invoke_power,
                     cancelled=lambda: self._chat_cancelled(token),
                     validate_context=validate_context,

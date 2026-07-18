@@ -1630,6 +1630,16 @@ def _invoke_assistant_power(
     return {"assistant": assistant_id, "power": power, "result": result}
 
 
+def _validate_assistant_power_input(bindings, assistant_id: str, power: str, power_input) -> object:
+    """Normalize one hosted Power input without touching Docker or another external system."""
+    if assistant_id not in bindings:
+        raise ApiError(HTTPStatus.CONFLICT, "Brain requested an unavailable Assistant")
+    try:
+        return marketplace.validate_power_input(assistant_id, power, power_input)
+    except ValueError as exc:
+        raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+
 def _chat_file_metadata(cid: str, file_ids: object) -> list[dict[str, object]]:
     if file_ids is None:
         return []
@@ -1734,6 +1744,9 @@ def _chat_in_turn(
     prompt = assistant_chat.build_prompt(message, files)
     bindings = {active.assistant_id: active for active in assistants}
 
+    def validate_power(assistant_id: str, power: str, power_input) -> object:
+        return _validate_assistant_power_input(bindings, assistant_id, power, power_input)
+
     def invoke_power(assistant_id: str, power: str, power_input) -> object:
         require_current_credential()
         active = bindings.get(assistant_id)
@@ -1782,6 +1795,7 @@ def _chat_in_turn(
             _brain_runtime,
             runtime_context,
             prompt,
+            validate_power,
             invoke_power,
             cancelled=lambda: _token_cancelled(token),
             validate_context=validate_context,
