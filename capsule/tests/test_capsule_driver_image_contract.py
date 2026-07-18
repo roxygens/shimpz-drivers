@@ -28,9 +28,10 @@ class CapsuleDriverImageContractTests(unittest.TestCase):
             dockerfile,
         )
         self.assertIn("chmod 0750 /run/shimpz-brain-runtime", dockerfile)
+        self.assertIn("/var/lib/capsule-driver/inference", dockerfile)
         self.assertIn("/var/lib/capsule-driver/power-journal", dockerfile)
         self.assertIn(
-            "/var/lib/capsule-driver/cleanup \\\n        /var/lib/capsule-driver/power-journal \\",
+            "/var/lib/capsule-driver/cleanup \\\n        /var/lib/capsule-driver/inference \\\n        /var/lib/capsule-driver/power-journal \\",
             dockerfile,
         )
 
