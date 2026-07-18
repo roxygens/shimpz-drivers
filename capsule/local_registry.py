@@ -69,7 +69,10 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
         image=_digest_ref(raw["hello_pulse_image"]),
         rpc_command="/usr/local/bin/shimpz-assistant-rpc",
         health_path="/healthz",
-        rules="Return a friendly greeting by using only the declared hello Power.",
+        rules=(
+            "Respond naturally to questions and conversation. Use the declared hello Power only when the Captain "
+            "explicitly asks to run or demonstrate it. After a Power result, explain the outcome naturally."
+        ),
         powers={
             "hello": PowerSpec(
                 method="POST",

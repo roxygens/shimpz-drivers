@@ -86,7 +86,9 @@ APPS: dict[str, AppSpec] = {
         ),
         assistant=AssistantContract(
             rules=(
-                "Return a friendly greeting when useful. Use only the declared hello Power. "
+                "Respond naturally to questions and conversation. Use the declared hello Power only when the "
+                "Captain explicitly asks to run or demonstrate it. After a Power result, explain the outcome "
+                "naturally. "
                 "Never infer additional authority, install dependencies, access files, or send data "
                 "outside the Capsule."
             ),

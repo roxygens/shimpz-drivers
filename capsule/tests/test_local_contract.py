@@ -59,6 +59,8 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(registry["hello-pulse"].image, digest)
         self.assertEqual(set(registry["hello-pulse"].powers), {"hello"})
         self.assertEqual(registry["hello-pulse"].powers["hello"].path, "/v1/powers/hello")
+        self.assertIn("Respond naturally to questions and conversation", registry["hello-pulse"].rules)
+        self.assertIn("only when the Captain explicitly asks", registry["hello-pulse"].rules)
 
         invalid = (
             "ghcr.io/roxygens/shimpz-space:latest",
