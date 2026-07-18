@@ -156,15 +156,11 @@ class AppLifecycleTests(unittest.TestCase):
 
         self.probe_error = r2_client.R2Error("safe", category="network")
         with mock.patch.object(app.credential_store.STORE, "team_record_count", return_value=256):
-            retry_status, retried = self.request(
-                "POST", "/v1/teams/team_a/credentials", first_body, token=TEAM_A_TOKEN
-            )
+            retry_status, retried = self.request("POST", "/v1/teams/team_a/credentials", first_body, token=TEAM_A_TOKEN)
         self.assertEqual((retry_status, retried), (200, first))
         self.assertEqual(self.probe_calls, first_probe_count, "an exact retry must not depend on provider availability")
         conflict_body = {**first_body, "label": "Changed request"}
-        conflict_status, _ = self.request(
-            "POST", "/v1/teams/team_a/credentials", conflict_body, token=TEAM_A_TOKEN
-        )
+        conflict_status, _ = self.request("POST", "/v1/teams/team_a/credentials", conflict_body, token=TEAM_A_TOKEN)
         self.assertEqual(conflict_status, 409)
         self.assertEqual(self.probe_calls, first_probe_count)
         self.probe_error = None
@@ -198,22 +194,16 @@ class AppLifecycleTests(unittest.TestCase):
             "expected_generation": 1,
         }
         self.probe_error = r2_client.R2Error("safe", category="authentication")
-        status, _ = self.request(
-            "PUT", f"/v1/teams/team_a/credentials/{first['id']}", rotate, token=TEAM_A_TOKEN
-        )
+        status, _ = self.request("PUT", f"/v1/teams/team_a/credentials/{first['id']}", rotate, token=TEAM_A_TOKEN)
         self.assertEqual(status, 422)
         self.assertEqual(app.credential_store.STORE.resolve("team_a", first["id"]).metadata.generation, 1)
         stale = {**rotate, "expected_generation": 99}
         calls_before_stale = self.probe_calls
-        status, _ = self.request(
-            "PUT", f"/v1/teams/team_a/credentials/{first['id']}", stale, token=TEAM_A_TOKEN
-        )
+        status, _ = self.request("PUT", f"/v1/teams/team_a/credentials/{first['id']}", stale, token=TEAM_A_TOKEN)
         self.assertEqual(status, 409)
         self.assertEqual(self.probe_calls, calls_before_stale, "stale CAS must fail before provider I/O")
         self.probe_error = None
-        status, rotated = self.request(
-            "PUT", f"/v1/teams/team_a/credentials/{first['id']}", rotate, token=TEAM_A_TOKEN
-        )
+        status, rotated = self.request("PUT", f"/v1/teams/team_a/credentials/{first['id']}", rotate, token=TEAM_A_TOKEN)
         self.assertEqual((status, rotated["generation"]), (200, 2))
         status, verified = self.request(
             "POST", f"/v1/teams/team_a/credentials/{first['id']}/verify", {}, token=TEAM_A_TOKEN
@@ -285,18 +275,14 @@ class AppLifecycleTests(unittest.TestCase):
         self.assertEqual(app.principal_store.STORE.state_path.read_bytes(), principals_before)
 
         for _ in range(2):
-            status, payload = self.request(
-                "POST", "/v1/teams/retire", {"team_id": "team_b"}, token=PROVISIONER_TOKEN
-            )
+            status, payload = self.request("POST", "/v1/teams/retire", {"team_id": "team_b"}, token=PROVISIONER_TOKEN)
             self.assertEqual((status, payload), (200, {"status": "retired"}))
         status, _ = self.request("GET", "/v1/teams/team_b/credentials", token=TEAM_B_TOKEN)
         self.assertEqual(status, 404)
         state = json.loads(app.credential_store.STORE.state_path.read_text())
         self.assertIsNone(state["teams"]["team_b"][created["id"]]["envelope"])
         for _ in range(2):
-            status, payload = self.request(
-                "POST", "/v1/teams/finalize", {"team_id": "team_b"}, token=PROVISIONER_TOKEN
-            )
+            status, payload = self.request("POST", "/v1/teams/finalize", {"team_id": "team_b"}, token=PROVISIONER_TOKEN)
             self.assertEqual((status, payload), (200, {"status": "finalized"}))
         self.assertNotIn("team_b", json.loads(app.credential_store.STORE.state_path.read_text())["teams"])
         replay_status, _ = self.request(
@@ -310,9 +296,7 @@ class AppLifecycleTests(unittest.TestCase):
 
     def test_body_limit_is_413(self) -> None:
         self.provision("team_a", TEAM_A_TOKEN)
-        status, _ = self.request(
-            "POST", "/v1/teams/team_a/credentials", b"{" + b" " * (64 * 1024), token=TEAM_A_TOKEN
-        )
+        status, _ = self.request("POST", "/v1/teams/team_a/credentials", b"{" + b" " * (64 * 1024), token=TEAM_A_TOKEN)
         self.assertEqual(status, 413)
 
     def test_health_and_startup_fail_closed_after_key_loss(self) -> None:

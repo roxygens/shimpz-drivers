@@ -289,8 +289,7 @@ class PrincipalStore:
             if not isinstance(principals, dict):
                 raise PrincipalStoreError("principal registry set is malformed")
             if any(
-                record.get("team_id") == team and record.get("status") == "active"
-                for record in principals.values()
+                record.get("team_id") == team and record.get("status") == "active" for record in principals.values()
             ):
                 raise PrincipalError("Team principal is still active")
 
