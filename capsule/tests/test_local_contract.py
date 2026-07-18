@@ -48,7 +48,7 @@ class LocalContractTests(unittest.TestCase):
         controller._active_power_containers = {}
         controller._cancelled_chat_tokens = set()
         container = SimpleNamespace(id="assistant-container", status="running", reload=lambda: None)
-        network = SimpleNamespace(id="team-network-id", name="capsule-network")
+        network = SimpleNamespace(id="a" * 64, name="capsule-network")
         controller._network = lambda _cid: network
         controller._validate_network = lambda _network, _cid: "Marketing"
         controller._assistant_container = lambda _cid, _assistant: container
@@ -99,6 +99,28 @@ class LocalContractTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(local_app.ApiProblem) as caught:
                 local_app.validate_capsule_id(invalid)
             self.assertEqual(caught.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
+
+    def test_local_thread_identity_is_scoped_to_the_network_generation(self) -> None:
+        first = local_app._brain_thread_id("local-space", "capsule_1", "a" * 64)
+        second = local_app._brain_thread_id("local-space", "capsule_1", "b" * 64)
+
+        self.assertEqual(first, f"local:local-space:capsule_1:{'a' * 64}:default")
+        self.assertNotEqual(first, second)
+        for space_id, capsule_id, network_id in (
+            ("bad space", "capsule_1", "a" * 64),
+            ("local-space", "bad-capsule", "a" * 64),
+            ("local-space", "capsule_1", "not-a-docker-id"),
+        ):
+            with (
+                self.subTest(
+                    space_id=space_id,
+                    capsule_id=capsule_id,
+                    network_id=network_id,
+                ),
+                self.assertRaises(local_app.ApiProblem) as caught,
+            ):
+                local_app._brain_thread_id(space_id, capsule_id, network_id)
+            self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
 
     def test_capsule_name_matches_the_admin_contract(self) -> None:
         self.assertEqual(local_app.validate_capsule_name("My Capsule"), "My Capsule")
@@ -387,8 +409,140 @@ class LocalContractTests(unittest.TestCase):
             )
 
         self.assertEqual([assistant.id for assistant in runtime.context.assistants], ["hello-pulse", "weather-pulse"])
-        self.assertEqual(runtime.context.thread_id, "local:local-space:capsule_1:default")
+        self.assertEqual(
+            runtime.context.thread_id,
+            f"local:local-space:capsule_1:{'a' * 64}:default",
+        )
         self.assertEqual(response["team"], "Marketing")
+
+    def test_destroy_drains_chat_and_deletes_generation_before_teardown(self) -> None:
+        events: list[object] = []
+        controller = object.__new__(local_app.LocalController)
+        controller.space_id = "local-space"
+        controller._active_chat_guard = threading.Lock()
+        controller._active_chat_tokens = {"capsule_1": "turn-token"}
+        controller._cancelled_chat_tokens = set()
+        controller._active_power_containers = {"capsule_1": ("turn-token", object())}
+        controller._blocked_power_workloads = set()
+
+        class ChatLock:
+            def acquire(self, *, timeout: int) -> bool:
+                events.append(("chat-lock", timeout))
+                return True
+
+            def release(self) -> None:
+                events.append("chat-release")
+
+        class LifecycleLock:
+            def __enter__(self):
+                events.append("lifecycle-lock")
+
+            def __exit__(self, *_args) -> None:
+                events.append("lifecycle-release")
+
+        network = SimpleNamespace(
+            id="a" * 64,
+            name="capsule-network",
+            remove=lambda: events.append("network-remove"),
+        )
+        container = SimpleNamespace(
+            id="assistant-container",
+            labels={local_app.ASSISTANT_LABEL: "hello-pulse"},
+            remove=lambda *, force: events.append(("container-remove", force)),
+        )
+
+        def list_containers(**_filters):
+            events.append("containers-read")
+            return [container]
+
+        controller._fail_stop_power = lambda _container: events.append("power-stopped")
+        controller._chat_lock = lambda _cid: ChatLock()
+        controller._lock = lambda _cid: LifecycleLock()
+        controller._network = lambda _cid, *, required=False: events.append("network-read") or network
+        controller._assistant_filters = lambda _cid: {}
+        controller._validate_container = lambda *_args: events.append("container-validated")
+        controller.registry = {"hello-pulse": object()}
+        controller.client = SimpleNamespace(containers=SimpleNamespace(list=list_containers))
+        controller.brain_runtime = SimpleNamespace(
+            delete_thread=lambda thread_id: events.append(("thread-delete", thread_id))
+        )
+        controller.storage = SimpleNamespace(destroy=lambda _cid: events.append("storage-destroy") or True)
+        controller.inference_store = SimpleNamespace(delete=lambda _cid: events.append("inference-delete"))
+
+        result = controller.destroy_capsule("capsule_1")
+
+        expected_thread = local_app._brain_thread_id("local-space", "capsule_1", "a" * 64)
+        self.assertEqual(
+            events,
+            [
+                "power-stopped",
+                ("chat-lock", 30),
+                "lifecycle-lock",
+                "network-read",
+                "containers-read",
+                "container-validated",
+                ("thread-delete", expected_thread),
+                ("container-remove", True),
+                "storage-destroy",
+                "inference-delete",
+                "network-remove",
+                "lifecycle-release",
+                "chat-release",
+            ],
+        )
+        self.assertEqual(
+            result,
+            {
+                "id": "capsule_1",
+                "destroyed": True,
+                "assistants_removed": 1,
+                "storage_removed": True,
+            },
+        )
+
+    def test_destroy_brain_failure_is_redacted_and_mutates_nothing(self) -> None:
+        events: list[str] = []
+        controller = object.__new__(local_app.LocalController)
+        controller.space_id = "local-space"
+        controller._active_chat_guard = threading.Lock()
+        controller._active_chat_tokens = {}
+        controller._cancelled_chat_tokens = set()
+        controller._active_power_containers = {}
+        controller._blocked_power_workloads = set()
+        lock = threading.Lock()
+        network = SimpleNamespace(
+            id="a" * 64,
+            name="capsule-network",
+            remove=lambda: events.append("network-remove"),
+        )
+        container = SimpleNamespace(
+            id="assistant-container",
+            labels={local_app.ASSISTANT_LABEL: "hello-pulse"},
+            remove=lambda *, force: events.append("container-remove"),
+        )
+        controller._chat_lock = lambda _cid: lock
+        controller._lock = lambda _cid: threading.RLock()
+        controller._network = lambda _cid, *, required=False: network
+        controller._assistant_filters = lambda _cid: {}
+        controller._validate_container = lambda *_args: None
+        controller.registry = {"hello-pulse": object()}
+        controller.client = SimpleNamespace(containers=SimpleNamespace(list=lambda **_filters: [container]))
+
+        def fail_delete(_thread_id: str) -> None:
+            raise brain_runtime_client.BrainRuntimeError("private-checkpoint-data")
+
+        controller.brain_runtime = SimpleNamespace(delete_thread=fail_delete)
+        controller.storage = SimpleNamespace(destroy=lambda _cid: events.append("storage-destroy"))
+        controller.inference_store = SimpleNamespace(delete=lambda _cid: events.append("inference-delete"))
+
+        with self.assertRaises(local_app.ApiProblem) as caught:
+            controller.destroy_capsule("capsule_1")
+
+        self.assertEqual(caught.exception.status, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.assertEqual(caught.exception.message, "Team conversation state could not be deleted")
+        self.assertNotIn("private-checkpoint-data", str(caught.exception))
+        self.assertEqual(events, [])
+        self.assertFalse(lock.locked())
 
     def test_team_identity_drift_stops_before_the_provider_call(self) -> None:
         class Runtime:

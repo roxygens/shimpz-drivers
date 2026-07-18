@@ -61,6 +61,7 @@ IMAGE_LABEL = "com.shimpz.local.image"
 _CAPSULE_ID = re.compile(r"[a-z0-9_]{1,40}")
 _ASSISTANT_ID = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 _SPACE_ID = re.compile(r"[a-z0-9][a-z0-9]*(?:-[a-z0-9]+)*")
+_DOCKER_ID = re.compile(r"[0-9a-f]{12,64}")
 MAX_CAPSULE_ID_LENGTH = 40
 MAX_ASSISTANT_ID_LENGTH = 48
 MAX_SPACE_ID_LENGTH = 48
@@ -176,6 +177,26 @@ def _space_prefix(space_id: str) -> str:
     return hashlib.sha256(space_id.encode("ascii")).hexdigest()[:12]
 
 
+def _brain_thread_id(space_id: str, capsule_id: str, network_id: str) -> str:
+    """Bind local conversation state to one immutable Team network generation."""
+    if (
+        not isinstance(space_id, str)
+        or len(space_id) > MAX_SPACE_ID_LENGTH
+        or _SPACE_ID.fullmatch(space_id) is None
+        or not isinstance(capsule_id, str)
+        or len(capsule_id) > MAX_CAPSULE_ID_LENGTH
+        or _CAPSULE_ID.fullmatch(capsule_id) is None
+        or not isinstance(network_id, str)
+        or _DOCKER_ID.fullmatch(network_id) is None
+    ):
+        raise ApiProblem(
+            HTTPStatus.CONFLICT,
+            "Team identity failed its persisted contract",
+            code="ownership-conflict",
+        )
+    return f"local:{space_id}:{capsule_id}:{network_id}:default"
+
+
 def half_cpu_set(processors: int) -> str:
     if isinstance(processors, bool) or not isinstance(processors, int) or processors < 1:
         raise RuntimeError("the Docker daemon reported an invalid CPU count")
@@ -238,6 +259,17 @@ class LocalController:
                 return False
             self._active_chat_tokens.pop(capsule_id, None)
             return True
+
+    def _cancel_chat_for_destroy(self, capsule_id: str) -> None:
+        """Prevent another Power and synchronously stop one already executing."""
+        with self._active_chat_guard:
+            token = self._active_chat_tokens.get(capsule_id)
+            if token is not None:
+                self._cancelled_chat_tokens.add(token)
+            active = self._active_power_containers.get(capsule_id)
+            active_power = active[1] if token is not None and active is not None and active[0] == token else None
+        if active_power is not None:
+            self._fail_stop_power(active_power)
 
     @contextmanager
     def _exclusive_chat_turn(self, capsule_id: str):
@@ -615,7 +647,7 @@ class LocalController:
         with self._exclusive_chat_turn(capsule_id) as token:
             team_name, network_id, assistants, files, config = self._chat_setup(capsule_id, file_ids, provider)
             context = brain_runtime_client.RuntimeContext(
-                thread_id=f"local:{self.space_id}:{capsule_id}:default",
+                thread_id=_brain_thread_id(self.space_id, capsule_id, network_id),
                 team_name=team_name,
                 assistants=tuple(
                     brain_runtime_client.RuntimeAssistant(
@@ -1307,38 +1339,77 @@ class LocalController:
 
     def destroy_capsule(self, capsule_id: str) -> dict[str, object]:
         capsule_id = validate_capsule_id(capsule_id)
-        with self._lock(capsule_id):
-            network = self._network(capsule_id, required=False)
-            try:
-                containers = self.client.containers.list(**self._assistant_filters(capsule_id))
-            except DockerException as exc:
-                raise ApiProblem(
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                    "Docker is unavailable",
-                    code="docker-unavailable",
-                ) from exc
-            removed = 0
-            for container in containers:
-                assistant_id = container.labels.get(ASSISTANT_LABEL)
-                spec = self.registry.get(assistant_id)
-                if spec is None or network is None:
-                    raise ApiProblem(
-                        HTTPStatus.CONFLICT,
-                        "Capsule resources failed their ownership contract",
-                        code="ownership-conflict",
-                    )
-                self._validate_container(container, capsule_id, spec, network.name)
+        self._cancel_chat_for_destroy(capsule_id)
+
+        chat_lock = self._chat_lock(capsule_id)
+        if not chat_lock.acquire(timeout=30):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "active Team chat did not stop in time",
+                code="chat-active",
+            )
+        try:
+            with self._lock(capsule_id):
+                network = self._network(capsule_id, required=False)
                 try:
-                    container.remove(force=True)
+                    containers = self.client.containers.list(**self._assistant_filters(capsule_id))
                 except DockerException as exc:
                     raise ApiProblem(
                         HTTPStatus.SERVICE_UNAVAILABLE,
-                        "Docker could not destroy the Capsule",
-                        code="docker-remove-failed",
+                        "Docker is unavailable",
+                        code="docker-unavailable",
                     ) from exc
-                self._blocked_power_workloads.discard(container.id)
-                removed += 1
-            if network is None:
+
+                for container in containers:
+                    assistant_id = container.labels.get(ASSISTANT_LABEL)
+                    spec = self.registry.get(assistant_id)
+                    if spec is None or network is None:
+                        raise ApiProblem(
+                            HTTPStatus.CONFLICT,
+                            "Capsule resources failed their ownership contract",
+                            code="ownership-conflict",
+                        )
+                    self._validate_container(container, capsule_id, spec, network.name)
+
+                if network is not None:
+                    thread_id = _brain_thread_id(self.space_id, capsule_id, network.id)
+                    try:
+                        self.brain_runtime.delete_thread(thread_id)
+                    except brain_runtime_client.BrainRuntimeError as exc:
+                        raise ApiProblem(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            "Team conversation state could not be deleted",
+                            code="brain-runtime-failed",
+                        ) from exc
+
+                removed = 0
+                for container in containers:
+                    try:
+                        container.remove(force=True)
+                    except DockerException as exc:
+                        raise ApiProblem(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            "Docker could not destroy the Capsule",
+                            code="docker-remove-failed",
+                        ) from exc
+                    self._blocked_power_workloads.discard(container.id)
+                    removed += 1
+
+                if network is None:
+                    try:
+                        storage_removed = self.storage.destroy(capsule_id)
+                    except capsule_storage.StorageError as exc:
+                        self._raise_storage_problem(exc)
+                    try:
+                        self.inference_store.delete(capsule_id)
+                    except inference_config.InferenceConfigError as exc:
+                        self._raise_inference_problem(exc)
+                    return {
+                        "id": capsule_id,
+                        "destroyed": False,
+                        "assistants_removed": removed,
+                        "storage_removed": storage_removed,
+                    }
                 try:
                     storage_removed = self.storage.destroy(capsule_id)
                 except capsule_storage.StorageError as exc:
@@ -1347,34 +1418,22 @@ class LocalController:
                     self.inference_store.delete(capsule_id)
                 except inference_config.InferenceConfigError as exc:
                     self._raise_inference_problem(exc)
+                try:
+                    network.remove()
+                except DockerException as exc:
+                    raise ApiProblem(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        "Docker could not destroy the Capsule",
+                        code="docker-remove-failed",
+                    ) from exc
                 return {
                     "id": capsule_id,
-                    "destroyed": False,
+                    "destroyed": True,
                     "assistants_removed": removed,
                     "storage_removed": storage_removed,
                 }
-            try:
-                storage_removed = self.storage.destroy(capsule_id)
-            except capsule_storage.StorageError as exc:
-                self._raise_storage_problem(exc)
-            try:
-                self.inference_store.delete(capsule_id)
-            except inference_config.InferenceConfigError as exc:
-                self._raise_inference_problem(exc)
-            try:
-                network.remove()
-            except DockerException as exc:
-                raise ApiProblem(
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                    "Docker could not destroy the Capsule",
-                    code="docker-remove-failed",
-                ) from exc
-            return {
-                "id": capsule_id,
-                "destroyed": True,
-                "assistants_removed": removed,
-                "storage_removed": storage_removed,
-            }
+        finally:
+            chat_lock.release()
 
     def _validate_reset_container(self, container) -> None:
         container.reload()
