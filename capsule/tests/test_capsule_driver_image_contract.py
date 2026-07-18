@@ -13,6 +13,7 @@ class CapsuleDriverImageContractTests(unittest.TestCase):
             "brain_runtime_token_store.py",
             "chat_orchestrator.py",
             "inference_config.py",
+            "power_journal.py",
         ):
             with self.subTest(module=module):
                 self.assertIn(module, dockerfile)
@@ -27,6 +28,11 @@ class CapsuleDriverImageContractTests(unittest.TestCase):
             dockerfile,
         )
         self.assertIn("chmod 0750 /run/shimpz-brain-runtime", dockerfile)
+        self.assertIn("/var/lib/capsule-driver/power-journal", dockerfile)
+        self.assertIn(
+            "/var/lib/capsule-driver/cleanup \\\n        /var/lib/capsule-driver/power-journal \\",
+            dockerfile,
+        )
 
 
 if __name__ == "__main__":

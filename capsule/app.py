@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import hashlib
 import http.client
 import ipaddress
 import json
@@ -51,6 +52,7 @@ import marketplace
 import marketplace_image
 import network_policy
 import pgdriver_client
+import power_journal
 import r2driver_client
 import token_store
 import validate
@@ -102,6 +104,12 @@ HTTP_CONNECTION_TIMEOUT_SECONDS = _positive_int_env("SHIMPZ_CAPSULE_HTTP_CONNECT
 # ONE proxy serves every token-gated app, capsule-scoped or not, each confined to its own hosts.
 APP_EGRESS_POLICY_DIR = Path(os.environ.get("SHIMPZ_APP_EGRESS_POLICY_DIR", "/app-egress-policy"))
 CAPSULE_STORAGE_ROOT = Path("/var/lib/capsule-driver/storage")
+POWER_JOURNAL_PATH = Path(
+    os.environ.get(
+        "SHIMPZ_CAPSULE_POWER_JOURNAL_PATH",
+        "/var/lib/capsule-driver/power-journal/journal.sqlite3",
+    )
+)
 HEALTH_RETRIES = int(os.environ.get("SHIMPZ_HEALTH_RETRIES", "40"))
 HEALTH_DELAY_SECONDS = float(os.environ.get("SHIMPZ_HEALTH_DELAY_SECONDS", "1.5"))
 
@@ -127,6 +135,8 @@ _cancelled_chat_tokens: set[str] = set()
 _capacity_lock = threading.Lock()
 _storage_lock = threading.Lock()
 _storage_instance: capsule_storage.CapsuleStorage | None = None
+_power_journal_lock = threading.Lock()
+_power_journal_instance: power_journal.PowerJournal | None = None
 _brain_runtime = brain_runtime_client.BrainRuntimeClient()
 
 
@@ -157,6 +167,15 @@ def _storage() -> capsule_storage.CapsuleStorage:
         if _storage_instance is None:
             _storage_instance = capsule_storage.CapsuleStorage(CAPSULE_STORAGE_ROOT)
         return _storage_instance
+
+
+def _power_execution_journal() -> power_journal.PowerJournal:
+    """Open the private journal only when a Power batch or generation needs it."""
+    global _power_journal_instance
+    with _power_journal_lock:
+        if _power_journal_instance is None:
+            _power_journal_instance = power_journal.PowerJournal(POWER_JOURNAL_PATH)
+        return _power_journal_instance
 
 
 def _lock_for(cid: str) -> threading.Lock:
@@ -1367,6 +1386,90 @@ class _ActiveAssistant:
     container: object
 
 
+def _power_operation(
+    request: brain_runtime_client.PowerRequest,
+    assistant_container_id: object,
+) -> power_journal.Operation:
+    """Commit to one normalized request without persisting its raw input."""
+    if not isinstance(assistant_container_id, str) or not assistant_container_id:
+        raise power_journal.PowerJournalConflictError("Assistant generation is invalid")
+    try:
+        encoded = json.dumps(
+            {
+                "approval": request.approval,
+                "assistant_container_id": assistant_container_id,
+                "assistant_id": request.assistant_id,
+                "input": request.input,
+                "power": request.power,
+            },
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
+        raise power_journal.PowerJournalConflictError("Power request cannot be fingerprinted") from exc
+    return power_journal.Operation(request.interrupt_id, hashlib.sha256(encoded).hexdigest())
+
+
+class _HostedPowerBatch:
+    """Adapt one orchestrator suspension to the generation-scoped durable journal."""
+
+    def __init__(
+        self,
+        generation: str,
+        thread_id: str,
+        bindings: dict[str, _ActiveAssistant],
+        execute: Callable[[brain_runtime_client.PowerRequest], object],
+    ) -> None:
+        self._generation = generation
+        self._thread_id = thread_id
+        self._bindings = bindings
+        self._execute = execute
+        self._journal: power_journal.PowerJournal | None = None
+        self._batch: power_journal.Batch | None = None
+        self._operations: dict[str, power_journal.Operation] = {}
+
+    def prepare(self, requests: tuple[brain_runtime_client.PowerRequest, ...]) -> None:
+        if self._batch is not None:
+            raise power_journal.PowerJournalConflictError("Power batch is already prepared")
+        operations: list[power_journal.Operation] = []
+        for request in requests:
+            active = self._bindings.get(request.assistant_id)
+            if active is None:
+                raise power_journal.PowerJournalConflictError("Power Assistant is unavailable")
+            operations.append(_power_operation(request, active.container.id))
+        journal = _power_execution_journal()
+        batch = journal.prepare_batch(self._generation, self._thread_id, operations)
+        self._journal = journal
+        self._batch = batch
+        self._operations = {operation.interrupt_id: operation for operation in operations}
+
+    def invoke(self, request: brain_runtime_client.PowerRequest) -> object:
+        if self._journal is None or self._batch is None:
+            raise power_journal.PowerJournalConflictError("Power batch is not prepared")
+        operation = self._operations.get(request.interrupt_id)
+        if operation is None:
+            raise power_journal.PowerJournalConflictError("Power operation is not prepared")
+        decision = self._journal.begin(self._batch, operation)
+        if not decision.execute:
+            return decision.result
+        result = self._execute(request)
+        self._journal.complete(self._batch, operation, result)
+        return result
+
+    def delivered(self, requests: tuple[brain_runtime_client.PowerRequest, ...]) -> None:
+        if self._journal is None or self._batch is None:
+            raise power_journal.PowerJournalConflictError("Power batch is not prepared")
+        expected = tuple(operation.interrupt_id for operation in self._batch.operations)
+        if tuple(request.interrupt_id for request in requests) != expected:
+            raise power_journal.PowerJournalConflictError("Power delivery batch changed")
+        self._journal.delivered(self._batch)
+        self._journal = None
+        self._batch = None
+        self._operations = {}
+
+
 def _close_exec_stream(stream) -> None:
     """Close docker-py's owning HTTP response before its raw socket (Python 3.14 safe)."""
     response = getattr(stream, "_response", None)
@@ -1761,7 +1864,7 @@ def _chat_in_turn(
     def validate_power(assistant_id: str, power: str, power_input) -> object:
         return _validate_assistant_power_input(bindings, assistant_id, power, power_input)
 
-    def invoke_power(request: brain_runtime_client.PowerRequest) -> object:
+    def execute_power(request: brain_runtime_client.PowerRequest) -> object:
         require_current_credential()
         active = bindings.get(request.assistant_id)
         if active is None:
@@ -1776,6 +1879,13 @@ def _chat_in_turn(
             request.input,
         )
         return invocation["result"]
+
+    durable_batch = _HostedPowerBatch(
+        container.id,
+        runtime_context.thread_id,
+        bindings,
+        execute_power,
+    )
 
     initial_identity = (
         container.id,
@@ -1810,10 +1920,17 @@ def _chat_in_turn(
             runtime_context,
             prompt,
             validate_power,
-            invoke_power,
+            durable_batch.invoke,
+            prepare_batch=durable_batch.prepare,
+            batch_delivered=durable_batch.delivered,
             cancelled=lambda: _token_cancelled(token),
             validate_context=validate_context,
         )
+    except power_journal.PowerJournalError as exc:
+        raise ApiError(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Team Power execution state is unavailable",
+        ) from exc
     except chat_orchestrator.ChatStoppedError as exc:
         raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped") from exc
     except chat_orchestrator.ApprovalRequiredError as exc:
@@ -2282,6 +2399,13 @@ def _destroy(cid: str, lease: _AuthorizationLease) -> dict:
                 raise ApiError(
                     HTTPStatus.SERVICE_UNAVAILABLE,
                     "Team conversation state could not be deleted",
+                ) from exc
+            try:
+                _power_execution_journal().purge(lease.container_id)
+            except power_journal.PowerJournalError as exc:
+                raise ApiError(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "Team Power execution state could not be deleted",
                 ) from exc
             cleanup = _teardown(cid, owner=lease.owner, brain_id=lease.container_id)
             _clear_cid_runtime_state(cid)
