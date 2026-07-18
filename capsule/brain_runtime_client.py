@@ -135,7 +135,7 @@ class BrainRuntimeClient:
             },
         }
 
-    def _post(self, path: str, payload: Mapping[str, object]) -> RuntimeTurn:
+    def _post(self, path: str, payload: Mapping[str, object]) -> object:
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
         connection = self._connection_factory(self._host, self._port, 65.0)
         try:
@@ -162,7 +162,7 @@ class BrainRuntimeClient:
             decoded = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise BrainRuntimeError("Brain runtime returned an invalid response") from exc
-        return self._parse_turn(decoded)
+        return decoded
 
     @staticmethod
     def _parse_turn(value: object) -> RuntimeTurn:
@@ -223,9 +223,16 @@ class BrainRuntimeClient:
     def start(self, context: RuntimeContext, message: str) -> RuntimeTurn:
         payload = self._context(context)
         payload["message"] = message
-        return self._post("/v1/turns", payload)
+        return self._parse_turn(self._post("/v1/turns", payload))
 
     def resume(self, context: RuntimeContext, results: Mapping[str, object]) -> RuntimeTurn:
         payload = self._context(context)
         payload["results"] = dict(results)
-        return self._post("/v1/turns/resume", payload)
+        return self._parse_turn(self._post("/v1/turns/resume", payload))
+
+    def delete_thread(self, thread_id: str) -> None:
+        if not isinstance(thread_id, str) or SAFE_ID_RE.fullmatch(thread_id) is None:
+            raise BrainRuntimeError("Brain runtime thread ID is invalid")
+        response = self._post("/v1/threads/delete", {"thread_id": thread_id})
+        if not isinstance(response, dict) or response != {"status": "deleted"}:
+            raise BrainRuntimeError("Brain runtime returned an invalid response")

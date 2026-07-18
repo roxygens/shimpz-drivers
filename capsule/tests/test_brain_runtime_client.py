@@ -130,6 +130,44 @@ class BrainRuntimeClientTests(unittest.TestCase):
         self.assertEqual(path, "/v1/turns/resume")
         self.assertEqual(json.loads(raw_body)["results"], {"interrupt-1": {"message": "Hello, Ada."}})
 
+    def test_delete_thread_uses_the_closed_runtime_endpoint(self):
+        client, connection = self.client(_Response({"status": "deleted"}))
+
+        result = client.delete_thread("capsule:hello-pulse:conversation-1")
+
+        self.assertIsNone(result)
+        method, path, raw_body, headers = connection.requests[0]
+        self.assertEqual((method, path), ("POST", "/v1/threads/delete"))
+        self.assertEqual(headers["Authorization"], f"Bearer {self.token}")
+        self.assertEqual(
+            json.loads(raw_body),
+            {"thread_id": "capsule:hello-pulse:conversation-1"},
+        )
+        self.assertTrue(connection.closed)
+
+    def test_delete_thread_rejects_invalid_ids_before_connecting(self):
+        for thread_id in ("", "bad thread", "a" * 257, None):
+            with self.subTest(thread_id=thread_id):
+                client, connection = self.client(_Response({"status": "deleted"}))
+
+                with self.assertRaises(brain_runtime_client.BrainRuntimeError):
+                    client.delete_thread(thread_id)
+
+                self.assertEqual(connection.requests, [])
+
+    def test_delete_thread_response_must_match_the_closed_contract(self):
+        for payload in (
+            {},
+            {"status": "ok"},
+            {"status": "deleted", "thread_id": "conversation-1"},
+            ["deleted"],
+        ):
+            with self.subTest(payload=payload):
+                client, _connection = self.client(_Response(payload))
+
+                with self.assertRaises(brain_runtime_client.BrainRuntimeError):
+                    client.delete_thread("capsule:hello-pulse:conversation-1")
+
     def test_malformed_runtime_responses_fail_closed(self):
         invalid = (
             {"status": "completed", "reply": "", "powers": []},
