@@ -175,6 +175,19 @@ class ApiError(Exception):
         self.message = message
 
 
+def _brain_thread_id(cid: str, anchor_id: str) -> str:
+    """Bind hosted conversation state to one immutable Team lifecycle."""
+    if (
+        not isinstance(cid, str)
+        or validate.CAPSULE_ID_RE.fullmatch(cid) is None
+        or not isinstance(anchor_id, str)
+        or not 12 <= len(anchor_id) <= 64
+        or any(character not in "0123456789abcdef" for character in anchor_id)
+    ):
+        raise ApiError(HTTPStatus.CONFLICT, "Team identity failed its persisted contract")
+    return f"hosted:{cid}:{anchor_id}:default"
+
+
 class _FixedWindowRateLimiter:
     """Thread-safe fixed-window admission with deterministic time injection for contract tests."""
 
@@ -1706,6 +1719,7 @@ def _chat_in_turn(
     owner: str,
 ) -> dict:
     team_name = _team_name_from_anchor(container)
+    thread_id = _brain_thread_id(cid, container.id)
     assistants = _active_team_assistants(cid)
     files = _chat_file_metadata(cid, file_ids)
     try:
@@ -1719,7 +1733,7 @@ def _chat_in_turn(
 
     require_current_credential()
     runtime_context = brain_runtime_client.RuntimeContext(
-        thread_id=f"{cid}:default",
+        thread_id=thread_id,
         team_name=team_name,
         assistants=tuple(
             brain_runtime_client.RuntimeAssistant(
@@ -2262,6 +2276,13 @@ def _destroy(cid: str, lease: _AuthorizationLease) -> dict:
         if not chat_lock.acquire(timeout=30):
             raise ApiError(HTTPStatus.CONFLICT, "the active chat turn did not stop in time")
         try:
+            try:
+                _brain_runtime.delete_thread(_brain_thread_id(cid, lease.container_id))
+            except brain_runtime_client.BrainRuntimeError as exc:
+                raise ApiError(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "Team conversation state could not be deleted",
+                ) from exc
             cleanup = _teardown(cid, owner=lease.owner, brain_id=lease.container_id)
             _clear_cid_runtime_state(cid)
             if not cleanup.complete:

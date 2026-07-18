@@ -120,6 +120,8 @@ assert spec.loader is not None
 sys.modules[spec.name] = app
 spec.loader.exec_module(app)
 
+ANCHOR_ID = "a" * 64
+
 
 @contextlib.contextmanager
 def _patched(**replacements):
@@ -150,6 +152,17 @@ class _RouteHarness:
 
 
 class HostedCredentialLeaseTests(unittest.TestCase):
+    def test_hosted_thread_identity_is_generation_scoped_and_closed(self) -> None:
+        first = app._brain_thread_id("capsule_1", ANCHOR_ID)
+        second = app._brain_thread_id("capsule_1", "b" * 64)
+
+        self.assertEqual(first, f"hosted:capsule_1:{ANCHOR_ID}:default")
+        self.assertNotEqual(first, second)
+        for cid, anchor_id in (("bad capsule", ANCHOR_ID), ("capsule_1", "not-a-container")):
+            with self.subTest(cid=cid, anchor_id=anchor_id), self.assertRaises(app.ApiError) as caught:
+                app._brain_thread_id(cid, anchor_id)
+            self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+
     def test_team_name_contract_rejects_padding_controls_and_oversize_values(self) -> None:
         self.assertEqual(app._validated_team_name("Marketing"), "Marketing")
         for invalid in ("", " Marketing", "Marketing ", "Marketing\n", "x" * 81, None):
@@ -162,7 +175,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         contract = types.SimpleNamespace(rules="Use only declared Powers.", powers={})
         assistant_container = types.SimpleNamespace(id="assistant-container")
         anchor = types.SimpleNamespace(
-            id="team-container",
+            id=ANCHOR_ID,
             labels={"capsule.name": "Marketing", "capsule.owner": "account_1"},
         )
         store = types.SimpleNamespace(load=lambda _cid: types.SimpleNamespace(provider="openai", model="gpt-5.5"))
@@ -220,7 +233,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         place_container = types.SimpleNamespace(id="places-container")
         weather_container = types.SimpleNamespace(id="weather-container")
         anchor = types.SimpleNamespace(
-            id="team-container",
+            id=ANCHOR_ID,
             labels={"capsule.name": "Marketing", "capsule.owner": "account_1"},
         )
         store = types.SimpleNamespace(load=lambda _cid: types.SimpleNamespace(provider="openai", model="gpt-test"))
@@ -228,6 +241,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
 
         def run(_runtime, context, _prompt, validate_power, invoke_power, **_kwargs):
             self.assertEqual([assistant.id for assistant in context.assistants], ["places", "weather"])
+            self.assertEqual(context.thread_id, app._brain_thread_id("capsule_1", ANCHOR_ID))
             self.assertTrue(callable(validate_power))
             invoke_power("places", "search", {"name": "Berlin"})
             invoke_power("weather", "current", {"latitude": 52.52, "longitude": 13.41})
@@ -282,7 +296,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         )
         contract = types.SimpleNamespace(rules="Manage campaigns.", powers={})
         anchor = types.SimpleNamespace(
-            id="team-container",
+            id=ANCHOR_ID,
             labels={"capsule.name": "Marketing", "capsule.owner": "account_1"},
         )
         store = types.SimpleNamespace(load=lambda _cid: types.SimpleNamespace(provider="openai", model="gpt-test"))
@@ -317,6 +331,108 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
         self.assertEqual(caught.exception.message, "Assistant Power requires Captain approval")
         self.assertNotIn(private_power_id, caught.exception.message)
+
+    def test_destroy_deletes_generation_after_chat_drain_before_teardown(self) -> None:
+        events: list[object] = []
+        expected_thread = app._brain_thread_id("capsule_1", ANCHOR_ID)
+        lease = app._AuthorizationLease(
+            cid="capsule_1",
+            container_id=ANCHOR_ID,
+            owner="account_1",
+            principal=("account", "account_1"),
+            cleanup_nonce="retry-nonce",
+        )
+
+        class ChatLock:
+            def acquire(self, *, timeout: int) -> bool:
+                self.assert_timeout = timeout
+                events.append("chat-drained")
+                return True
+
+            def release(self) -> None:
+                events.append("chat-released")
+
+        chat_lock = ChatLock()
+
+        def delete_thread(thread_id: str) -> None:
+            events.append(("thread-deleted", thread_id))
+
+        def teardown(cid: str, *, owner: str, brain_id: str):
+            events.append(("teardown", cid, owner, brain_id))
+            return app._CleanupResult(True, True)
+
+        with _patched(
+            _lock_for=lambda _cid: contextlib.nullcontext(),
+            _require_cleanup_authorization=lambda _cid, _lease: events.append("authorized"),
+            _chat_lock_for=lambda _cid: chat_lock,
+            _brain_runtime=types.SimpleNamespace(delete_thread=delete_thread),
+            _teardown=teardown,
+            _clear_cid_runtime_state=lambda _cid: events.append("runtime-cleared"),
+        ):
+            result = app._destroy("capsule_1", lease)
+
+        self.assertEqual(
+            events,
+            [
+                "authorized",
+                "chat-drained",
+                ("thread-deleted", expected_thread),
+                ("teardown", "capsule_1", "account_1", ANCHOR_ID),
+                "runtime-cleared",
+                "chat-released",
+            ],
+        )
+        self.assertEqual(result, {"capsule": "capsule_1", "destroyed": True, "db_dropped": True})
+
+    def test_destroy_retries_thread_delete_without_teardown_after_redacted_failure(self) -> None:
+        delete_calls: list[str] = []
+        teardown = mock.Mock(return_value=app._CleanupResult(True, True))
+        clear = mock.Mock()
+        lease = app._AuthorizationLease(
+            cid="capsule_1",
+            container_id=ANCHOR_ID,
+            owner="account_1",
+            principal=("account", "account_1"),
+            cleanup_nonce="retry-nonce",
+        )
+
+        class ChatLock:
+            @staticmethod
+            def acquire(*, timeout: int) -> bool:
+                return timeout == 30
+
+            @staticmethod
+            def release() -> None:
+                return None
+
+        def delete_thread(thread_id: str) -> None:
+            delete_calls.append(thread_id)
+            if len(delete_calls) == 1:
+                raise app.brain_runtime_client.BrainRuntimeError("persisted-private-data")
+
+        with _patched(
+            _lock_for=lambda _cid: contextlib.nullcontext(),
+            _require_cleanup_authorization=lambda _cid, _lease: object(),
+            _chat_lock_for=lambda _cid: ChatLock(),
+            _brain_runtime=types.SimpleNamespace(delete_thread=delete_thread),
+            _teardown=teardown,
+            _clear_cid_runtime_state=clear,
+        ):
+            with self.assertRaises(app.ApiError) as caught:
+                app._destroy("capsule_1", lease)
+            self.assertEqual(caught.exception.status, HTTPStatus.SERVICE_UNAVAILABLE)
+            self.assertEqual(caught.exception.message, "Team conversation state could not be deleted")
+            self.assertNotIn("persisted-private-data", str(caught.exception))
+            teardown.assert_not_called()
+            clear.assert_not_called()
+
+            result = app._destroy("capsule_1", lease)
+
+        expected_thread = app._brain_thread_id("capsule_1", ANCHOR_ID)
+        self.assertEqual(delete_calls, [expected_thread, expected_thread])
+        teardown.assert_called_once_with("capsule_1", owner="account_1", brain_id=ANCHOR_ID)
+        clear.assert_called_once_with("capsule_1")
+        self.assertTrue(result["destroyed"])
 
 
 class R2BridgeTests(unittest.TestCase):
