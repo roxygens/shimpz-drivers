@@ -48,9 +48,14 @@ class LocalContractTests(unittest.TestCase):
         controller._active_power_containers = {}
         controller._cancelled_chat_tokens = set()
         container = SimpleNamespace(id="assistant-container", status="running", reload=lambda: None)
-        controller._network = lambda _cid: SimpleNamespace(name="capsule-network")
+        network = SimpleNamespace(id="team-network-id", name="capsule-network")
+        controller._network = lambda _cid: network
+        controller._validate_network = lambda _network, _cid: "Marketing"
         controller._assistant_container = lambda _cid, _assistant: container
         controller._validate_container = lambda *_args: None
+        controller._active_chat_assistants = lambda _cid, _network: (
+            local_app._ActiveAssistant(controller.registry["hello-pulse"], container.id),
+        )
         return controller
 
     def test_registry_accepts_only_a_non_placeholder_digest(self) -> None:
@@ -272,7 +277,7 @@ class LocalContractTests(unittest.TestCase):
 
     def test_private_chat_route_reads_key_from_header_not_json(self) -> None:
         key = "sk-test-0123456789"
-        body = json.dumps({"assistant": "hello-pulse", "message": "Hello", "files": []}).encode()
+        body = json.dumps({"message": "Hello", "files": []}).encode()
         captured: dict[str, object] = {}
 
         class Controller:
@@ -284,7 +289,7 @@ class LocalContractTests(unittest.TestCase):
                     provider=provider,
                     api_key=api_key,
                 )
-                return {"assistant": payload["assistant"], "reply": "Hello!", "power": None}
+                return {"team": "Marketing", "reply": "Hello!"}
 
         token_value = "a" * 32
         handler = object.__new__(local_app.Handler)
@@ -302,7 +307,7 @@ class LocalContractTests(unittest.TestCase):
         status, response, *_audit = handler._chat_route(["v1", "capsules", "capsule_1", "chat"])
 
         self.assertEqual(status, HTTPStatus.OK)
-        self.assertEqual(captured["payload"], {"assistant": "hello-pulse", "message": "Hello", "files": []})
+        self.assertEqual(captured["payload"], {"message": "Hello", "files": []})
         self.assertEqual(captured["provider"], "openai")
         self.assertEqual(captured["api_key"], key)
         self.assertNotIn(key, json.dumps(response))
@@ -324,7 +329,7 @@ class LocalContractTests(unittest.TestCase):
             controller = self._chat_controller(directory, runtime)
             response = controller.chat(
                 "capsule_1",
-                {"assistant": "hello-pulse", "message": "Hello", "files": []},
+                {"message": "Hello", "files": []},
                 "openai",
                 key,
             )
@@ -332,7 +337,6 @@ class LocalContractTests(unittest.TestCase):
                 controller.chat(
                     "capsule_1",
                     {
-                        "assistant": "hello-pulse",
                         "message": "Hello",
                         "files": [],
                         "api_key": key,
@@ -347,6 +351,64 @@ class LocalContractTests(unittest.TestCase):
         self.assertNotIn(key, persisted)
         self.assertNotIn(key, repr(runtime.context))
         self.assertEqual(runtime.context.api_key, key)
+        self.assertEqual(runtime.context.team_name, "Marketing")
+        self.assertEqual([assistant.id for assistant in runtime.context.assistants], ["hello-pulse"])
+
+    def test_chat_exposes_every_active_assistant_to_the_team_brain(self) -> None:
+        class Runtime:
+            context = None
+
+            def start(self, context, _message):
+                self.context = context
+                return brain_runtime_client.RuntimeTurn(status="completed", reply="Integrated.", powers=())
+
+        runtime = Runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, runtime)
+            hello = controller.registry["hello-pulse"]
+            weather = replace(
+                hello,
+                assistant_id="weather-pulse",
+                image=hello.image.replace("a" * 64, "b" * 64),
+                rules="Use weather Powers only for weather data.",
+                powers={"current": replace(hello.powers["hello"], path="/v1/powers/current")},
+            )
+            controller.registry[weather.assistant_id] = weather
+            controller._active_chat_assistants = lambda _cid, _network: (
+                local_app._ActiveAssistant(hello, "hello-container"),
+                local_app._ActiveAssistant(weather, "weather-container"),
+            )
+
+            response = controller.chat(
+                "capsule_1",
+                {"message": "Check the weather", "files": []},
+                "openai",
+                "sk-test-0123456789",
+            )
+
+        self.assertEqual([assistant.id for assistant in runtime.context.assistants], ["hello-pulse", "weather-pulse"])
+        self.assertEqual(runtime.context.thread_id, "local:local-space:capsule_1:default")
+        self.assertEqual(response["team"], "Marketing")
+
+    def test_team_identity_drift_stops_before_the_provider_call(self) -> None:
+        class Runtime:
+            def start(self, _context, _message):
+                raise AssertionError("a changed Team must not reach the provider")
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime())
+            names = iter(("Marketing", "Renamed"))
+            controller._validate_network = lambda _network, _cid: next(names)
+
+            with self.assertRaises(local_app.ApiProblem) as caught:
+                controller.chat(
+                    "capsule_1",
+                    {"message": "Hello", "files": []},
+                    "openai",
+                    "sk-test-0123456789",
+                )
+
+        self.assertEqual(caught.exception.code, "team-context-changed")
 
     def test_chat_executes_only_controller_owned_none_approval_power(self) -> None:
         class Runtime:
@@ -357,6 +419,7 @@ class LocalContractTests(unittest.TestCase):
                     powers=(
                         brain_runtime_client.PowerRequest(
                             interrupt_id="power-1",
+                            assistant_id="hello-pulse",
                             power="hello",
                             input={"name": "Captain"},
                             approval="none",
@@ -378,14 +441,13 @@ class LocalContractTests(unittest.TestCase):
             )
             response = controller.chat(
                 "capsule_1",
-                {"assistant": "hello-pulse", "message": "Greet me", "files": []},
+                {"message": "Greet me", "files": []},
                 "openai",
                 "sk-test-0123456789",
             )
 
         self.assertEqual(invoked, [("capsule_1", "hello-pulse", {"name": "Captain"})])
-        self.assertEqual(response["power"], "hello")
-        self.assertEqual(response["result"], {"message": "Hello, Captain!"})
+        self.assertEqual(response, {"capsule": "capsule_1", "team": "Marketing", "reply": "Done"})
 
     def test_chat_fails_closed_before_a_power_that_requires_approval(self) -> None:
         class Runtime:
@@ -396,6 +458,7 @@ class LocalContractTests(unittest.TestCase):
                     powers=(
                         brain_runtime_client.PowerRequest(
                             interrupt_id="power-1",
+                            assistant_id="hello-pulse",
                             power="hello",
                             input={},
                             approval="each-run",
@@ -414,7 +477,7 @@ class LocalContractTests(unittest.TestCase):
             with self.assertRaises(local_app.ApiProblem) as caught:
                 controller.chat(
                     "capsule_1",
-                    {"assistant": "hello-pulse", "message": "Greet me", "files": []},
+                    {"message": "Greet me", "files": []},
                     "openai",
                     "sk-test-0123456789",
                 )
@@ -439,7 +502,7 @@ class LocalContractTests(unittest.TestCase):
                 try:
                     controller.chat(
                         "capsule_1",
-                        {"assistant": "hello-pulse", "message": "Wait", "files": []},
+                        {"message": "Wait", "files": []},
                         "openai",
                         "sk-test-0123456789",
                     )

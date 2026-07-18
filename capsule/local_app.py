@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from contextlib import ExitStack, contextmanager, suppress
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -94,6 +95,12 @@ class ApiProblem(RuntimeError):
         self.status = status
         self.message = message
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveAssistant:
+    spec: AssistantSpec
+    container_id: str
 
 
 def _is_replaceable_readiness_failure(assistant_id: str, problem: ApiProblem) -> bool:
@@ -471,24 +478,22 @@ class LocalController:
     def _chat_setup(
         self,
         capsule_id: str,
-        assistant_id: str,
         file_ids: object,
         provider: str,
-    ) -> tuple[AssistantSpec, list[dict[str, object]], inference_config.InferenceConfig]:
-        spec = self._resolve(assistant_id)
+    ) -> tuple[
+        str,
+        str,
+        tuple[_ActiveAssistant, ...],
+        list[dict[str, object]],
+        inference_config.InferenceConfig,
+    ]:
         with self._lock(capsule_id):
             network = self._network(capsule_id)
-            container = self._assistant_container(capsule_id, assistant_id)
-            self._validate_container(container, capsule_id, spec, network.name)
-            if container.id in self._blocked_power_workloads:
-                raise ApiProblem(
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                    "Assistant Power execution is blocked until this Assistant is reinstalled",
-                    code="assistant-power-blocked",
-                )
-            container.reload()
-            if container.status != "running":
-                raise ApiProblem(HTTPStatus.CONFLICT, "Assistant is not running", code="assistant-not-running")
+            team_name = self._validate_network(network, capsule_id)
+            network_id = getattr(network, "id", None)
+            if not isinstance(network_id, str) or not network_id:
+                raise ApiProblem(HTTPStatus.CONFLICT, "Team resource ownership conflict", code="ownership-conflict")
+            assistants = self._active_chat_assistants(capsule_id, network.name)
             files = self._chat_file_metadata(capsule_id, file_ids)
             try:
                 config = self.inference_store.load(capsule_id)
@@ -504,7 +509,45 @@ class LocalController:
                     "configured model provider changed; retry",
                     code="inference-provider-mismatch",
                 )
-        return spec, files, config
+        return team_name, network_id, assistants, files, config
+
+    def _active_chat_assistants(self, capsule_id: str, network_name: str) -> tuple[_ActiveAssistant, ...]:
+        try:
+            containers = self.client.containers.list(**self._assistant_filters(capsule_id))
+        except DockerException as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Docker is unavailable",
+                code="docker-unavailable",
+            ) from exc
+        active: list[_ActiveAssistant] = []
+        for container in containers:
+            assistant_id = (container.labels or {}).get(ASSISTANT_LABEL)
+            spec = self.registry.get(assistant_id)
+            if spec is None:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "an installed Assistant is no longer allowlisted",
+                    code="assistant-registry-drift",
+                )
+            self._validate_container(container, capsule_id, spec, network_name)
+            if container.id in self._blocked_power_workloads:
+                raise ApiProblem(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "Assistant Power execution is blocked until this Assistant is reinstalled",
+                    code="assistant-power-blocked",
+                )
+            container.reload()
+            if container.status == "running":
+                active.append(_ActiveAssistant(spec=spec, container_id=container.id))
+        active.sort(key=lambda item: item.spec.assistant_id)
+        if not active:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "install and start at least one Assistant before chatting with this Team",
+                code="team-has-no-active-assistants",
+            )
+        return tuple(active)
 
     def _invoke_chat_power(
         self,
@@ -550,14 +593,14 @@ class LocalController:
         api_key: str,
     ) -> dict[str, object]:
         capsule_id = validate_capsule_id(capsule_id)
-        if not isinstance(body, dict) or set(body) != {"assistant", "message", "files"}:
+        if not isinstance(body, dict) or set(body) not in ({"message"}, {"message", "files"}):
             raise ApiProblem(
                 HTTPStatus.UNPROCESSABLE_ENTITY,
-                "chat requires only assistant, message, and files",
+                "Team chat requires only message and optional files",
                 code="invalid-body",
             )
-        assistant_id = validate_assistant_id(body["assistant"])
         message = body["message"]
+        file_ids = body.get("files", [])
         if (
             not isinstance(message, str)
             or not message.strip()
@@ -570,43 +613,68 @@ class LocalController:
                 code="invalid-message",
             )
         with self._exclusive_chat_turn(capsule_id) as token:
-            spec, files, config = self._chat_setup(capsule_id, assistant_id, body["files"], provider)
+            team_name, network_id, assistants, files, config = self._chat_setup(capsule_id, file_ids, provider)
             context = brain_runtime_client.RuntimeContext(
-                thread_id=f"local:{self.space_id}:{capsule_id}:{assistant_id}:default",
-                assistant_id=assistant_id,
-                rules=spec.rules,
-                powers=tuple(
-                    brain_runtime_client.RuntimePower(
-                        id=power_id,
-                        summary=power.summary,
-                        input_schema=power.input_schema,
-                        approval=power.approval,
+                thread_id=f"local:{self.space_id}:{capsule_id}:default",
+                team_name=team_name,
+                assistants=tuple(
+                    brain_runtime_client.RuntimeAssistant(
+                        id=active.spec.assistant_id,
+                        rules=active.spec.rules,
+                        powers=tuple(
+                            brain_runtime_client.RuntimePower(
+                                id=power_id,
+                                summary=power.summary,
+                                input_schema=power.input_schema,
+                                approval=power.approval,
+                            )
+                            for power_id, power in sorted(active.spec.powers.items())
+                        ),
                     )
-                    for power_id, power in sorted(spec.powers.items())
+                    for active in assistants
                 ),
                 provider=config.provider,
                 model=config.model,
                 api_key=api_key,
             )
-            prompt = assistant_chat.build_prompt(
-                assistant_id,
-                spec.rules,
-                {power_id: power.summary for power_id, power in spec.powers.items()},
-                message,
-                files,
-            )
-            last_result: object | None = None
+            prompt = assistant_chat.build_prompt(message, files)
 
-            def invoke_power(power: str, payload) -> object:
-                nonlocal last_result
-                last_result = self._invoke_chat_power(
+            def invoke_power(assistant_id: str, power: str, payload) -> object:
+                return self._invoke_chat_power(
                     capsule_id,
                     token,
                     assistant_id,
                     power,
                     payload,
                 )
-                return last_result
+
+            initial_identity = (
+                team_name,
+                network_id,
+                tuple((item.spec.assistant_id, item.spec.image, item.container_id) for item in assistants),
+                files,
+                config,
+            )
+
+            def validate_context() -> None:
+                current_team, current_network, current_assistants, current_files, current_config = self._chat_setup(
+                    capsule_id,
+                    file_ids,
+                    provider,
+                )
+                current_identity = (
+                    current_team,
+                    current_network,
+                    tuple((item.spec.assistant_id, item.spec.image, item.container_id) for item in current_assistants),
+                    current_files,
+                    current_config,
+                )
+                if current_identity != initial_identity:
+                    raise ApiProblem(
+                        HTTPStatus.CONFLICT,
+                        "Team capabilities changed; retry",
+                        code="team-context-changed",
+                    )
 
             try:
                 outcome = chat_orchestrator.run(
@@ -615,6 +683,7 @@ class LocalController:
                     prompt,
                     invoke_power,
                     cancelled=lambda: self._chat_cancelled(token),
+                    validate_context=validate_context,
                 )
             except chat_orchestrator.ChatStoppedError as exc:
                 raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped") from exc
@@ -627,7 +696,7 @@ class LocalController:
             except chat_orchestrator.ChatOrchestrationError as exc:
                 raise ApiProblem(
                     HTTPStatus.BAD_GATEWAY,
-                    "Brain could not complete the Assistant turn",
+                    "Brain could not complete the Team turn",
                     code="brain-runtime-failed",
                 ) from exc
             except brain_runtime_client.BrainRuntimeError as exc:
@@ -637,31 +706,13 @@ class LocalController:
                     code="brain-runtime-failed",
                 ) from exc
 
-            # Re-prove the Assistant identity before committing a model result. Stop and concurrent
-            # uninstall/destroy therefore win over a stale terminal response.
-            _terminal_spec, _terminal_files, terminal_config = self._chat_setup(
-                capsule_id,
-                assistant_id,
-                body["files"],
-                provider,
-            )
-            if terminal_config != config:
-                raise ApiProblem(
-                    HTTPStatus.CONFLICT,
-                    "configured model changed; retry",
-                    code="inference-config-changed",
-                )
             if not self._commit_chat_terminal(capsule_id, token):
                 raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
-            response: dict[str, object] = {
+            return {
                 "capsule": capsule_id,
-                "assistant": assistant_id,
+                "team": team_name,
                 "reply": outcome.reply,
-                "power": outcome.powers[-1] if outcome.powers else None,
             }
-            if last_result is not None:
-                response["result"] = last_result
-            return response
 
     def stop_chat(self, capsule_id: str) -> dict[str, object]:
         capsule_id = validate_capsule_id(capsule_id)
@@ -1635,13 +1686,12 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and self.command == "POST":
             provider, api_key = self._model_credential_headers()
             body = self._body(max_bytes=MAX_CHAT_BODY_BYTES)
-            assistant = body.get("assistant") if isinstance(body.get("assistant"), str) else None
             return (
                 HTTPStatus.OK,
                 self.server.controller.chat(capsule_id, body, provider, api_key),
                 "chat",
                 capsule_id,
-                assistant,
+                None,
             )
         if len(parts) == 5 and parts[4] == "stop" and self.command == "POST":
             if self._body() != {}:

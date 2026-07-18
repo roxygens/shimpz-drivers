@@ -12,11 +12,8 @@ import assistant_chat
 
 
 class AssistantChatContractTests(unittest.TestCase):
-    def test_prompt_contains_only_rules_power_summaries_file_metadata_and_message(self) -> None:
+    def test_prompt_contains_only_file_metadata_and_message(self) -> None:
         prompt = assistant_chat.build_prompt(
-            "hello-pulse",
-            "Use only hello.",
-            {"hello": "Return a greeting."},
             "Say hello to Ada",
             [
                 {
@@ -29,8 +26,7 @@ class AssistantChatContractTests(unittest.TestCase):
             ],
         )
         decoded = json.loads(prompt)
-        self.assertEqual(set(decoded), {"assistant", "files", "message"})
-        self.assertEqual(decoded["assistant"]["powers"], [{"id": "hello", "summary": "Return a greeting."}])
+        self.assertEqual(set(decoded), {"files", "message"})
         self.assertEqual(set(decoded["files"][0]), {"id", "name", "media_type", "size"})
         self.assertNotIn("must-not-enter-model-context", prompt)
 

@@ -13,18 +13,10 @@ class ChatContractError(ValueError):
 
 
 def build_prompt(
-    assistant_id: str,
-    rules: str,
-    powers: dict[str, str],
     message: str,
     files: list[dict[str, object]],
 ) -> str:
     request = {
-        "assistant": {
-            "id": assistant_id,
-            "rules": rules,
-            "powers": [{"id": power_id, "summary": summary} for power_id, summary in sorted(powers.items())],
-        },
         "files": [
             {
                 "id": item["id"],
