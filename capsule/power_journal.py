@@ -182,7 +182,7 @@ class PowerJournal:
         try:
             self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
             parent = self.path.parent.lstat()
-            if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode):
+            if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode) or parent.st_uid != os.geteuid():
                 raise PowerJournalCorruptionError("Power journal parent is not a private directory")
             self.path.parent.chmod(0o700)
             try:
@@ -193,16 +193,38 @@ class PowerJournal:
                     os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                     0o600,
                 )
-                os.close(descriptor)
+                try:
+                    metadata = os.fstat(descriptor)
+                    self._validate_file_metadata(metadata)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                directory = os.open(
+                    self.path.parent,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                )
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
                 return True
-            if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-                raise PowerJournalCorruptionError("Power journal path is not a regular file")
+            self._validate_file_metadata(metadata)
             if metadata.st_mode & 0o077:
                 raise PowerJournalCorruptionError("Power journal file permissions are not private")
         except OSError as exc:
             raise PowerJournalCorruptionError("Power journal private path is unavailable") from exc
         else:
             return metadata.st_size == 0
+
+    @staticmethod
+    def _validate_file_metadata(metadata: os.stat_result) -> None:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+        ):
+            raise PowerJournalCorruptionError("Power journal path has unsafe ownership or links")
 
     def _configure(self) -> None:
         self._connection.execute("PRAGMA trusted_schema = OFF")
@@ -510,6 +532,8 @@ class PowerJournal:
                 operations = self._load_batch(batch)
                 if any(row[3] != "completed" for row in operations):
                     raise PowerJournalConflictError("Power batch cannot be delivered before every result exists")
+                for operation in operations:
+                    self._decode_result(operation[4])
                 self._connection.execute(
                     "DELETE FROM batches WHERE generation = ? AND fingerprint = ?",
                     (batch.generation, batch.fingerprint),

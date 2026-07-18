@@ -6,6 +6,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import power_journal
 
@@ -165,6 +166,58 @@ class PowerJournalTests(unittest.TestCase):
         with self.assertRaises(power_journal.PowerJournalCorruptionError):
             power_journal.PowerJournal(self.path)
         self.assertEqual(victim.read_bytes(), b"unchanged")
+
+    def test_new_database_file_and_parent_entry_are_fsynced(self) -> None:
+        synced_modes: list[int] = []
+        real_fsync = power_journal.os.fsync
+
+        def observe(descriptor: int) -> None:
+            synced_modes.append(power_journal.os.fstat(descriptor).st_mode)
+            real_fsync(descriptor)
+
+        with mock.patch.object(power_journal.os, "fsync", side_effect=observe):
+            journal = self.journal()
+
+        self.assertIsNotNone(journal)
+        self.assertEqual(len(synced_modes), 2)
+        self.assertTrue(stat.S_ISREG(synced_modes[0]))
+        self.assertTrue(stat.S_ISDIR(synced_modes[1]))
+
+    def test_hardlinked_database_fails_closed(self) -> None:
+        journal = self.journal()
+        journal.close()
+        linked = self.path.parent / "journal-copy.sqlite3"
+        linked.hardlink_to(self.path)
+
+        with self.assertRaises(power_journal.PowerJournalCorruptionError):
+            power_journal.PowerJournal(self.path)
+
+    def test_foreign_parent_or_database_owner_fails_closed(self) -> None:
+        journal = self.journal()
+        journal.close()
+
+        effective_uid = power_journal.os.geteuid()
+        with (
+            mock.patch.object(power_journal.os, "geteuid", return_value=effective_uid + 1),
+            self.assertRaises(power_journal.PowerJournalCorruptionError),
+        ):
+            power_journal.PowerJournal(self.path)
+
+        real_lstat = Path.lstat
+
+        def foreign_database(path: Path) -> power_journal.os.stat_result:
+            metadata = real_lstat(path)
+            if path == self.path:
+                fields = list(metadata)
+                fields[4] = metadata.st_uid + 1
+                return power_journal.os.stat_result(fields)
+            return metadata
+
+        with (
+            mock.patch.object(Path, "lstat", autospec=True, side_effect=foreign_database),
+            self.assertRaises(power_journal.PowerJournalCorruptionError),
+        ):
+            power_journal.PowerJournal(self.path)
 
 
 if __name__ == "__main__":
