@@ -34,7 +34,7 @@ class CapsuleAnchorContractTests(unittest.TestCase):
     def test_anchor_reserves_only_a_small_idle_envelope(self) -> None:
         self.assertEqual(manifests.MEM_LIMIT_BYTES, 64 * 1024 * 1024)
         self.assertEqual(manifests.NANO_CPUS, 100_000_000)
-        self.assertEqual(manifests.PIDS_LIMIT, 32)
+        self.assertEqual(manifests.PIDS_LIMIT, 128)
 
 
 if __name__ == "__main__":

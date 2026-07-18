@@ -79,7 +79,9 @@ NET_PREFIX = network_policy.CORE_NETWORK_PREFIX
 MEM_LIMIT = os.environ.get("SHIMPZ_CAPSULE_MEM_LIMIT", "64m")
 MEM_RESERVATION = os.environ.get("SHIMPZ_CAPSULE_MEM_RESERVATION", "16m")
 NANO_CPUS = int(os.environ.get("SHIMPZ_CAPSULE_NANO_CPUS", str(100_000_000)))
-PIDS_LIMIT = int(os.environ.get("SHIMPZ_CAPSULE_PIDS_LIMIT", "32"))
+# runsc needs roughly 100 host tasks to establish even the inert pause sandbox; 32/64/96 fail
+# before the Capsule process starts. 128 is the measured minimum and remains a tight hard ceiling.
+PIDS_LIMIT = int(os.environ.get("SHIMPZ_CAPSULE_PIDS_LIMIT", "128"))
 
 
 def hard_memory_bytes(value: str | int | float, *, setting: str) -> int:
