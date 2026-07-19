@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import stat
 import tarfile
 import threading
 from collections import OrderedDict
@@ -75,8 +74,7 @@ def read_container_genesis(container) -> str:
         or not 1 <= size <= MAX_GENESIS_BYTES
         or not isinstance(mode, int)
         or isinstance(mode, bool)
-        or not stat.S_ISREG(mode)
-        or stat.S_IMODE(mode) != 0o444
+        or mode != 0o444
     ):
         raise GenesisError("Assistant Genesis metadata is invalid")
 

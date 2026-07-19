@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import stat
 import tarfile
 import unittest
 
@@ -41,7 +40,7 @@ class Container:
             {
                 "name": "GENESIS.md",
                 "size": len(self.content),
-                "mode": stat.S_IFREG | 0o444,
+                "mode": 0o444,
             },
         )
 
@@ -94,27 +93,27 @@ class AssistantGenesisTests(unittest.TestCase):
         invalid_cases = (
             (
                 iter((archive(valid, name="other.md"),)),
-                {"name": "GENESIS.md", "size": len(valid), "mode": stat.S_IFREG | 0o444},
+                {"name": "GENESIS.md", "size": len(valid), "mode": 0o444},
             ),
             (
                 iter((archive(valid, member_type=tarfile.SYMTYPE),)),
-                {"name": "GENESIS.md", "size": len(valid), "mode": stat.S_IFREG | 0o444},
+                {"name": "GENESIS.md", "size": len(valid), "mode": 0o444},
             ),
             (
                 iter((archive(valid, mode=0o644),)),
-                {"name": "GENESIS.md", "size": len(valid), "mode": stat.S_IFREG | 0o444},
+                {"name": "GENESIS.md", "size": len(valid), "mode": 0o444},
             ),
             (
                 iter((archive(valid),)),
-                {"name": "GENESIS.md", "size": len(valid), "mode": stat.S_IFLNK | 0o444},
+                {"name": "GENESIS.md", "size": len(valid), "mode": 0o100444},
             ),
             (
                 iter((archive(valid),)),
-                {"name": "GENESIS.md", "size": len(valid), "mode": stat.S_IFREG | 0o644},
+                {"name": "GENESIS.md", "size": len(valid), "mode": 0o644},
             ),
             (
                 iter((archive(valid),)),
-                {"name": "GENESIS.md", "size": len(valid) + 1, "mode": stat.S_IFREG | 0o444},
+                {"name": "GENESIS.md", "size": len(valid) + 1, "mode": 0o444},
             ),
         )
         for chunks, metadata in invalid_cases:
