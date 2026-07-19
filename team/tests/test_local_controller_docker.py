@@ -623,7 +623,7 @@ class DockerFlowTests(unittest.TestCase):
                 port,
                 token,
                 "GET",
-                "/v1/teams/demo_team/assistants/shimpz-assistant/help",
+                "/v1/teams/demo_team/assistants/shimpz-assistant/help/pt",
             )
             self.assertEqual(help_status, 200)
             self.assertEqual(assistant_help["assistant"], "shimpz-assistant")

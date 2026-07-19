@@ -25,6 +25,7 @@ ASSISTANT_RULES = (
     "Celsius and wind speed in kilometres per hour. Never claim that a forecast is a guarantee."
 )
 MAX_HELP_BYTES = 32 * 1024
+HELP_LOCALES = frozenset({"en", "pt", "es", "zh", "fr", "de", "ja", "ar"})
 
 
 def power_contracts() -> dict[str, dict[str, Any]]:
@@ -328,3 +329,10 @@ def validate_help_payload(payload: object) -> dict[str, str]:
     ):
         raise ValueError("Assistant Help returned an invalid result")
     return {"markdown": markdown}
+
+
+def validate_help_locale(locale: object) -> str:
+    """Accept only the fixed locale identifiers implemented by the Assistant Help RPC."""
+    if not isinstance(locale, str) or locale not in HELP_LOCALES:
+        raise ValueError("Assistant Help locale is not supported")
+    return locale

@@ -1847,9 +1847,17 @@ class LocalController:
                 self._release_assistant_egress(team_id, assistant_id, network)
             return {"assistant": assistant_id, "uninstalled": True}
 
-    def assistant_help(self, team_id: str, assistant_id: str) -> dict[str, str]:
+    def assistant_help(self, team_id: str, assistant_id: str, locale: str = "en") -> dict[str, str]:
         """Read bounded Markdown only from one installed, running Assistant's fixed RPC."""
         team_id = validate_team_id(team_id)
+        try:
+            locale = assistant_contract.validate_help_locale(locale)
+        except ValueError as exc:
+            raise ApiProblem(
+                HTTPStatus.BAD_REQUEST,
+                "Assistant Help locale is not supported",
+                code="invalid-help-locale",
+            ) from exc
         spec = self._resolve(assistant_id)
         with self._lock(team_id):
             network = self._network(team_id)
@@ -1858,7 +1866,7 @@ class LocalController:
             container.reload()
             if container.status != "running":
                 raise ApiProblem(HTTPStatus.CONFLICT, "Assistant is not running", code="assistant-not-running")
-            raw_result = self._rpc(container, spec, "GET", "/v1/help", {})
+            raw_result = self._rpc(container, spec, "GET", f"/v1/help/{locale}", {})
         try:
             help_payload = assistant_contract.validate_help_payload(raw_result)
         except ValueError as exc:
@@ -2472,7 +2480,7 @@ class Handler(BaseHTTPRequestHandler):
                     assistant_id,
                 )
         if (
-            len(parts) == 6
+            len(parts) in {6, 7}
             and parts[:2] == ["v1", "teams"]
             and parts[3] == "assistants"
             and parts[5] == "help"
@@ -2480,9 +2488,10 @@ class Handler(BaseHTTPRequestHandler):
         ):
             team_id = validate_team_id(parts[2])
             assistant_id = parts[4]
+            locale = parts[6] if len(parts) == 7 else "en"
             return (
                 HTTPStatus.OK,
-                controller.assistant_help(team_id, assistant_id),
+                controller.assistant_help(team_id, assistant_id, locale),
                 "assistant-help",
                 team_id,
                 assistant_id,

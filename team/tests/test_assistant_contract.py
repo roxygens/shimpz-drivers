@@ -85,6 +85,18 @@ class AssistantContractTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 assistant_contract.validate_help_payload(payload)
 
+    def test_help_locales_are_a_fixed_exact_allowlist(self) -> None:
+        self.assertEqual(
+            assistant_contract.HELP_LOCALES,
+            {"en", "pt", "es", "zh", "fr", "de", "ja", "ar"},
+        )
+        for locale in assistant_contract.HELP_LOCALES:
+            with self.subTest(locale=locale):
+                self.assertEqual(assistant_contract.validate_help_locale(locale), locale)
+        for locale in ("EN", "pt-BR", "../en", "en?fallback=pt", "", None):
+            with self.subTest(locale=locale), self.assertRaises(ValueError):
+                assistant_contract.validate_help_locale(locale)
+
 
 if __name__ == "__main__":
     unittest.main()

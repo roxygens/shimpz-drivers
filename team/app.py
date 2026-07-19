@@ -1708,8 +1708,13 @@ def _assistant_help(
     team_id: str,
     assistant_id: str,
     lease: _AuthorizationLease,
+    locale: str = "en",
 ) -> dict[str, str]:
     """Read bounded Markdown through one fixed RPC from an installed running Assistant."""
+    try:
+        locale = assistant_contract.validate_help_locale(locale)
+    except ValueError as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Assistant Help locale is not supported") from exc
     with _lock_for(team_id):
         _require_current_authorization(team_id, lease)
         current_id, contract, container = _installed_assistant(team_id, assistant_id)
@@ -1718,7 +1723,7 @@ def _assistant_help(
             container,
             contract.rpc_command,
             "GET",
-            "/v1/help",
+            f"/v1/help/{locale}",
             {},
             token=None,
             operation="Assistant Help",
@@ -2793,6 +2798,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._route_apps(method, parts, team_id, principal, lease)
                 return
             if sub == "assistants":
+                if len(parts) >= 6 and parts[5] == "help" and (
+                    parsed.query or parsed.fragment or "%" in parsed.path
+                ):
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "query and encoded paths are not accepted")
                 self._route_assistants(method, parts, team_id, lease)
                 return
             if sub == "inference":
@@ -3052,9 +3061,10 @@ class Handler(BaseHTTPRequestHandler):
         lease: _AuthorizationLease,
     ) -> None:
         """Expose only fixed read contracts; install lifecycle remains on the canonical Apps route."""
-        if method == "GET" and len(parts) == 6 and parts[5] == "help":
+        if method == "GET" and len(parts) in {6, 7} and parts[5] == "help":
             assistant_id = marketplace.validate_app_id(parts[4])
-            help_payload = _assistant_help(team_id, assistant_id, lease)
+            locale = parts[6] if len(parts) == 7 else "en"
+            help_payload = _assistant_help(team_id, assistant_id, lease, locale)
             trace = audit.log(
                 "assistant_help",
                 team_id,

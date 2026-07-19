@@ -42,7 +42,7 @@ class HostedAssistantHelpTests(unittest.TestCase):
             _installed_assistant=lambda _team_id, _assistant_id: ("shimpz-assistant", contract, container),
             _assistant_rpc_exchange=rpc,
         ):
-            result = app._assistant_help("team_1", "shimpz-assistant", lease)
+            result = app._assistant_help("team_1", "shimpz-assistant", lease, "pt")
 
         self.assertEqual(
             result,
@@ -59,7 +59,7 @@ class HostedAssistantHelpTests(unittest.TestCase):
                 container,
                 "/usr/local/bin/shimpz-assistant-rpc",
                 "GET",
-                "/v1/help",
+                "/v1/help/pt",
                 {},
                 {"token": None, "operation": "Assistant Help"},
             ),
@@ -73,8 +73,14 @@ class HostedAssistantHelpTests(unittest.TestCase):
             ),
             self.assertRaises(app.ApiError) as caught,
         ):
-            app._assistant_help("team_1", "shimpz-assistant", lease)
+            app._assistant_help("team_1", "shimpz-assistant", lease, "pt")
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_GATEWAY)
+
+        calls.clear()
+        with self.assertRaises(app.ApiError) as caught:
+            app._assistant_help("team_1", "shimpz-assistant", lease, "pt-BR")
+        self.assertEqual(caught.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(calls, [])
 
     def test_help_route_is_exact_and_disables_caching(self) -> None:
         handler = _RouteHarness()
@@ -87,12 +93,12 @@ class HostedAssistantHelpTests(unittest.TestCase):
             app.Handler._route_assistants(
                 handler,
                 "GET",
-                ["v1", "teams", "team_1", "assistants", "shimpz-assistant", "help"],
+                ["v1", "teams", "team_1", "assistants", "shimpz-assistant", "help", "ja"],
                 "team_1",
                 lease,
             )
 
-        assistant_help.assert_called_once_with("team_1", "shimpz-assistant", lease)
+        assistant_help.assert_called_once_with("team_1", "shimpz-assistant", lease, "ja")
         self.assertEqual(
             handler.sent,
             [
@@ -107,6 +113,35 @@ class HostedAssistantHelpTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_legacy_help_route_maps_only_to_english(self) -> None:
+        handler = _RouteHarness()
+        lease = object()
+        with mock.patch.object(
+            app,
+            "_assistant_help",
+            return_value={"assistant": "shimpz-assistant", "markdown": "# Help"},
+        ) as assistant_help:
+            app.Handler._route_assistants(
+                handler,
+                "GET",
+                ["v1", "teams", "team_1", "assistants", "shimpz-assistant", "help"],
+                "team_1",
+                lease,
+            )
+        assistant_help.assert_called_once_with("team_1", "shimpz-assistant", lease, "en")
+
+    def test_help_route_rejects_query_before_rpc(self) -> None:
+        handler = _RouteHarness()
+        handler.path = "/v1/teams/team_1/assistants/shimpz-assistant/help/en?fallback=pt"
+        with (
+            _patched(_authorize=lambda *_args: object()),
+            mock.patch.object(app, "_assistant_help") as assistant_help,
+            self.assertRaises(app.ApiError) as caught,
+        ):
+            app.Handler._route(handler, "GET", ("operator", None))
+        self.assertEqual(caught.exception.status, HTTPStatus.BAD_REQUEST)
+        assistant_help.assert_not_called()
 
 
 if __name__ == "__main__":
