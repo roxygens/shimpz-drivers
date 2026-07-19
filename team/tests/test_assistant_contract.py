@@ -79,6 +79,7 @@ class AssistantContractTests(unittest.TestCase):
             {"markdown": "x" * (assistant_contract.MAX_HELP_BYTES + 1)},
             {"markdown": "unsafe\x00text"},
             {"markdown": "ok", "html": "<script>"},
+            {"assistant": "shimpz-assistant", "markdown": "ok"},
             {},
         ):
             with self.subTest(payload=payload), self.assertRaises(ValueError):

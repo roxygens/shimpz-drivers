@@ -626,7 +626,9 @@ class DockerFlowTests(unittest.TestCase):
                 "/v1/teams/demo_team/assistants/shimpz-assistant/help",
             )
             self.assertEqual(help_status, 200)
+            self.assertEqual(assistant_help["assistant"], "shimpz-assistant")
             self.assertIn("# Shimpz Assistant", assistant_help["markdown"])
+            self.assertRegex(assistant_help["trace_id"], r"^[0-9a-f]{32}$")
             _, invoked = self._api(
                 port,
                 token,

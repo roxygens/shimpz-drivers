@@ -1860,13 +1860,14 @@ class LocalController:
                 raise ApiProblem(HTTPStatus.CONFLICT, "Assistant is not running", code="assistant-not-running")
             raw_result = self._rpc(container, spec, "GET", "/v1/help", {})
         try:
-            return assistant_contract.validate_help_payload(raw_result)
+            help_payload = assistant_contract.validate_help_payload(raw_result)
         except ValueError as exc:
             raise ApiProblem(
                 HTTPStatus.BAD_GATEWAY,
                 "Assistant Help returned an invalid result",
                 code="invalid-assistant-help",
             ) from exc
+        return {"assistant": spec.assistant_id, **help_payload}
 
     def invoke(self, team_id: str, assistant_id: str, power: str, payload: object) -> dict[str, object]:
         team_id = validate_team_id(team_id)

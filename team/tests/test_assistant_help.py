@@ -44,7 +44,13 @@ class HostedAssistantHelpTests(unittest.TestCase):
         ):
             result = app._assistant_help("team_1", "shimpz-assistant", lease)
 
-        self.assertEqual(result, {"markdown": "# Shimpz Assistant\n\nAsk about weather."})
+        self.assertEqual(
+            result,
+            {
+                "assistant": "shimpz-assistant",
+                "markdown": "# Shimpz Assistant\n\nAsk about weather.",
+            },
+        )
         self.assertEqual(calls[0], ("authorize", "team_1", lease))
         self.assertEqual(
             calls[1],
@@ -76,7 +82,7 @@ class HostedAssistantHelpTests(unittest.TestCase):
         with mock.patch.object(
             app,
             "_assistant_help",
-            return_value={"markdown": "# Help"},
+            return_value={"assistant": "shimpz-assistant", "markdown": "# Help"},
         ) as assistant_help:
             app.Handler._route_assistants(
                 handler,
@@ -87,7 +93,20 @@ class HostedAssistantHelpTests(unittest.TestCase):
             )
 
         assistant_help.assert_called_once_with("team_1", "shimpz-assistant", lease)
-        self.assertEqual(handler.sent, [(HTTPStatus.OK, {"markdown": "# Help"}, True)])
+        self.assertEqual(
+            handler.sent,
+            [
+                (
+                    HTTPStatus.OK,
+                    {
+                        "assistant": "shimpz-assistant",
+                        "markdown": "# Help",
+                        "trace_id": "trace",
+                    },
+                    True,
+                )
+            ],
+        )
 
 
 if __name__ == "__main__":

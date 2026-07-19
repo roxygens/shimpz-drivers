@@ -1724,9 +1724,10 @@ def _assistant_help(
             operation="Assistant Help",
         )
     try:
-        return assistant_contract.validate_help_payload(raw_result)
+        help_payload = assistant_contract.validate_help_payload(raw_result)
     except ValueError as exc:
         raise ApiError(HTTPStatus.BAD_GATEWAY, f"Assistant Help from {current_id!r} is invalid") from exc
+    return {"assistant": current_id, **help_payload}
 
 
 def _invoke_assistant_power(
@@ -3053,9 +3054,16 @@ class Handler(BaseHTTPRequestHandler):
         """Expose only fixed read contracts; install lifecycle remains on the canonical Apps route."""
         if method == "GET" and len(parts) == 6 and parts[5] == "help":
             assistant_id = marketplace.validate_app_id(parts[4])
+            help_payload = _assistant_help(team_id, assistant_id, lease)
+            trace = audit.log(
+                "assistant_help",
+                team_id,
+                result="ok",
+                assistant=help_payload["assistant"],
+            )
             self._send_json(
                 HTTPStatus.OK,
-                _assistant_help(team_id, assistant_id, lease),
+                {**help_payload, "trace_id": trace},
                 no_store=True,
             )
             return

@@ -31,7 +31,13 @@ class LocalAssistantHelpTests(unittest.TestCase):
 
         result = controller.assistant_help("team_1", "example-assistant")
 
-        self.assertEqual(result, {"markdown": "# Example\n\nAsk a simple question."})
+        self.assertEqual(
+            result,
+            {
+                "assistant": "example-assistant",
+                "markdown": "# Example\n\nAsk a simple question.",
+            },
+        )
         self.assertEqual(calls, [("GET", "/v1/help", {})])
         controller._rpc = lambda *_args: {"markdown": "x" * (32 * 1024 + 1)}
         with self.assertRaises(local_app.ApiProblem) as caught:
@@ -42,6 +48,7 @@ class LocalAssistantHelpTests(unittest.TestCase):
     def test_help_route_is_exact_and_has_no_request_body(self) -> None:
         controller = SimpleNamespace(
             assistant_help=lambda team_id, assistant_id: {
+                "assistant": assistant_id,
                 "markdown": f"# {team_id}/{assistant_id}",
             }
         )
@@ -54,7 +61,13 @@ class LocalAssistantHelpTests(unittest.TestCase):
         status, payload, operation, team_id, assistant_id = handler._route()
 
         self.assertEqual(status, HTTPStatus.OK)
-        self.assertEqual(payload, {"markdown": "# team_1/example-assistant"})
+        self.assertEqual(
+            payload,
+            {
+                "assistant": "example-assistant",
+                "markdown": "# team_1/example-assistant",
+            },
+        )
         self.assertEqual((operation, team_id, assistant_id), ("assistant-help", "team_1", "example-assistant"))
 
 
