@@ -30,6 +30,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import assistant_chat
+import assistant_contract
 import brain_runtime_client
 import brain_runtime_token_store
 import chat_orchestrator
@@ -69,7 +70,7 @@ MAX_ASSISTANT_ID_LENGTH = 48
 MAX_SPACE_ID_LENGTH = 48
 MAX_BODY_BYTES = 16 * 1024
 MAX_CHAT_BODY_BYTES = 24 * 1024
-MAX_RESPONSE_BYTES = 32 * 1024
+MAX_RESPONSE_BYTES = assistant_contract.MAX_HELP_BYTES * 6 + 1024
 MAX_API_RESPONSE_BYTES = 128 * 1024
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_FILE_BODY_BYTES = 4 * ((MAX_UPLOAD_BYTES + 2) // 3) + 8192
@@ -1383,6 +1384,27 @@ class LocalController:
             self._blocked_power_workloads.discard(container.id)
             return {"assistant": assistant_id, "uninstalled": True}
 
+    def assistant_help(self, team_id: str, assistant_id: str) -> dict[str, str]:
+        """Read bounded Markdown only from one installed, running Assistant's fixed RPC."""
+        team_id = validate_team_id(team_id)
+        spec = self._resolve(assistant_id)
+        with self._lock(team_id):
+            network = self._network(team_id)
+            container = self._assistant_container(team_id, assistant_id)
+            self._validate_container(container, team_id, spec, network.name)
+            container.reload()
+            if container.status != "running":
+                raise ApiProblem(HTTPStatus.CONFLICT, "Assistant is not running", code="assistant-not-running")
+            raw_result = self._rpc(container, spec, "GET", "/v1/help", {})
+        try:
+            return assistant_contract.validate_help_payload(raw_result)
+        except ValueError as exc:
+            raise ApiProblem(
+                HTTPStatus.BAD_GATEWAY,
+                "Assistant Help returned an invalid result",
+                code="invalid-assistant-help",
+            ) from exc
+
     def invoke(self, team_id: str, assistant_id: str, power: str, payload: object) -> dict[str, object]:
         team_id = validate_team_id(team_id)
         spec = self._resolve(assistant_id)
@@ -1689,7 +1711,7 @@ class Handler(BaseHTTPRequestHandler):
         return len(values) == 1 and hmac.compare_digest(values[0], expected)
 
     def _send(self, status: HTTPStatus, payload: dict[str, object]) -> None:
-        encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
         if len(encoded) > MAX_API_RESPONSE_BYTES:
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             encoded = b'{"error":"response exceeded its limit"}'
@@ -1975,6 +1997,22 @@ class Handler(BaseHTTPRequestHandler):
                     team_id,
                     assistant_id,
                 )
+        if (
+            len(parts) == 6
+            and parts[:2] == ["v1", "teams"]
+            and parts[3] == "assistants"
+            and parts[5] == "help"
+            and self.command == "GET"
+        ):
+            team_id = validate_team_id(parts[2])
+            assistant_id = parts[4]
+            return (
+                HTTPStatus.OK,
+                controller.assistant_help(team_id, assistant_id),
+                "assistant-help",
+                team_id,
+                assistant_id,
+            )
         if (
             len(parts) == 7
             and parts[:2] == ["v1", "teams"]
