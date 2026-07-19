@@ -36,6 +36,7 @@ from urllib.parse import parse_qs, urlparse
 
 import accounts_client
 import assistant_chat
+import assistant_contract
 import audit
 import brain_credentials_client
 import brain_runtime_client
@@ -1372,7 +1373,7 @@ MAX_INBOX_FILE_BYTES = 25 * 1024 * 1024
 # Base64 expands by 4/3; leave a small fixed envelope for the JSON keys and filename.
 MAX_FILE_BODY_BYTES = 4 * ((MAX_INBOX_FILE_BYTES + 2) // 3) + 8192
 MAX_ASSISTANT_RPC_INPUT_BYTES = 16 * 1024
-MAX_ASSISTANT_RPC_OUTPUT_BYTES = 32 * 1024
+MAX_ASSISTANT_RPC_OUTPUT_BYTES = assistant_contract.MAX_HELP_BYTES * 6 + 1024
 ASSISTANT_RPC_TIMEOUT_SECONDS = 8
 MAX_CHAT_FILES = 8
 
@@ -1582,6 +1583,21 @@ def _release_active_power(team_id: str, token: str, container_id: str) -> None:
             _active_power_container_ids.pop(team_id, None)
 
 
+def _register_optional_power(team_id: str, token: str | None, container) -> None:
+    if token is not None:
+        _register_active_power(team_id, token, container)
+
+
+def _release_optional_power(team_id: str, token: str | None, container_id: str) -> None:
+    if token is not None:
+        _release_active_power(team_id, token, container_id)
+
+
+def _raise_if_rpc_cancelled(token: str | None, exc: BaseException | None = None) -> None:
+    if token is not None and _token_cancelled(token):
+        raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped") from exc
+
+
 def _fail_stop_power(team_id: str, container) -> None:
     """Prove an ambiguous Assistant RPC can no longer execute before returning an error."""
     try:
@@ -1595,19 +1611,21 @@ def _fail_stop_power(team_id: str, container) -> None:
         ) from exc
 
 
-def _assistant_rpc(
+def _assistant_rpc_exchange(
     team_id: str,
-    token: str,
     container,
     command: str,
     method: str,
     path: str,
     payload: dict,
+    *,
+    token: str | None,
+    operation: str,
 ) -> object:
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     if len(encoded) > MAX_ASSISTANT_RPC_INPUT_BYTES:
         raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Power input is too large")
-    _register_active_power(team_id, token, container)
+    _register_optional_power(team_id, token, container)
     stream = None
     try:
         try:
@@ -1633,14 +1651,12 @@ def _assistant_rpc(
             stdout, stderr = _read_rpc_frames(raw_socket, deadline)
         except TimeoutError as exc:
             _fail_stop_power(team_id, container)
-            if _token_cancelled(token):
-                raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped") from exc
-            raise ApiError(HTTPStatus.GATEWAY_TIMEOUT, "Assistant Power timed out") from exc
+            _raise_if_rpc_cancelled(token, exc)
+            raise ApiError(HTTPStatus.GATEWAY_TIMEOUT, f"{operation} timed out") from exc
         except (docker.errors.DockerException, OSError, ValueError, KeyError) as exc:
             _fail_stop_power(team_id, container)
-            if _token_cancelled(token):
-                raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped") from exc
-            raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Power failed") from exc
+            _raise_if_rpc_cancelled(token, exc)
+            raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} failed") from exc
         finally:
             if stream is not None:
                 with contextlib.suppress(Exception):
@@ -1650,24 +1666,67 @@ def _assistant_rpc(
             details = _docker.api.exec_inspect(exec_id)
         except docker.errors.DockerException as exc:
             _fail_stop_power(team_id, container)
-            if _token_cancelled(token):
-                raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped") from exc
-            raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Power status is ambiguous") from exc
+            _raise_if_rpc_cancelled(token, exc)
+            raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} status is ambiguous") from exc
         if not isinstance(details.get("ExitCode"), int):
             _fail_stop_power(team_id, container)
-            if _token_cancelled(token):
-                raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
-            raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Power status is ambiguous")
+            _raise_if_rpc_cancelled(token)
+            raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} status is ambiguous")
         if details["ExitCode"] != 0 or stderr:
-            if _token_cancelled(token):
-                raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
-            raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Power failed")
+            _raise_if_rpc_cancelled(token)
+            raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} failed")
         try:
             return json.loads(bytes(stdout))
         except (UnicodeError, json.JSONDecodeError) as exc:
-            raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Power returned an invalid result") from exc
+            raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} returned an invalid result") from exc
     finally:
-        _release_active_power(team_id, token, container.id)
+        _release_optional_power(team_id, token, container.id)
+
+
+def _assistant_rpc(
+    team_id: str,
+    token: str,
+    container,
+    command: str,
+    method: str,
+    path: str,
+    payload: dict,
+) -> object:
+    return _assistant_rpc_exchange(
+        team_id,
+        container,
+        command,
+        method,
+        path,
+        payload,
+        token=token,
+        operation="Assistant Power",
+    )
+
+
+def _assistant_help(
+    team_id: str,
+    assistant_id: str,
+    lease: _AuthorizationLease,
+) -> dict[str, str]:
+    """Read bounded Markdown through one fixed RPC from an installed running Assistant."""
+    with _lock_for(team_id):
+        _require_current_authorization(team_id, lease)
+        current_id, contract, container = _installed_assistant(team_id, assistant_id)
+        raw_result = _assistant_rpc_exchange(
+            team_id,
+            container,
+            contract.rpc_command,
+            "GET",
+            "/v1/help",
+            {},
+            token=None,
+            operation="Assistant Help",
+        )
+    try:
+        return assistant_contract.validate_help_payload(raw_result)
+    except ValueError as exc:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, f"Assistant Help from {current_id!r} is invalid") from exc
 
 
 def _invoke_assistant_power(
@@ -2561,11 +2620,13 @@ class Handler(BaseHTTPRequestHandler):
                 return ("account", account_id)
         return None
 
-    def _send_json(self, status: HTTPStatus, payload: dict) -> None:
+    def _send_json(self, status: HTTPStatus, payload: dict, *, no_store: bool = False) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if no_store:
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -2729,6 +2790,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if sub == "apps":
                 self._route_apps(method, parts, team_id, principal, lease)
+                return
+            if sub == "assistants":
+                self._route_assistants(method, parts, team_id, lease)
                 return
             if sub == "inference":
                 self._route_inference(method, parts, team_id, lease)
@@ -2976,6 +3040,24 @@ class Handler(BaseHTTPRequestHandler):
             result = _uninstall_app(team_id, app_id, lease)
             trace = audit.log("uninstall", team_id, result="ok", app=app_id, db_dropped=result["db_dropped"])
             self._send_json(HTTPStatus.OK, {**result, "trace_id": trace})
+            return
+        raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
+
+    def _route_assistants(
+        self,
+        method: str,
+        parts: list[str],
+        team_id: str,
+        lease: _AuthorizationLease,
+    ) -> None:
+        """Expose only fixed read contracts; install lifecycle remains on the canonical Apps route."""
+        if method == "GET" and len(parts) == 6 and parts[5] == "help":
+            assistant_id = marketplace.validate_app_id(parts[4])
+            self._send_json(
+                HTTPStatus.OK,
+                _assistant_help(team_id, assistant_id, lease),
+                no_store=True,
+            )
             return
         raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
 
