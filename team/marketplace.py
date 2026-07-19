@@ -23,7 +23,7 @@ APP_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$")
 DIGEST_IMAGE_RE = re.compile(r"^[a-z0-9.-]+(?::[0-9]{1,5})?/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$")
 RESERVED_APP_IDS = network_policy.RESERVED_SERVICE_ALIASES
 SHIMPZ_ASSISTANT_IMAGE = (
-    "ghcr.io/roxygens/shimpz-space@sha256:c68a7d055c8dbe0cf350d00975caa259741dec7a072ca30efa077a688e5b41b4"
+    "ghcr.io/roxygens/shimpz-space@sha256:e02e549a618bb1a58ff414d537875f9421ad82ce7365e0d3793b8b31ecf1ca35"
 )
 
 
