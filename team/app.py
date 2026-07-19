@@ -1079,7 +1079,7 @@ def _write_egress_policy(token: str, allowed_hosts: tuple[str, ...]) -> None:
     (APP_EGRESS_POLICY_DIR / f"{token}.json").write_bytes(encoded)
 
 
-def _validate_egress_policy(team_id: str, app_id: str, allowed_hosts: tuple[str, ...]) -> None:
+def _validate_egress_policy(team_id: str, app_id: str, allowed_hosts: tuple[str, ...]) -> str:
     token = _app_egress_token(team_id, app_id, create=False)
     if token is None:
         raise ApiError(HTTPStatus.CONFLICT, "installed Assistant egress policy is missing")
@@ -1090,11 +1090,49 @@ def _validate_egress_policy(team_id: str, app_id: str, allowed_hosts: tuple[str,
     expected = json.dumps(list(allowed_hosts), separators=(",", ":")).encode("ascii")
     if actual != expected:
         raise ApiError(HTTPStatus.CONFLICT, "installed Assistant egress policy failed its contract")
+    return token
 
 
-def _validate_admitted_egress(team_id: str, app_id: str, allowed_hosts: tuple[str, ...]) -> None:
+def _validate_admitted_egress(team_id: str, app_id: str, allowed_hosts: tuple[str, ...]) -> str | None:
     if allowed_hosts:
-        _validate_egress_policy(team_id, app_id, allowed_hosts)
+        return _validate_egress_policy(team_id, app_id, allowed_hosts)
+    return None
+
+
+def _egress_proxy_environment(token: str) -> dict[str, str]:
+    proxy = f"http://{token}@app-egress-proxy:8889"
+    no_proxy = "localhost,127.0.0.1,::1,postgres,.team"
+    return {
+        "HTTPS_PROXY": proxy,
+        "https_proxy": proxy,
+        "NO_PROXY": no_proxy,
+        "no_proxy": no_proxy,
+    }
+
+
+def _validate_assistant_proxy_environment(
+    container,
+    token: str | None,
+    allowed_hosts: tuple[str, ...],
+) -> None:
+    config = container.attrs.get("Config")
+    raw_environment = config.get("Env") if isinstance(config, dict) else None
+    if not isinstance(raw_environment, list):
+        raise ApiError(HTTPStatus.CONFLICT, "installed Assistant proxy environment is invalid")
+    environment: dict[str, str] = {}
+    for entry in raw_environment:
+        if not isinstance(entry, str) or "=" not in entry:
+            raise ApiError(HTTPStatus.CONFLICT, "installed Assistant proxy environment is invalid")
+        key, value = entry.split("=", 1)
+        if not key or key in environment:
+            raise ApiError(HTTPStatus.CONFLICT, "installed Assistant proxy environment is invalid")
+        environment[key] = value
+    proxy_environment = {key: value for key, value in environment.items() if key.upper().endswith("_PROXY")}
+    if allowed_hosts and token is None:
+        raise ApiError(HTTPStatus.CONFLICT, "installed Assistant proxy environment failed its contract")
+    expected = _egress_proxy_environment(token) if token is not None else {}
+    if proxy_environment != expected:
+        raise ApiError(HTTPStatus.CONFLICT, "installed Assistant proxy environment failed its contract")
 
 
 def _reserve_egress_environment(
@@ -1107,8 +1145,7 @@ def _reserve_egress_environment(
     token = _app_egress_token(team_id, app_id)
     if token is None:
         raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant egress token is unavailable")
-    proxy = f"http://{token}@app-egress-proxy:8889"
-    return token, {"HTTPS_PROXY": proxy, "https_proxy": proxy}
+    return token, _egress_proxy_environment(token)
 
 
 def _activate_admitted_egress(
@@ -1315,7 +1352,8 @@ def _install_app(
                     f"installed app {app_id!r} uses a different image; uninstall it before reinstalling",
                 )
             admitted_hosts = _admit_app_contract(spec, existing)
-            _validate_admitted_egress(team_id, app_id, admitted_hosts)
+            token = _validate_admitted_egress(team_id, app_id, admitted_hosts)
+            _validate_assistant_proxy_environment(existing, token, admitted_hosts)
             ready, status = _app_ready_now(existing, spec.port, spec.health_path)
             if not ready:
                 raise ApiError(
@@ -1358,6 +1396,7 @@ def _install_app(
                 network.disconnect(container)
                 network.connect(container, aliases=[app_id, f"{app_id}.team"])
                 admitted_hosts = _admit_app_contract(spec, container)
+                _validate_assistant_proxy_environment(container, token, admitted_hosts)
                 _activate_admitted_egress(network, token, admitted_hosts)
                 _start_team_with_isolation(container)
                 healthy, reason = _wait_app_healthy(container, spec.port, spec.health_path)
@@ -1584,8 +1623,8 @@ def _installed_assistant(team_id: str, assistant_id: object):
         raise ApiError(HTTPStatus.CONFLICT, "installed Assistant failed its identity contract")
     _require_running_team_isolation(container)
     allowed_hosts = _require_assistant_allowed_hosts(spec, container)
-    if allowed_hosts:
-        _validate_egress_policy(team_id, assistant_id, allowed_hosts)
+    token = _validate_admitted_egress(team_id, assistant_id, allowed_hosts)
+    _validate_assistant_proxy_environment(container, token, allowed_hosts)
     return assistant_id, contract, container
 
 

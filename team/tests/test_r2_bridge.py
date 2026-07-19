@@ -190,6 +190,12 @@ class _RouteHarness:
 
 
 class HostedAllowedHostsAdmissionTests(unittest.TestCase):
+    @staticmethod
+    def _container_with_environment(environment: dict[str, str]):
+        return types.SimpleNamespace(
+            attrs={"Config": {"Env": [f"{key}={value}" for key, value in environment.items()]}},
+        )
+
     def test_manifest_must_match_reviewed_hosts_before_admission(self) -> None:
         spec = app.marketplace.APPS["shimpz-assistant"]
         container = types.SimpleNamespace(id="assistant-generation")
@@ -292,12 +298,59 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             token = app._app_egress_token("team_1", "shimpz-assistant")
             assert token is not None
             app._write_egress_policy(token, hosts)
-            app._validate_egress_policy("team_1", "shimpz-assistant", hosts)
+            self.assertEqual(
+                app._validate_egress_policy("team_1", "shimpz-assistant", hosts),
+                token,
+            )
 
             (Path(directory) / f"{token}.json").write_text('["evil.example"]', encoding="ascii")
             with self.assertRaises(app.ApiError) as caught:
                 app._validate_egress_policy("team_1", "shimpz-assistant", hosts)
         self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+
+    def test_nonempty_hosts_require_the_exact_admitted_proxy_token(self) -> None:
+        token = "a" * 32
+        hosts = ("api.open-meteo.com",)
+        expected = app._egress_proxy_environment(token)
+        app._validate_assistant_proxy_environment(self._container_with_environment(expected), token, hosts)
+
+        drifted_environments = {
+            "wrong-token": {**expected, "HTTPS_PROXY": expected["HTTPS_PROXY"].replace(token, "b" * 32)},
+            "missing-lowercase": {key: value for key, value in expected.items() if key != "https_proxy"},
+            "http-proxy": {**expected, "HTTP_PROXY": "http://app-egress-proxy:8889"},
+            "all-proxy": {**expected, "all_proxy": "http://app-egress-proxy:8889"},
+        }
+        for name, environment in drifted_environments.items():
+            with self.subTest(name=name), self.assertRaises(app.ApiError) as caught:
+                app._validate_assistant_proxy_environment(
+                    self._container_with_environment(environment),
+                    token,
+                    hosts,
+                )
+            self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+
+    def test_empty_hosts_forbid_every_proxy_environment_variable(self) -> None:
+        app._validate_assistant_proxy_environment(
+            self._container_with_environment({"SHIMPZ_TEAM_ID": "team_1"}),
+            None,
+            (),
+        )
+
+        for key in ("HTTPS_PROXY", "http_proxy", "ALL_PROXY", "no_proxy", "FTP_PROXY", "custom_proxy"):
+            with self.subTest(key=key), self.assertRaises(app.ApiError) as caught:
+                app._validate_assistant_proxy_environment(
+                    self._container_with_environment({key: "unexpected"}),
+                    None,
+                    (),
+                )
+            self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+
+    def test_empty_hosts_build_no_proxy_environment(self) -> None:
+        spec = app.marketplace.APPS["shimpz-assistant"]
+        kwargs = app.manifests.build_team_app_kwargs("team_1", "shimpz-assistant", spec)
+        environment = kwargs["environment"]
+
+        self.assertFalse({key for key in environment if key.upper().endswith("_PROXY")})
 
 
 class HostedCredentialLeaseTests(unittest.TestCase):

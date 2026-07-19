@@ -288,8 +288,6 @@ def build_team_app_kwargs(
         # speak AS its team ("Zyon asks your approval") instead of leaking an internal id.
         "SHIMPZ_TEAM_NAME": team_name or team_id,
         "SHIMPZ_APP": app_id,
-        "NO_PROXY": "localhost,127.0.0.1,::1,postgres,.team",
-        "no_proxy": "localhost,127.0.0.1,::1,postgres,.team",
         **({"DATABASE_URL": database_url} if database_url else {}),
         **(proxy_env or {}),
     }
