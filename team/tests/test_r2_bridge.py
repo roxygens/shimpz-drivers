@@ -7,6 +7,7 @@ import tempfile
 import types
 import unittest
 from http import HTTPStatus
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
@@ -231,6 +232,60 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         for invalid in ("", " Marketing", "Marketing ", "Marketing\n", "x" * 81, None):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 app._validated_team_name(invalid)
+
+    def test_hosted_stream_emits_the_exact_v2_done_shape(self) -> None:
+        class StreamHarness:
+            def __init__(self) -> None:
+                self.status = None
+                self.headers: list[tuple[str, str]] = []
+                self.wfile = BytesIO()
+
+            def send_response(self, status) -> None:
+                self.status = status
+
+            def send_header(self, name: str, value: str) -> None:
+                self.headers.append((name, value))
+
+            def end_headers(self) -> None:
+                pass
+
+        @contextlib.contextmanager
+        def exclusive_turn(_team_id, _lease):
+            yield "turn-token", types.SimpleNamespace(id=ANCHOR_ID)
+
+        stream = StreamHarness()
+        with _patched(
+            _exclusive_chat_turn=exclusive_turn,
+            _chat_in_turn=lambda *_args: {
+                "team_id": "team_1",
+                "team_name": "Marketing",
+                "reply": "Campaign ready.",
+            },
+        ):
+            app.Handler._stream_chat(
+                stream,
+                "team_1",
+                "Prepare the campaign",
+                [],
+                ("shimpz-assistant",),
+                types.SimpleNamespace(owner="account_1"),
+            )
+
+        size_line, chunked = stream.wfile.getvalue().split(b"\r\n", 1)
+        size = int(size_line, 16)
+        encoded_event = chunked[:size]
+        self.assertEqual(stream.status, HTTPStatus.OK)
+        self.assertIn(("Content-Type", "application/x-ndjson"), stream.headers)
+        self.assertEqual(chunked[size:], b"\r\n0\r\n\r\n")
+        self.assertEqual(
+            app.json.loads(encoded_event),
+            {
+                "type": "done",
+                "team_id": "team_1",
+                "team_name": "Marketing",
+                "reply": "Campaign ready.",
+            },
+        )
 
     def test_hosted_chat_scope_is_explicit_bounded_and_selects_only_requested_assistants(self) -> None:
         contract = types.SimpleNamespace(rules="Use declared Powers.", powers={})

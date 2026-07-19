@@ -2721,6 +2721,7 @@ class Handler(BaseHTTPRequestHandler):
                     "type": "done",
                     "reply": result["reply"],
                     "team_id": result["team_id"],
+                    "team_name": result["team_name"],
                 }
                 emit(terminal)
             except ApiError as exc:
