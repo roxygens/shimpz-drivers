@@ -43,6 +43,9 @@ class Container:
 
 
 class AssistantManifestTests(unittest.TestCase):
+    def test_manifest_limit_matches_the_public_sdk_contract(self):
+        self.assertEqual(assistant_manifest.MAX_MANIFEST_BYTES, 256 * 1024)
+
     def test_reads_and_canonicalizes_exact_hosts(self):
         content = b'allowed_hosts = ["geocoding-api.open-meteo.com", "api.open-meteo.com"]\n'
 

@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from contextlib import ExitStack
 
 MANIFEST_PATH = "/opt/shimpz-assistant/shimpz.assistant.toml"
-MAX_MANIFEST_BYTES = 64 * 1024
+MAX_MANIFEST_BYTES = 256 * 1024
 MAX_ARCHIVE_BYTES = MAX_MANIFEST_BYTES + (32 * 1024)
 MAX_ALLOWED_HOSTS = 32
 DEFAULT_CACHE_ENTRIES = 256
