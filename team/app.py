@@ -1380,6 +1380,7 @@ MAX_ASSISTANT_RPC_INPUT_BYTES = 16 * 1024
 MAX_ASSISTANT_RPC_OUTPUT_BYTES = assistant_contract.MAX_HELP_BYTES * 6 + 1024
 ASSISTANT_RPC_TIMEOUT_SECONDS = 8
 MAX_CHAT_FILES = 8
+MAX_CHAT_ASSISTANTS = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -1533,9 +1534,34 @@ def _active_team_assistants(team_id: str) -> tuple[_ActiveAssistant, ...]:
         seen.add(current_id)
         active.append(_ActiveAssistant(current_id, contract, container))
     active.sort(key=lambda item: item.assistant_id)
-    if not active:
-        raise ApiError(HTTPStatus.CONFLICT, "install and start at least one Assistant before chatting with this Team")
     return tuple(active)
+
+
+def _chat_assistant_ids(value: object) -> tuple[str, ...]:
+    """Return one explicit, bounded Assistant scope; empty means Brain-only."""
+    if not isinstance(value, list) or len(value) > MAX_CHAT_ASSISTANTS:
+        raise ApiError(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            f"assistant_ids must contain at most {MAX_CHAT_ASSISTANTS} ids",
+        )
+    try:
+        assistant_ids = tuple(marketplace.validate_app_id(item) for item in value)
+    except marketplace.MarketplaceError:
+        raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "assistant_ids contains an invalid id") from None
+    if len(set(assistant_ids)) != len(assistant_ids):
+        raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "assistant_ids must not contain duplicate ids")
+    return tuple(sorted(assistant_ids))
+
+
+def _select_team_assistants(
+    active: tuple[_ActiveAssistant, ...],
+    assistant_ids: tuple[str, ...],
+) -> tuple[_ActiveAssistant, ...]:
+    active_by_id = {assistant.assistant_id: assistant for assistant in active}
+    try:
+        return tuple(active_by_id[assistant_id] for assistant_id in assistant_ids)
+    except KeyError:
+        raise ApiError(HTTPStatus.CONFLICT, "a selected Assistant is unavailable") from None
 
 
 def _read_rpc_exact(raw_socket: socket.socket, amount: int, deadline: float) -> bytes:
@@ -1900,13 +1926,14 @@ def _chat_in_turn(
     team_id: str,
     message: str,
     file_ids: object,
+    assistant_ids: tuple[str, ...],
     token: str,
     container,
     owner: str,
 ) -> dict:
     team_name = _team_name_from_anchor(container)
     thread_id = _brain_thread_id(team_id, container.id)
-    assistants = _active_team_assistants(team_id)
+    assistants = _select_team_assistants(_active_team_assistants(team_id), assistant_ids)
     files = _chat_file_metadata(team_id, file_ids)
     try:
         config = _inference_store.load(team_id)
@@ -1981,7 +2008,7 @@ def _chat_in_turn(
     def validate_context() -> None:
         require_current_credential()
         current_anchor = _current_team_anchor(team_id, container.id, owner)
-        current_assistants = _active_team_assistants(team_id)
+        current_assistants = _select_team_assistants(_active_team_assistants(team_id), assistant_ids)
         current_files = _chat_file_metadata(team_id, file_ids)
         try:
             current_config = _inference_store.load(team_id)
@@ -2039,13 +2066,14 @@ def _chat(
     team_id: str,
     message: str,
     file_ids: object,
+    assistant_ids: tuple[str, ...],
     lease: _AuthorizationLease,
 ) -> dict:
-    """Run one bounded Team turn across every active, Controller-brokered Assistant Power."""
+    """Run one bounded Team turn across the explicit Controller-brokered Assistant scope."""
     # The slot comes first. A losing concurrent request must not run even the local credential probe,
     # much less provider status or a second provider CLI.
     with _exclusive_chat_turn(team_id, lease) as (token, container):
-        return _chat_in_turn(team_id, message, file_ids, token, container, lease.owner)
+        return _chat_in_turn(team_id, message, file_ids, assistant_ids, token, container, lease.owner)
 
 
 def _stop_active_power(team_id: str, token: str | None) -> bool:
@@ -2661,6 +2689,7 @@ class Handler(BaseHTTPRequestHandler):
         team_id: str,
         message: str,
         file_ids: object,
+        assistant_ids: tuple[str, ...],
         lease: _AuthorizationLease,
     ) -> None:
         """Preserve the NDJSON transport while exposing only the validated terminal reply."""
@@ -2679,7 +2708,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
             try:
-                result = _chat_in_turn(team_id, message, file_ids, token, container, lease.owner)
+                result = _chat_in_turn(
+                    team_id,
+                    message,
+                    file_ids,
+                    assistant_ids,
+                    token,
+                    container,
+                    lease.owner,
+                )
                 terminal = {
                     "type": "done",
                     "reply": result["reply"],
@@ -3007,19 +3044,20 @@ class Handler(BaseHTTPRequestHandler):
         sub2 = parts[4] if len(parts) > 4 else ""
         if method == "POST" and sub2 in {"", "stream"}:
             body = self._read_body()
-            if not isinstance(body, dict) or set(body) not in ({"message"}, {"message", "files"}):
+            if not isinstance(body, dict) or set(body) != {"message", "files", "assistant_ids"}:
                 raise ApiError(
                     HTTPStatus.UNPROCESSABLE_ENTITY,
-                    "Team chat requires message and optional files",
+                    "Team chat requires message, files, and assistant_ids",
                 )
             message = validate.validate_chat_message(body["message"])
-            file_ids = body.get("files")
+            file_ids = body["files"]
+            assistant_ids = _chat_assistant_ids(body["assistant_ids"])
             if sub2 == "stream":
                 _enforce_rate("stream", principal)
-                self._stream_chat(team_id, message, file_ids, lease)
+                self._stream_chat(team_id, message, file_ids, assistant_ids, lease)
                 return
             _enforce_rate("chat", principal)
-            result = _chat(team_id, message, file_ids, lease)
+            result = _chat(team_id, message, file_ids, assistant_ids, lease)
             audit.log(
                 "chat",
                 team_id,

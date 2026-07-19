@@ -82,6 +82,7 @@ RPC_TIMEOUT_SECONDS = 8
 HEALTH_TIMEOUT_SECONDS = 15
 MAX_CHAT_MESSAGE_CHARS = 16_000
 MAX_CHAT_FILES = 8
+MAX_CHAT_ASSISTANTS = 16
 MIN_API_KEY_BYTES = 16
 MAX_API_KEY_BYTES = 8 * 1024
 APP_EGRESS_PROXY_ALIAS = "app-egress-proxy"
@@ -247,6 +248,31 @@ def validate_assistant_id(value: object) -> str:
             code="invalid-assistant-id",
         )
     return value
+
+
+def validate_chat_assistant_ids(value: object) -> tuple[str, ...]:
+    """Return one explicit, bounded Assistant scope; empty means Brain-only."""
+    if not isinstance(value, list) or len(value) > MAX_CHAT_ASSISTANTS:
+        raise ApiProblem(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            f"assistant_ids must contain at most {MAX_CHAT_ASSISTANTS} ids",
+            code="invalid-assistants",
+        )
+    try:
+        assistant_ids = tuple(validate_assistant_id(item) for item in value)
+    except ApiProblem:
+        raise ApiProblem(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "assistant_ids contains an invalid id",
+            code="invalid-assistants",
+        ) from None
+    if len(set(assistant_ids)) != len(assistant_ids):
+        raise ApiProblem(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "assistant_ids must not contain duplicate ids",
+            code="invalid-assistants",
+        )
+    return tuple(sorted(assistant_ids))
 
 
 def validate_model_credential_headers(
@@ -1037,6 +1063,7 @@ class LocalController:
         team_id: str,
         file_ids: object,
         provider: str,
+        assistant_ids: tuple[str, ...],
     ) -> tuple[
         str,
         str,
@@ -1050,7 +1077,16 @@ class LocalController:
             network_id = getattr(network, "id", None)
             if not isinstance(network_id, str) or not network_id:
                 raise ApiProblem(HTTPStatus.CONFLICT, "Team resource ownership conflict", code="ownership-conflict")
-            assistants = self._active_chat_assistants(team_id, network.name)
+            active_assistants = self._active_chat_assistants(team_id, network.name)
+            active_by_id = {active.spec.assistant_id: active for active in active_assistants}
+            try:
+                assistants = tuple(active_by_id[assistant_id] for assistant_id in assistant_ids)
+            except KeyError:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "a selected Assistant is unavailable",
+                    code="assistant-unavailable",
+                ) from None
             files = self._chat_file_metadata(team_id, file_ids)
             try:
                 config = self.inference_store.load(team_id)
@@ -1098,12 +1134,6 @@ class LocalController:
             if container.status == "running":
                 active.append(_ActiveAssistant(spec=spec, container_id=container.id))
         active.sort(key=lambda item: item.spec.assistant_id)
-        if not active:
-            raise ApiProblem(
-                HTTPStatus.CONFLICT,
-                "install and start at least one Assistant before chatting with this Team",
-                code="team-has-no-active-assistants",
-            )
         return tuple(active)
 
     def _invoke_chat_power(
@@ -1150,14 +1180,15 @@ class LocalController:
         api_key: str,
     ) -> dict[str, object]:
         team_id = validate_team_id(team_id)
-        if not isinstance(body, dict) or set(body) not in ({"message"}, {"message", "files"}):
+        if not isinstance(body, dict) or set(body) != {"message", "files", "assistant_ids"}:
             raise ApiProblem(
                 HTTPStatus.UNPROCESSABLE_ENTITY,
-                "Team chat requires only message and optional files",
+                "Team chat requires only message, files, and assistant_ids",
                 code="invalid-body",
             )
         message = body["message"]
-        file_ids = body.get("files", [])
+        file_ids = body["files"]
+        assistant_ids = validate_chat_assistant_ids(body["assistant_ids"])
         if (
             not isinstance(message, str)
             or not message.strip()
@@ -1170,7 +1201,12 @@ class LocalController:
                 code="invalid-message",
             )
         with self._exclusive_chat_turn(team_id) as token:
-            team_name, network_id, assistants, files, config = self._chat_setup(team_id, file_ids, provider)
+            team_name, network_id, assistants, files, config = self._chat_setup(
+                team_id,
+                file_ids,
+                provider,
+                assistant_ids,
+            )
             context = brain_runtime_client.RuntimeContext(
                 thread_id=_brain_thread_id(self.space_id, team_id, network_id),
                 team_name=team_name,
@@ -1244,6 +1280,7 @@ class LocalController:
                     team_id,
                     file_ids,
                     provider,
+                    assistant_ids,
                 )
                 current_identity = (
                     current_team,

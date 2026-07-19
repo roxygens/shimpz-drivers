@@ -462,7 +462,7 @@ class LocalContractTests(unittest.TestCase):
 
     def test_private_chat_route_reads_key_from_header_not_json(self) -> None:
         key = "sk-test-0123456789"
-        body = json.dumps({"message": "Hello", "files": []}).encode()
+        body = json.dumps({"message": "Hello", "files": [], "assistant_ids": ["shimpz-assistant"]}).encode()
         captured: dict[str, object] = {}
 
         class Controller:
@@ -492,7 +492,10 @@ class LocalContractTests(unittest.TestCase):
         status, response, *_audit = handler._chat_route(["v1", "teams", "team_1", "chat"])
 
         self.assertEqual(status, HTTPStatus.OK)
-        self.assertEqual(captured["payload"], {"message": "Hello", "files": []})
+        self.assertEqual(
+            captured["payload"],
+            {"message": "Hello", "files": [], "assistant_ids": ["shimpz-assistant"]},
+        )
         self.assertEqual(captured["provider"], "openai")
         self.assertEqual(captured["api_key"], key)
         self.assertNotIn(key, json.dumps(response))
@@ -514,7 +517,7 @@ class LocalContractTests(unittest.TestCase):
             controller = self._chat_controller(directory, runtime)
             response = controller.chat(
                 "team_1",
-                {"message": "Hello", "files": []},
+                {"message": "Hello", "files": [], "assistant_ids": ["shimpz-assistant"]},
                 "openai",
                 key,
             )
@@ -524,6 +527,7 @@ class LocalContractTests(unittest.TestCase):
                     {
                         "message": "Hello",
                         "files": [],
+                        "assistant_ids": ["shimpz-assistant"],
                         "api_key": key,
                     },
                     "openai",
@@ -566,7 +570,11 @@ class LocalContractTests(unittest.TestCase):
 
             response = controller.chat(
                 "team_1",
-                {"message": "Check the weather", "files": []},
+                {
+                    "message": "Check the weather",
+                    "files": [],
+                    "assistant_ids": ["weather-pulse", "shimpz-assistant"],
+                },
                 "openai",
                 "sk-test-0123456789",
             )
@@ -579,6 +587,137 @@ class LocalContractTests(unittest.TestCase):
             f"local:local-space:team_1:{'a' * 64}:default",
         )
         self.assertEqual(response["team_name"], "Marketing")
+
+    def test_chat_empty_scope_is_brain_only_but_still_scans_installed_workloads(self) -> None:
+        class Runtime:
+            context = None
+
+            def start(self, context, _message):
+                self.context = context
+                return brain_runtime_client.RuntimeTurn(status="completed", reply="Brain only.", powers=())
+
+        runtime = Runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, runtime)
+            scanner = controller._active_chat_assistants
+            calls: list[str] = []
+            controller._active_chat_assistants = lambda team_id, network: (
+                calls.append(f"{team_id}:{network}") or scanner(team_id, network)
+            )
+
+            response = controller.chat(
+                "team_1",
+                {"message": "Hello", "files": [], "assistant_ids": []},
+                "openai",
+                "sk-test-0123456789",
+            )
+
+        self.assertEqual(runtime.context.assistants, ())
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(response["reply"], "Brain only.")
+
+    def test_chat_rejects_invalid_or_unavailable_assistant_scope_before_runtime(self) -> None:
+        class Runtime:
+            def start(self, _context, _message):
+                raise AssertionError("an invalid Assistant scope must not reach the Brain")
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime())
+            invalid = (
+                ["shimpz-assistant", "shimpz-assistant"],
+                ["bad_assistant"],
+                [f"helper-{index}" for index in range(local_app.MAX_CHAT_ASSISTANTS + 1)],
+            )
+            for assistant_ids in invalid:
+                with self.subTest(assistant_ids=assistant_ids), self.assertRaises(local_app.ApiProblem) as caught:
+                    controller.chat(
+                        "team_1",
+                        {"message": "Hello", "files": [], "assistant_ids": assistant_ids},
+                        "openai",
+                        "sk-test-0123456789",
+                    )
+                self.assertEqual(caught.exception.code, "invalid-assistants")
+
+            with self.assertRaises(local_app.ApiProblem) as unavailable:
+                controller.chat(
+                    "team_1",
+                    {"message": "Hello", "files": [], "assistant_ids": ["weather-pulse"]},
+                    "openai",
+                    "sk-test-0123456789",
+                )
+
+        self.assertEqual(unavailable.exception.status, HTTPStatus.CONFLICT)
+        self.assertEqual(unavailable.exception.code, "assistant-unavailable")
+        self.assertEqual(unavailable.exception.message, "a selected Assistant is unavailable")
+
+    def test_chat_revalidates_the_selected_assistant_generation_before_provider_use(self) -> None:
+        class Runtime:
+            def start(self, _context, _message):
+                raise AssertionError("Assistant generation drift must not reach the Brain")
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime())
+            spec = controller.registry["shimpz-assistant"]
+            generations = iter(("assistant-v1", "assistant-v2"))
+            controller._active_chat_assistants = lambda _team_id, _network: (
+                local_app._ActiveAssistant(spec, next(generations)),
+            )
+
+            with self.assertRaises(local_app.ApiProblem) as caught:
+                controller.chat(
+                    "team_1",
+                    {"message": "Hello", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                    "openai",
+                    "sk-test-0123456789",
+                )
+
+        self.assertEqual(caught.exception.code, "team-context-changed")
+
+    def test_chat_never_exposes_or_executes_an_unselected_assistant(self) -> None:
+        class Runtime:
+            def start(self, context, _message):
+                self.context = context
+                return brain_runtime_client.RuntimeTurn(
+                    status="power-required",
+                    reply="",
+                    powers=(
+                        brain_runtime_client.PowerRequest(
+                            interrupt_id="power-1",
+                            assistant_id="weather-pulse",
+                            power="current",
+                            input={},
+                            approval="none",
+                        ),
+                    ),
+                )
+
+        runtime = Runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, runtime)
+            hello = controller.registry["shimpz-assistant"]
+            weather = replace(
+                hello,
+                assistant_id="weather-pulse",
+                image=hello.image.replace("a" * 64, "b" * 64),
+                powers={"current": replace(hello.powers["current-weather"], path="/v1/powers/current")},
+            )
+            controller.registry[weather.assistant_id] = weather
+            controller._active_chat_assistants = lambda _team_id, _network: (
+                local_app._ActiveAssistant(hello, "hello-container"),
+                local_app._ActiveAssistant(weather, "weather-container"),
+            )
+            controller.invoke = lambda *_args: self.fail("an unselected Assistant Power executed")
+
+            with self.assertRaises(local_app.ApiProblem) as caught:
+                controller.chat(
+                    "team_1",
+                    {"message": "Weather", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                    "openai",
+                    "sk-test-0123456789",
+                )
+
+        self.assertEqual([assistant.id for assistant in runtime.context.assistants], ["shimpz-assistant"])
+        self.assertEqual(caught.exception.code, "brain-runtime-failed")
 
     def test_destroy_drains_chat_and_deletes_generation_before_teardown(self) -> None:
         events: list[object] = []
@@ -782,7 +921,7 @@ class LocalContractTests(unittest.TestCase):
             with self.assertRaises(local_app.ApiProblem) as caught:
                 controller.chat(
                     "team_1",
-                    {"message": "Hello", "files": []},
+                    {"message": "Hello", "files": [], "assistant_ids": ["shimpz-assistant"]},
                     "openai",
                     "sk-test-0123456789",
                 )
@@ -820,7 +959,7 @@ class LocalContractTests(unittest.TestCase):
             )
             response = controller.chat(
                 "team_1",
-                {"message": "Greet me", "files": []},
+                {"message": "Greet me", "files": [], "assistant_ids": ["shimpz-assistant"]},
                 "openai",
                 "sk-test-0123456789",
             )
@@ -860,14 +999,14 @@ class LocalContractTests(unittest.TestCase):
             with self.assertRaises(local_app.ApiProblem) as first:
                 controller.chat(
                     "team_1",
-                    {"message": "Greet me", "files": []},
+                    {"message": "Greet me", "files": [], "assistant_ids": ["shimpz-assistant"]},
                     "openai",
                     "sk-test-0123456789",
                 )
 
             response = controller.chat(
                 "team_1",
-                {"message": "Greet me", "files": []},
+                {"message": "Greet me", "files": [], "assistant_ids": ["shimpz-assistant"]},
                 "openai",
                 "sk-test-0123456789",
             )
@@ -912,14 +1051,14 @@ class LocalContractTests(unittest.TestCase):
             with self.assertRaises(local_app.ApiProblem) as first:
                 controller.chat(
                     "team_1",
-                    {"message": "Greet me", "files": []},
+                    {"message": "Greet me", "files": [], "assistant_ids": ["shimpz-assistant"]},
                     "openai",
                     "sk-test-0123456789",
                 )
             with self.assertRaises(local_app.ApiProblem) as retry:
                 controller.chat(
                     "team_1",
-                    {"message": "Greet me", "files": []},
+                    {"message": "Greet me", "files": [], "assistant_ids": ["shimpz-assistant"]},
                     "openai",
                     "sk-test-0123456789",
                 )
@@ -964,7 +1103,7 @@ class LocalContractTests(unittest.TestCase):
             with self.assertRaises(local_app.ApiProblem) as caught:
                 controller.chat(
                     "team_1",
-                    {"message": "Greet me", "files": []},
+                    {"message": "Greet me", "files": [], "assistant_ids": ["shimpz-assistant"]},
                     "openai",
                     "sk-test-0123456789",
                 )
@@ -989,7 +1128,7 @@ class LocalContractTests(unittest.TestCase):
                 try:
                     controller.chat(
                         "team_1",
-                        {"message": "Wait", "files": []},
+                        {"message": "Wait", "files": [], "assistant_ids": ["shimpz-assistant"]},
                         "openai",
                         "sk-test-0123456789",
                     )

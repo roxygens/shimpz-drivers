@@ -232,6 +232,62 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 app._validated_team_name(invalid)
 
+    def test_hosted_chat_scope_is_explicit_bounded_and_selects_only_requested_assistants(self) -> None:
+        contract = types.SimpleNamespace(rules="Use declared Powers.", powers={})
+        places = app._ActiveAssistant("places", contract, types.SimpleNamespace(id="places-container"))
+        weather = app._ActiveAssistant("weather", contract, types.SimpleNamespace(id="weather-container"))
+
+        self.assertEqual(app._chat_assistant_ids([]), ())
+        self.assertEqual(app._chat_assistant_ids(["weather", "places"]), ("places", "weather"))
+        self.assertEqual(
+            app._select_team_assistants((places, weather), ("weather",)),
+            (weather,),
+        )
+
+        for invalid in (
+            ["weather", "weather"],
+            ["bad_assistant"],
+            [f"helper-{index}" for index in range(app.MAX_CHAT_ASSISTANTS + 1)],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(app.ApiError) as caught:
+                app._chat_assistant_ids(invalid)
+            self.assertEqual(caught.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
+
+        with self.assertRaises(app.ApiError) as unavailable:
+            app._select_team_assistants((places,), ("weather",))
+        self.assertEqual(unavailable.exception.status, HTTPStatus.CONFLICT)
+        self.assertEqual(unavailable.exception.message, "a selected Assistant is unavailable")
+
+    def test_hosted_empty_scope_reaches_the_brain_without_assistant_tools(self) -> None:
+        class Runtime:
+            context = None
+
+            def start(self, context, _message):
+                self.context = context
+                return app.brain_runtime_client.RuntimeTurn("completed", "Brain only.", ())
+
+            def resume(self, _context, _results):
+                raise AssertionError("a Brain-only reply must not resume")
+
+        runtime = Runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            journal = app.power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
+            self.addCleanup(journal.close)
+            anchor, environment = self._journal_chat_environment(journal, runtime, mock.Mock())
+            with environment:
+                result = app._chat_in_turn(
+                    "team_1",
+                    "Hello",
+                    [],
+                    (),
+                    "turn-token",
+                    anchor,
+                    "account_1",
+                )
+
+        self.assertEqual(runtime.context.assistants, ())
+        self.assertEqual(result["reply"], "Brain only.")
+
     def test_revoked_generation_during_turn_cannot_commit_reply(self) -> None:
         checks: list[tuple[str, str, int]] = []
         commit = mock.Mock(return_value=True)
@@ -275,6 +331,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 "team_1",
                 "hello",
                 [],
+                ("hello-pulse",),
                 "turn-token",
                 anchor,
                 "account_1",
@@ -356,6 +413,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                     "team_1",
                     "Find Berlin weather",
                     [],
+                    ("places", "weather"),
                     "turn-token",
                     anchor,
                     "account_1",
@@ -411,6 +469,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                         "team_1",
                         "Greet me",
                         [],
+                        ("shimpz-assistant",),
                         "first-turn",
                         anchor,
                         "account_1",
@@ -423,6 +482,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                     "team_1",
                     "Greet me",
                     [],
+                    ("shimpz-assistant",),
                     "retry-turn",
                     anchor,
                     "account_1",
@@ -480,6 +540,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                     "team_1",
                     "Greet me",
                     [],
+                    ("shimpz-assistant",),
                     "retry-turn",
                     anchor,
                     "account_1",
@@ -538,6 +599,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 "team_1",
                 "Export the campaign",
                 [],
+                ("salesnator",),
                 "turn-token",
                 anchor,
                 "account_1",
