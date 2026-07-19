@@ -41,7 +41,6 @@ def context(secret: str) -> brain_runtime_client.RuntimeContext:
         assistants=(
             brain_runtime_client.RuntimeAssistant(
                 id="hello-pulse",
-                rules="Return a friendly greeting.",
                 genesis="Combine the declared greeting Powers into one bounded welcome.",
                 powers=(
                     brain_runtime_client.RuntimePower(

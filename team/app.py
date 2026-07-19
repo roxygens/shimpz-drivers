@@ -1972,7 +1972,6 @@ def _chat_in_turn(
         assistants=tuple(
             brain_runtime_client.RuntimeAssistant(
                 id=active.assistant_id,
-                rules=active.contract.rules,
                 genesis=genesis_by_id[active.assistant_id],
                 powers=tuple(
                     brain_runtime_client.RuntimePower(

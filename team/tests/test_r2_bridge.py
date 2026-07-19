@@ -289,7 +289,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         )
 
     def test_hosted_chat_scope_is_explicit_bounded_and_selects_only_requested_assistants(self) -> None:
-        contract = types.SimpleNamespace(rules="Use declared Powers.", powers={})
+        contract = types.SimpleNamespace(powers={})
         places = app._ActiveAssistant("places", contract, types.SimpleNamespace(id="places-container"))
         weather = app._ActiveAssistant("weather", contract, types.SimpleNamespace(id="weather-container"))
 
@@ -347,7 +347,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
     def test_revoked_generation_during_turn_cannot_commit_reply(self) -> None:
         checks: list[tuple[str, str, int]] = []
         commit = mock.Mock(return_value=True)
-        contract = types.SimpleNamespace(rules="Use only declared Powers.", powers={})
+        contract = types.SimpleNamespace(powers={})
         assistant_container = types.SimpleNamespace(id="assistant-container")
         anchor = types.SimpleNamespace(
             id=ANCHOR_ID,
@@ -405,8 +405,8 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             input_schema={"type": "object"},
             approval="none",
         )
-        place_contract = types.SimpleNamespace(rules="Resolve place names.", powers={"search": place_power})
-        weather_contract = types.SimpleNamespace(rules="Read weather data.", powers={"current": weather_power})
+        place_contract = types.SimpleNamespace(powers={"search": place_power})
+        weather_contract = types.SimpleNamespace(powers={"current": weather_power})
         place_container = types.SimpleNamespace(id="places-container")
         weather_container = types.SimpleNamespace(id="weather-container")
         anchor = types.SimpleNamespace(
@@ -632,7 +632,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             input={},
             approval="each-run",
         )
-        contract = types.SimpleNamespace(rules="Manage campaigns.", powers={})
+        contract = types.SimpleNamespace(powers={})
         anchor = types.SimpleNamespace(
             id=ANCHOR_ID,
             labels={"team.name": "Marketing", "team.owner": "account_1"},

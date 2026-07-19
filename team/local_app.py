@@ -1264,7 +1264,6 @@ class LocalController:
                 assistants=tuple(
                     brain_runtime_client.RuntimeAssistant(
                         id=active.spec.assistant_id,
-                        rules=active.spec.rules,
                         genesis=genesis_by_id[active.spec.assistant_id],
                         powers=tuple(
                             brain_runtime_client.RuntimePower(

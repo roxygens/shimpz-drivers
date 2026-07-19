@@ -18,12 +18,6 @@ ASSISTANT_EGRESS = (
     "api.open-meteo.com",
     "geocoding-api.open-meteo.com",
 )
-ASSISTANT_RULES = (
-    "Respond naturally as the Team. Use search-location before requesting weather when coordinates are unknown. "
-    "Use current-weather only for present conditions and daily-forecast only for future conditions. Use only "
-    "coordinates returned by search-location or explicitly provided by the Captain. Present temperatures in "
-    "Celsius and wind speed in kilometres per hour. Never claim that a forecast is a guarantee."
-)
 MAX_HELP_BYTES = 32 * 1024
 HELP_LOCALES = frozenset({"en", "pt", "es", "zh", "fr", "de", "ja", "ar"})
 

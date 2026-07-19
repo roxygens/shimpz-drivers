@@ -37,7 +37,6 @@ class RuntimePower:
 @dataclass(frozen=True, slots=True)
 class RuntimeAssistant:
     id: str
-    rules: str
     genesis: str
     powers: tuple[RuntimePower, ...]
 
@@ -116,7 +115,6 @@ class BrainRuntimeClient:
             "assistants": [
                 {
                     "id": assistant.id,
-                    "rules": assistant.rules,
                     "genesis": assistant.genesis,
                     "powers": [
                         {

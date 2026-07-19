@@ -44,7 +44,6 @@ class AssistantSpec:
     image: str
     rpc_command: str
     health_path: str
-    rules: str
     powers: dict[str, PowerSpec]
     egress: tuple[str, ...]
 
@@ -85,7 +84,6 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
         image=_digest_ref(raw["shimpz_assistant_image"]),
         rpc_command=assistant_contract.ASSISTANT_RPC_COMMAND,
         health_path="/healthz",
-        rules=assistant_contract.ASSISTANT_RULES,
         powers={power_id: PowerSpec(**contract) for power_id, contract in assistant_contract.power_contracts().items()},
         egress=assistant_contract.ASSISTANT_EGRESS,
     )

@@ -178,8 +178,6 @@ class LocalContractTests(unittest.TestCase):
             registry["shimpz-assistant"].egress,
             ("api.open-meteo.com", "geocoding-api.open-meteo.com"),
         )
-        self.assertIn("Use search-location", registry["shimpz-assistant"].rules)
-
         invalid = (
             "ghcr.io/roxygens/shimpz-space:latest",
             "ghcr.io/roxygens/shimpz-space@sha256:" + "0" * 64,
@@ -563,7 +561,6 @@ class LocalContractTests(unittest.TestCase):
                 hello,
                 assistant_id="weather-pulse",
                 image=hello.image.replace("a" * 64, "b" * 64),
-                rules="Use weather Powers only for weather data.",
                 powers={"current": replace(hello.powers["current-weather"], path="/v1/powers/current")},
             )
             controller.registry[weather.assistant_id] = weather

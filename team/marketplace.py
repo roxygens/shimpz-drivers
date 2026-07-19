@@ -43,7 +43,6 @@ class PowerSpec:
 
 @dataclass(frozen=True, slots=True)
 class AssistantContract:
-    rules: str
     rpc_command: str
     powers: dict[str, PowerSpec]
 
@@ -72,7 +71,7 @@ APPS: dict[str, AppSpec] = {
         port=8080,
         health_path="/health",
     ),
-    # First closed Rules/Powers adapter for the hosted Team controller. The browser supplies only
+    # First closed Genesis/Powers adapter for the hosted Team controller. The browser supplies only
     # this ID; the controller owns the digest, runtime envelope and identity labels below.
     assistant_contract.ASSISTANT_ID: AppSpec(
         image=SHIMPZ_ASSISTANT_IMAGE,
@@ -86,7 +85,6 @@ APPS: dict[str, AppSpec] = {
             ("org.shimpz.assistant.api", "1"),
         ),
         assistant=AssistantContract(
-            rules=assistant_contract.ASSISTANT_RULES,
             rpc_command=assistant_contract.ASSISTANT_RPC_COMMAND,
             powers={
                 power_id: PowerSpec(**contract) for power_id, contract in assistant_contract.power_contracts().items()

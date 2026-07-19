@@ -77,8 +77,6 @@ class MarketplaceImageTests(unittest.TestCase):
         self.assertIsNotNone(spec.assistant)
         self.assertEqual(set(spec.assistant.powers), {"search-location", "current-weather", "daily-forecast"})
         self.assertEqual(spec.assistant.powers["search-location"].path, "/v1/powers/search-location")
-        self.assertIn("Use search-location", spec.assistant.rules)
-        self.assertIn("Never claim that a forecast is a guarantee", spec.assistant.rules)
 
     def test_weather_powers_expose_closed_runtime_schemas_without_approval_prompts(self) -> None:
         powers = marketplace.APPS["shimpz-assistant"].assistant.powers
