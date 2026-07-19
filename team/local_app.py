@@ -17,6 +17,7 @@ import re
 import secrets
 import select
 import socket
+import stat
 import struct
 import sys
 import threading
@@ -82,12 +83,23 @@ MAX_CHAT_MESSAGE_CHARS = 16_000
 MAX_CHAT_FILES = 8
 MIN_API_KEY_BYTES = 16
 MAX_API_KEY_BYTES = 8 * 1024
+APP_EGRESS_PROXY_ALIAS = "app-egress-proxy"
+APP_EGRESS_PROXY_PORT = 8889
+APP_EGRESS_PROXY_KIND = "app-egress-proxy"
+APP_EGRESS_POLICY_GID = 10017
+APP_EGRESS_PROXY_CONTAINER = os.environ.get("SHIMPZ_APP_EGRESS_PROXY_CONTAINER", "").strip()
+APP_EGRESS_POLICY_DIR = Path(
+    os.environ.get(
+        "SHIMPZ_APP_EGRESS_POLICY_DIR",
+        "/var/lib/shimpz-local/app-egress",
+    )
+)
 
 ASSISTANT_UID = "10001:10001"
 ASSISTANT_MEMORY = 128 * 1024 * 1024
 ASSISTANT_NANO_CPUS = 250_000_000
 ASSISTANT_PIDS = 64
-STATELESS_RECOVERY_ASSISTANTS = frozenset({"hello-pulse"})
+STATELESS_RECOVERY_ASSISTANTS = frozenset({assistant_contract.ASSISTANT_ID})
 STORAGE_ROOT = Path("/var/lib/shimpz-local/storage")
 INFERENCE_ROOT = Path("/var/lib/shimpz-local/inference")
 LOCAL_POWER_JOURNAL_PATH = Path(
@@ -97,6 +109,8 @@ LOCAL_POWER_JOURNAL_PATH = Path(
     )
 )
 _FILE_UPLOAD_SLOTS = threading.BoundedSemaphore(1)
+_EGRESS_TOKEN = re.compile(r"[0-9a-f]{32}")
+_CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 class ApiProblem(RuntimeError):
@@ -295,6 +309,85 @@ def half_cpu_set(processors: int) -> str:
     return "0" if available == 1 else f"0-{available - 1}"
 
 
+def _require_policy_root(path: Path | None = None) -> Path:
+    """Accept only the private shared-group directory baked into the controller image."""
+    path = APP_EGRESS_POLICY_DIR if path is None else path
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Assistant egress policy storage is unavailable",
+            code="egress-policy-unavailable",
+        ) from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_gid != APP_EGRESS_POLICY_GID
+        or stat.S_IMODE(metadata.st_mode) != 0o770
+    ):
+        raise ApiProblem(
+            HTTPStatus.CONFLICT,
+            "Assistant egress policy storage failed its ownership contract",
+            code="egress-policy-drift",
+        )
+    return path
+
+
+def _atomic_policy_write(path: Path, content: bytes, *, mode: int, group: int | None = None) -> None:
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = -1
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+        if group is not None:
+            os.fchown(descriptor, -1, group)
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written < 1:
+                raise OSError("short policy write")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        temporary.replace(path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def _read_private_token(path: Path) -> str:
+    try:
+        metadata = path.stat(follow_symlinks=False)
+        token = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as exc:
+        raise ApiProblem(
+            HTTPStatus.CONFLICT,
+            "Assistant egress token failed its ownership contract",
+            code="egress-policy-drift",
+        ) from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or _EGRESS_TOKEN.fullmatch(token) is None
+    ):
+        raise ApiProblem(
+            HTTPStatus.CONFLICT,
+            "Assistant egress token failed its ownership contract",
+            code="egress-policy-drift",
+        )
+    return token
+
+
+def _environment_map(raw: object) -> dict[str, str]:
+    if not isinstance(raw, list) or not all(isinstance(item, str) and "=" in item for item in raw):
+        return {}
+    return dict(item.split("=", 1) for item in raw)
+
+
 class LocalController:
     def __init__(
         self,
@@ -404,6 +497,338 @@ class LocalController:
 
     def _container_name(self, team_id: str, assistant_id: str) -> str:
         return f"shimpz-local-{_space_prefix(self.space_id)}-{team_id}-assistant-{assistant_id}"
+
+    def _egress_policy_key(self, team_id: str, assistant_id: str) -> str:
+        identity = f"{self.space_id}\0{team_id}\0{assistant_id}".encode("ascii")
+        return hashlib.sha256(identity).hexdigest()
+
+    def _egress_token_path(self, team_id: str, assistant_id: str) -> Path:
+        root = _require_policy_root()
+        token_dir = root / ".tokens"
+        try:
+            token_dir.mkdir(mode=0o700, exist_ok=True)
+            metadata = token_dir.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Assistant egress policy storage is unavailable",
+                code="egress-policy-unavailable",
+            ) from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant egress policy storage failed its ownership contract",
+                code="egress-policy-drift",
+            )
+        return token_dir / f"{self._egress_policy_key(team_id, assistant_id)}.token"
+
+    def _egress_token(self, team_id: str, assistant_id: str, *, create: bool) -> str | None:
+        path = self._egress_token_path(team_id, assistant_id)
+        if path.exists():
+            return _read_private_token(path)
+        if not create:
+            return None
+        token = secrets.token_hex(16)
+        try:
+            _atomic_policy_write(path, f"{token}\n".encode("ascii"), mode=0o600)
+        except OSError as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Assistant egress token could not be saved",
+                code="egress-policy-unavailable",
+            ) from exc
+        return _read_private_token(path)
+
+    @staticmethod
+    def _proxy_environment(token: str) -> dict[str, str]:
+        proxy = f"http://{token}@{APP_EGRESS_PROXY_ALIAS}:{APP_EGRESS_PROXY_PORT}"
+        return {
+            "HTTPS_PROXY": proxy,
+            "https_proxy": proxy,
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+        }
+
+    def _write_egress_policy(self, team_id: str, spec: AssistantSpec) -> dict[str, str]:
+        token = self._egress_token(team_id, spec.assistant_id, create=True)
+        if token is None:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Assistant egress token could not be saved",
+                code="egress-policy-unavailable",
+            )
+        policy_path = _require_policy_root() / f"{token}.json"
+        encoded = json.dumps(sorted(spec.egress), separators=(",", ":")).encode("ascii")
+        try:
+            _atomic_policy_write(
+                policy_path,
+                encoded,
+                mode=0o640,
+                group=APP_EGRESS_POLICY_GID,
+            )
+            metadata = policy_path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Assistant egress policy could not be saved",
+                code="egress-policy-unavailable",
+            ) from exc
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != APP_EGRESS_POLICY_GID
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o640
+        ):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant egress policy failed its ownership contract",
+                code="egress-policy-drift",
+            )
+        return self._proxy_environment(token)
+
+    def _validate_egress_policy(self, team_id: str, spec: AssistantSpec) -> dict[str, str]:
+        token = self._egress_token(team_id, spec.assistant_id, create=False)
+        if token is None:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant egress policy is missing",
+                code="egress-policy-drift",
+            )
+        policy_path = _require_policy_root() / f"{token}.json"
+        try:
+            metadata = policy_path.stat(follow_symlinks=False)
+            raw = policy_path.read_bytes()
+        except OSError as exc:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant egress policy failed its ownership contract",
+                code="egress-policy-drift",
+            ) from exc
+        expected = json.dumps(sorted(spec.egress), separators=(",", ":")).encode("ascii")
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != APP_EGRESS_POLICY_GID
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o640
+            or not hmac.compare_digest(raw, expected)
+        ):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant egress policy failed its ownership contract",
+                code="egress-policy-drift",
+            )
+        return self._proxy_environment(token)
+
+    def _remove_egress_policy(self, team_id: str, assistant_id: str) -> None:
+        token_path = self._egress_token_path(team_id, assistant_id)
+        if not token_path.exists():
+            return
+        token = _read_private_token(token_path)
+        policy_path = _require_policy_root() / f"{token}.json"
+        try:
+            if policy_path.exists():
+                metadata = policy_path.stat(follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.geteuid()
+                    or metadata.st_gid != APP_EGRESS_POLICY_GID
+                    or metadata.st_nlink != 1
+                    or stat.S_IMODE(metadata.st_mode) != 0o640
+                ):
+                    raise ApiProblem(
+                        HTTPStatus.CONFLICT,
+                        "Assistant egress policy failed its ownership contract",
+                        code="egress-policy-drift",
+                    )
+                policy_path.unlink()
+            token_path.unlink()
+        except ApiProblem:
+            raise
+        except OSError as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Assistant egress policy could not be removed",
+                code="egress-policy-unavailable",
+            ) from exc
+
+    def _egress_proxy(self):
+        if not APP_EGRESS_PROXY_CONTAINER or _CONTAINER_NAME.fullmatch(APP_EGRESS_PROXY_CONTAINER) is None:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Assistant egress proxy is unavailable",
+                code="egress-proxy-unavailable",
+            )
+        try:
+            proxy = self.client.containers.get(APP_EGRESS_PROXY_CONTAINER)
+            proxy.reload()
+        except (NotFound, DockerException) as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Assistant egress proxy is unavailable",
+                code="egress-proxy-unavailable",
+            ) from exc
+        attrs = proxy.attrs
+        config = attrs.get("Config") or {}
+        host = attrs.get("HostConfig") or {}
+        labels = config.get("Labels") or {}
+        expected_labels = {
+            MANAGED_LABEL: "1",
+            PROFILE_LABEL: PROFILE,
+            SPACE_LABEL: self.space_id,
+            KIND_LABEL: APP_EGRESS_PROXY_KIND,
+        }
+        security_options = host.get("SecurityOpt") or []
+        mounts = attrs.get("Mounts") or []
+        policy_mounts = [mount for mount in mounts if mount.get("Destination") == "/policy"]
+        if (
+            proxy.name != APP_EGRESS_PROXY_CONTAINER
+            or proxy.status != "running"
+            or not self._labels_include(labels, expected_labels)
+            or config.get("User") not in {"10005", "10005:10005"}
+            or host.get("ReadonlyRootfs") is not True
+            or "ALL" not in (host.get("CapDrop") or [])
+            or not any(str(option).startswith("no-new-privileges") for option in security_options)
+            or any("seccomp=unconfined" in str(option) for option in security_options)
+            or host.get("Privileged") is not False
+            or host.get("PortBindings") not in (None, {})
+            or len(policy_mounts) != 1
+            or policy_mounts[0].get("RW") is not False
+        ):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant egress proxy failed its isolation profile",
+                code="egress-proxy-drift",
+            )
+        return proxy
+
+    def _connect_egress_proxy(self, network) -> None:
+        proxy = self._egress_proxy()
+        attached = ((proxy.attrs.get("NetworkSettings") or {}).get("Networks") or {}).get(network.name)
+        if attached is None:
+            try:
+                network.connect(proxy, aliases=[APP_EGRESS_PROXY_ALIAS])
+                proxy.reload()
+            except DockerException as exc:
+                raise ApiProblem(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "Assistant egress proxy could not join the Team",
+                    code="egress-proxy-unavailable",
+                ) from exc
+            attached = ((proxy.attrs.get("NetworkSettings") or {}).get("Networks") or {}).get(network.name)
+        if not isinstance(attached, dict) or APP_EGRESS_PROXY_ALIAS not in (attached.get("Aliases") or []):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant egress proxy failed its Team attachment contract",
+                code="egress-proxy-drift",
+            )
+
+    def _validate_egress_proxy_attachment(self, network_name: str) -> None:
+        proxy = self._egress_proxy()
+        attached = ((proxy.attrs.get("NetworkSettings") or {}).get("Networks") or {}).get(network_name)
+        if not isinstance(attached, dict) or APP_EGRESS_PROXY_ALIAS not in (attached.get("Aliases") or []):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant egress proxy failed its Team attachment contract",
+                code="egress-proxy-drift",
+            )
+
+    def _disconnect_egress_proxy(self, network) -> None:
+        proxy = self._egress_proxy()
+        attached = ((proxy.attrs.get("NetworkSettings") or {}).get("Networks") or {}).get(network.name)
+        if attached is None:
+            return
+        try:
+            network.disconnect(proxy)
+            proxy.reload()
+        except DockerException as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Assistant egress proxy could not leave the Team",
+                code="egress-proxy-unavailable",
+            ) from exc
+        if network.name in ((proxy.attrs.get("NetworkSettings") or {}).get("Networks") or {}):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant egress proxy failed its Team attachment contract",
+                code="egress-proxy-drift",
+            )
+
+    def _disconnect_egress_proxy_if_attached(self, network) -> None:
+        try:
+            network.reload()
+        except DockerException as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Team network could not be inspected",
+                code="docker-unavailable",
+            ) from exc
+        endpoints = network.attrs.get("Containers") or {}
+        if not isinstance(endpoints, dict):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Team resource ownership conflict",
+                code="ownership-conflict",
+            )
+        if any(endpoint.get("Name") == APP_EGRESS_PROXY_CONTAINER for endpoint in endpoints.values()):
+            self._disconnect_egress_proxy(network)
+
+    def _team_has_egress_assistant(self, team_id: str) -> bool:
+        try:
+            containers = self.client.containers.list(**self._assistant_filters(team_id))
+        except DockerException as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Docker is unavailable",
+                code="docker-unavailable",
+            ) from exc
+        for container in containers:
+            assistant_id = (container.labels or {}).get(ASSISTANT_LABEL)
+            spec = self.registry.get(assistant_id)
+            if spec is None:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "an installed Assistant is no longer allowlisted",
+                    code="assistant-registry-drift",
+                )
+            if spec.egress:
+                return True
+        return False
+
+    def _release_assistant_egress(self, team_id: str, assistant_id: str, network) -> None:
+        self._remove_egress_policy(team_id, assistant_id)
+        if not self._team_has_egress_assistant(team_id):
+            self._disconnect_egress_proxy(network)
+
+    def _remove_assistant_policy_if_needed(
+        self,
+        team_id: str,
+        assistant_id: str,
+        spec: AssistantSpec,
+    ) -> None:
+        if spec.egress:
+            self._remove_egress_policy(team_id, assistant_id)
+
+    def _prepare_assistant_egress(
+        self,
+        team_id: str,
+        spec: AssistantSpec,
+        network,
+    ) -> dict[str, str]:
+        if not spec.egress:
+            return {}
+        environment = self._write_egress_policy(team_id, spec)
+        try:
+            self._connect_egress_proxy(network)
+        except ApiProblem:
+            self._remove_egress_policy(team_id, spec.assistant_id)
+            raise
+        return environment
 
     @staticmethod
     def _labels_include(actual: object, expected: dict[str, str]) -> bool:
@@ -1016,6 +1441,25 @@ class LocalController:
         expected_labels = self._assistant_labels(team_id, spec)
         security_options = host.get("SecurityOpt") or []
         networks = (attrs.get("NetworkSettings") or {}).get("Networks") or {}
+        environment = _environment_map(config.get("Env"))
+        proxy_keys = {
+            "HTTPS_PROXY",
+            "https_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        }
+        if spec.egress:
+            expected_proxy_environment = self._validate_egress_policy(team_id, spec)
+            self._validate_egress_proxy_attachment(network_name)
+            proxy_environment_valid = all(
+                environment.get(key) == value for key, value in expected_proxy_environment.items()
+            ) and not {"HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"}.intersection(environment)
+        else:
+            proxy_environment_valid = not proxy_keys.intersection(environment)
         if (
             not self._labels_include(config.get("Labels"), expected_labels)
             or config.get("Image") != spec.image
@@ -1044,6 +1488,7 @@ class LocalController:
             or host.get("DeviceRequests") not in (None, [])
             or attrs.get("Mounts") not in (None, [])
             or set(networks) != {network_name}
+            or not proxy_environment_valid
         ):
             raise ApiProblem(
                 HTTPStatus.CONFLICT,
@@ -1217,8 +1662,8 @@ class LocalController:
             "assistants": [
                 {
                     "id": spec.assistant_id,
-                    "title": "Hello Pulse",
-                    "summary": "A tiny first-party Assistant that proves the local install and Power flow.",
+                    "title": spec.name,
+                    "summary": spec.summary,
                     "powers": sorted(spec.powers),
                 }
                 for spec in sorted(self.registry.values(), key=lambda item: item.assistant_id)
@@ -1266,7 +1711,10 @@ class LocalController:
 
     def _create_assistant_container(self, team_id: str, spec: AssistantSpec, network, image) -> None:
         container = None
+        egress_prepared = False
         try:
+            proxy_environment = self._prepare_assistant_egress(team_id, spec, network)
+            egress_prepared = bool(spec.egress)
             container = self.client.containers.create(
                 image=spec.image,
                 name=self._container_name(team_id, spec.assistant_id),
@@ -1279,6 +1727,7 @@ class LocalController:
                     "SHIMPZ_ASSISTANT_ID": spec.assistant_id,
                     "SHIMPZ_TEAM_ID": team_id,
                     "PYTHONDONTWRITEBYTECODE": "1",
+                    **proxy_environment,
                 },
                 read_only=True,
                 cap_drop=["ALL"],
@@ -1305,14 +1754,24 @@ class LocalController:
             container.start()
             self._validate_container(container, team_id, spec, network.name)
             self._wait_ready(container, spec)
-        except ApiProblem:
+        except ApiProblem as exc:
             if container is not None:
                 container.remove(force=True)
+            if egress_prepared:
+                try:
+                    self._release_assistant_egress(team_id, spec.assistant_id, network)
+                except ApiProblem as cleanup_error:
+                    raise cleanup_error from exc
             raise
         except DockerException as exc:
             if container is not None:
                 with suppress(DockerException):
                     container.remove(force=True)
+            if egress_prepared:
+                try:
+                    self._release_assistant_egress(team_id, spec.assistant_id, network)
+                except ApiProblem as cleanup_error:
+                    raise cleanup_error from exc
             raise ApiProblem(
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 "Docker could not install the Assistant",
@@ -1320,7 +1779,7 @@ class LocalController:
             ) from exc
 
     def _replace_unready_assistant(self, team_id: str, spec: AssistantSpec, network, existing) -> None:
-        # Hello Pulse is the only explicitly stateless recovery target. Resolve its trusted image before
+        # The reference Assistant is the only explicitly stateless recovery target. Resolve its trusted image before
         # removing anything, then revalidate ownership to close the pull/remove race.
         image = self._trusted_image(spec)
         self._validate_container(existing, team_id, spec, network.name)
@@ -1371,6 +1830,8 @@ class LocalController:
             network = self._network(team_id)
             container = self._assistant_container(team_id, assistant_id, required=False)
             if container is None:
+                if spec.egress:
+                    self._release_assistant_egress(team_id, assistant_id, network)
                 return {"assistant": assistant_id, "uninstalled": False}
             self._validate_container(container, team_id, spec, network.name)
             try:
@@ -1382,6 +1843,8 @@ class LocalController:
                     code="docker-remove-failed",
                 ) from exc
             self._blocked_power_workloads.discard(container.id)
+            if spec.egress:
+                self._release_assistant_egress(team_id, assistant_id, network)
             return {"assistant": assistant_id, "uninstalled": True}
 
     def assistant_help(self, team_id: str, assistant_id: str) -> dict[str, str]:
@@ -1528,6 +1991,8 @@ class LocalController:
 
                 removed = 0
                 for container in containers:
+                    assistant_id = container.labels[ASSISTANT_LABEL]
+                    spec = self.registry[assistant_id]
                     try:
                         container.remove(force=True)
                     except DockerException as exc:
@@ -1537,6 +2002,7 @@ class LocalController:
                             code="docker-remove-failed",
                         ) from exc
                     self._blocked_power_workloads.discard(container.id)
+                    self._remove_assistant_policy_if_needed(team_id, assistant_id, spec)
                     removed += 1
 
                 if network is None:
@@ -1554,6 +2020,7 @@ class LocalController:
                         "assistants_removed": removed,
                         "storage_removed": storage_removed,
                     }
+                self._disconnect_egress_proxy_if_attached(network)
                 try:
                     storage_removed = self.storage.destroy(team_id)
                 except team_storage.StorageError as exc:
@@ -1641,6 +2108,12 @@ class LocalController:
                 for container in containers:
                     container.remove(force=True)
                     self._blocked_power_workloads.discard(container.id)
+                for network in networks:
+                    team_id = network.attrs["Labels"][TEAM_LABEL]
+                    for assistant_id, spec in self.registry.items():
+                        if spec.egress:
+                            self._remove_egress_policy(team_id, assistant_id)
+                    self._disconnect_egress_proxy_if_attached(network)
                 storage_removed = self.storage.destroy_all()
                 for network in networks:
                     team_id = network.attrs["Labels"][TEAM_LABEL]

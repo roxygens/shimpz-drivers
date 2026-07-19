@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 TEAM = Path(__file__).resolve().parents[1]
-FIXTURE = TEAM / "tests" / "fixtures" / "hello-pulse"
+FIXTURE = TEAM / "tests" / "fixtures" / "shimpz-assistant"
 REGISTRY_IMAGE = "registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
 BUILDKIT_IMAGE = "moby/buildkit:v0.31.1@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a"
 MANAGED_LABEL = "com.shimpz.local.managed"
@@ -197,16 +197,21 @@ class DockerFlowTests(unittest.TestCase):
         builder = f"shimpz-local-test-{unique}"
         registry = f"shimpz-registry-{unique}"
         controller = f"shimpz-controller-{unique}"
-        fixture_tag = f"shimpz-hello-pulse-test:{unique}"
+        egress_proxy = f"shimpz-egress-proxy-{unique}"
+        fixture_tag = f"shimpz-assistant-test:{unique}"
         controller_tag = f"shimpz-team-driver-local-test:{unique}"
+        egress_proxy_tag = f"shimpz-app-egress-test:{unique}"
         token_volume = f"shimpz-local-token-{unique}"
         runtime_token_volume = f"shimpz-local-runtime-token-{unique}"
         audit_volume = f"shimpz-local-audit-{unique}"
         storage_volume = f"shimpz-local-storage-{unique}"
         inference_volume = f"shimpz-local-inference-{unique}"
         power_journal_volume = f"shimpz-local-power-journal-{unique}"
+        egress_policy_volume = f"shimpz-local-egress-policy-{unique}"
+        egress_audit_volume = f"shimpz-local-egress-audit-{unique}"
         space_id = f"test-space-{unique}"
         foreign_network = f"shimpz-foreign-{unique}"
+        outbound_network = f"shimpz-egress-outbound-{unique}"
         trusted_ref = ""
         daemon_processors = int(self._run("info", "--format", "{{.NCPU}}").stdout.strip())
         test_cpuset = half_cpu_set(daemon_processors)
@@ -253,6 +258,16 @@ class DockerFlowTests(unittest.TestCase):
                 fixture_tag,
                 str(FIXTURE),
             )
+            self._run(
+                "buildx",
+                "build",
+                "--builder",
+                builder,
+                "--load",
+                "--tag",
+                egress_proxy_tag,
+                str(TEAM.parent / "app-egress"),
+            )
             fixture_id = self._run("image", "inspect", "--format", "{{.Id}}", fixture_tag).stdout.strip()
 
             self._run(
@@ -276,7 +291,7 @@ class DockerFlowTests(unittest.TestCase):
             )
             registry_port = int(self._run("port", registry, "5000/tcp").stdout.strip().rsplit(":", 1)[1])
             self._wait_registry(registry_port)
-            repository_tag = f"127.0.0.1:{registry_port}/shimpz/hello-pulse:test"
+            repository_tag = f"127.0.0.1:{registry_port}/shimpz/shimpz-assistant:test"
             self._run("tag", fixture_tag, repository_tag)
             self._run("push", repository_tag)
             repo_digests = json.loads(
@@ -298,7 +313,7 @@ class DockerFlowTests(unittest.TestCase):
                 "--file",
                 str(TEAM / "Dockerfile.local"),
                 "--build-arg",
-                f"HELLO_PULSE_IMAGE={trusted_ref}",
+                f"SHIMPZ_ASSISTANT_IMAGE={trusted_ref}",
                 "--tag",
                 controller_tag,
                 str(TEAM),
@@ -309,6 +324,47 @@ class DockerFlowTests(unittest.TestCase):
             self._run("volume", "create", storage_volume)
             self._run("volume", "create", inference_volume)
             self._run("volume", "create", power_journal_volume)
+            self._run("volume", "create", egress_policy_volume)
+            self._run("volume", "create", egress_audit_volume)
+            self._run("network", "create", outbound_network)
+            self._run(
+                "run",
+                "--detach",
+                "--name",
+                egress_proxy,
+                "--network",
+                outbound_network,
+                "--user",
+                "10005:10005",
+                "--group-add",
+                "10017",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--memory",
+                "128m",
+                "--memory-swap",
+                "128m",
+                "--pids-limit",
+                "64",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,nodev,size=16m",
+                "--volume",
+                f"{egress_policy_volume}:/policy:ro",
+                "--volume",
+                f"{egress_audit_volume}:/var/log/app-egress-proxy",
+                "--label",
+                "com.shimpz.local.managed=1",
+                "--label",
+                "com.shimpz.local.profile=single-owner-local-v1",
+                "--label",
+                f"com.shimpz.local.space-id={space_id}",
+                "--label",
+                "com.shimpz.local.kind=app-egress-proxy",
+                egress_proxy_tag,
+            )
             socket_gid = str(Path("/var/run/docker.sock").stat().st_gid)
             self._run(
                 "run",
@@ -350,8 +406,14 @@ class DockerFlowTests(unittest.TestCase):
                 f"{inference_volume}:/var/lib/shimpz-local/inference",
                 "--volume",
                 f"{power_journal_volume}:/var/lib/shimpz-local/power-journal",
+                "--volume",
+                f"{egress_policy_volume}:/var/lib/shimpz-local/app-egress",
                 "--env",
                 f"SHIMPZ_SPACE_ID={space_id}",
+                "--env",
+                f"SHIMPZ_APP_EGRESS_PROXY_CONTAINER={egress_proxy}",
+                "--env",
+                "SHIMPZ_APP_EGRESS_POLICY_DIR=/var/lib/shimpz-local/app-egress",
                 "--env",
                 f"SHIMPZ_BRAIN_RUNTIME_URL=http://{bridge_gateway}:{brain_server.server_port}",
                 "--publish",
@@ -373,8 +435,11 @@ class DockerFlowTests(unittest.TestCase):
             self.assertEqual(unauthenticated, 401)
             status, catalog = self._api(port, token, "GET", "/v1/assistants")
             self.assertEqual(status, 200)
-            self.assertEqual(catalog["assistants"][0]["id"], "hello-pulse")
-            self.assertEqual(catalog["assistants"][0]["powers"], ["hello"])
+            self.assertEqual(catalog["assistants"][0]["id"], "shimpz-assistant")
+            self.assertEqual(
+                catalog["assistants"][0]["powers"],
+                ["current-weather", "daily-forecast", "search-location"],
+            )
 
             status, created = self._api(
                 port,
@@ -482,7 +547,7 @@ class DockerFlowTests(unittest.TestCase):
                 token,
                 "POST",
                 "/v1/teams/demo_team/assistants",
-                {"assistant": "hello-pulse"},
+                {"assistant": "shimpz-assistant"},
             )
             self.assertEqual((installed_status, installed["installed"]), (200, True))
             self.assertEqual(self._run("image", "inspect", trusted_ref, check=False).returncode, 0)
@@ -493,7 +558,7 @@ class DockerFlowTests(unittest.TestCase):
                 "--filter",
                 f"label=com.shimpz.local.space-id={space_id}",
                 "--filter",
-                "label=com.shimpz.local.assistant-id=hello-pulse",
+                "label=com.shimpz.local.assistant-id=shimpz-assistant",
                 "--format",
                 "{{.Names}}",
             ).stdout.strip()
@@ -532,7 +597,7 @@ class DockerFlowTests(unittest.TestCase):
                 token,
                 "POST",
                 "/v1/teams/demo_team/assistants",
-                {"assistant": "hello-pulse"},
+                {"assistant": "shimpz-assistant"},
             )
             self.assertEqual((recovered_status, recovered["installed"]), (200, False))
             replacement_assistant_id = self._run("inspect", "--format", "{{.Id}}", assistant_name).stdout.strip()
@@ -544,7 +609,7 @@ class DockerFlowTests(unittest.TestCase):
                 token,
                 "POST",
                 "/v1/teams/demo_team/assistants",
-                {"assistant": "hello-pulse"},
+                {"assistant": "shimpz-assistant"},
             )
             self.assertFalse(installed_again["installed"])
             self.assertEqual(
@@ -553,38 +618,90 @@ class DockerFlowTests(unittest.TestCase):
             )
 
             _, listed = self._api(port, token, "GET", "/v1/teams/demo_team/assistants")
-            self.assertEqual(listed["assistants"], [{"assistant": "hello-pulse", "status": "running"}])
+            self.assertEqual(listed["assistants"], [{"assistant": "shimpz-assistant", "status": "running"}])
+            help_status, assistant_help = self._api(
+                port,
+                token,
+                "GET",
+                "/v1/teams/demo_team/assistants/shimpz-assistant/help",
+            )
+            self.assertEqual(help_status, 200)
+            self.assertIn("# Shimpz Assistant", assistant_help["markdown"])
             _, invoked = self._api(
                 port,
                 token,
                 "POST",
-                "/v1/teams/demo_team/assistants/hello-pulse/powers/hello",
-                {"name": "Captain"},
+                "/v1/teams/demo_team/assistants/shimpz-assistant/powers/search-location",
+                {"query": "Lisbon"},
             )
-            self.assertEqual(invoked["result"], {"message": "Hello, Captain. Your Team is alive."})
+            self.assertEqual(
+                invoked["result"],
+                {
+                    "locations": [
+                        {
+                            "name": "Lisbon",
+                            "country": "Portugal",
+                            "latitude": 38.72,
+                            "longitude": -9.14,
+                            "timezone": "Europe/Lisbon",
+                        }
+                    ]
+                },
+            )
             unknown_power, _ = self._api(
                 port,
                 token,
                 "POST",
-                "/v1/teams/demo_team/assistants/hello-pulse/powers/shell",
+                "/v1/teams/demo_team/assistants/shimpz-assistant/powers/shell",
                 {},
             )
             self.assertEqual(unknown_power, 404)
+
+            proxy_metadata = json.loads(self._run("inspect", egress_proxy).stdout)[0]
+            proxy_networks = proxy_metadata["NetworkSettings"]["Networks"]
+            self.assertEqual(set(proxy_networks), {outbound_network, network_name})
+            self.assertIn("app-egress-proxy", proxy_networks[network_name]["Aliases"])
+            policy_contract = self._run(
+                "exec",
+                controller,
+                "/opt/venv/bin/python",
+                "-c",
+                "import json,os,stat; from pathlib import Path; "
+                "p=next(Path('/var/lib/shimpz-local/app-egress').glob('*.json')); s=p.stat(); "
+                "print(json.dumps(json.loads(p.read_text())),oct(stat.S_IMODE(s.st_mode)),s.st_uid,s.st_gid)",
+            ).stdout.strip()
+            self.assertEqual(
+                policy_contract,
+                '["api.open-meteo.com", "geocoding-api.open-meteo.com"] 0o640 10001 10017',
+            )
 
             _, removed = self._api(
                 port,
                 token,
                 "DELETE",
-                "/v1/teams/demo_team/assistants/hello-pulse",
+                "/v1/teams/demo_team/assistants/shimpz-assistant",
             )
             self.assertTrue(removed["uninstalled"])
             _, removed_again = self._api(
                 port,
                 token,
                 "DELETE",
-                "/v1/teams/demo_team/assistants/hello-pulse",
+                "/v1/teams/demo_team/assistants/shimpz-assistant",
             )
             self.assertFalse(removed_again["uninstalled"])
+            proxy_networks_after_uninstall = json.loads(self._run("inspect", egress_proxy).stdout)[0][
+                "NetworkSettings"
+            ]["Networks"]
+            self.assertEqual(set(proxy_networks_after_uninstall), {outbound_network})
+            remaining_policy_files = self._run(
+                "exec",
+                controller,
+                "/opt/venv/bin/python",
+                "-c",
+                "from pathlib import Path; p=Path('/var/lib/shimpz-local/app-egress'); "
+                "print(len(list(p.glob('*.json'))),len(list((p/'.tokens').glob('*.token'))))",
+            ).stdout.strip()
+            self.assertEqual(remaining_policy_files, "0 0")
             _, deleted_file = self._api(
                 port,
                 token,
@@ -634,7 +751,7 @@ class DockerFlowTests(unittest.TestCase):
                 token,
                 "POST",
                 "/v1/teams/reset_team/assistants",
-                {"assistant": "hello-pulse"},
+                {"assistant": "shimpz-assistant"},
             )
             self._api(
                 port,
@@ -709,7 +826,7 @@ class DockerFlowTests(unittest.TestCase):
                 token,
                 "POST",
                 "/v1/teams/cleanup_team/assistants",
-                {"assistant": "hello-pulse"},
+                {"assistant": "shimpz-assistant"},
             )
             self.assertEqual(len(self._owned_ids("container", space_id, "assistant")), 1)
             self.assertEqual(len(self._owned_ids("network", space_id, "team")), 1)
@@ -718,12 +835,14 @@ class DockerFlowTests(unittest.TestCase):
             brain_server.server_close()
             brain_thread.join(timeout=2)
             # Cleanup remains strictly scoped to this test's unique names/labels.
+            self._remove("rm", "--force", egress_proxy)
             self._cleanup_owned_space(space_id)
             owned_containers = self._owned_ids("container", space_id, "assistant")
             owned_networks = self._owned_ids("network", space_id, "team")
             self._remove("rm", "--force", controller)
             self._remove("rm", "--force", registry)
             self._remove("network", "rm", foreign_network)
+            self._remove("network", "rm", outbound_network)
             self._remove(
                 "volume",
                 "rm",
@@ -734,10 +853,12 @@ class DockerFlowTests(unittest.TestCase):
                 storage_volume,
                 inference_volume,
                 power_journal_volume,
+                egress_policy_volume,
+                egress_audit_volume,
             )
             if trusted_ref:
                 self._remove("image", "rm", "--force", trusted_ref)
-            self._remove("image", "rm", "--force", fixture_tag, controller_tag)
+            self._remove("image", "rm", "--force", fixture_tag, controller_tag, egress_proxy_tag)
             self._remove("buildx", "rm", "--force", builder)
             self.assertEqual(owned_containers, [])
             self.assertEqual(owned_networks, [])

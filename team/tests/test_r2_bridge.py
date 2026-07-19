@@ -12,6 +12,7 @@ from unittest import mock
 
 TEAM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEAM))
+_MODULES_BEFORE_APP_LOAD = dict(sys.modules)
 
 
 class _DockerError(Exception):
@@ -61,6 +62,7 @@ _docker_errors = types.ModuleType("docker.errors")
 _docker_errors.DockerException = _DockerError
 _docker_errors.NotFound = _NotFoundError
 _docker_errors.APIError = _APIError
+_docker_errors.ImageNotFound = _NotFoundError
 _docker_socket = types.ModuleType("docker.utils.socket")
 _docker_utils = types.ModuleType("docker.utils")
 _docker_utils.socket = _docker_socket
@@ -121,6 +123,40 @@ assert spec.loader is not None
 sys.modules[spec.name] = app
 spec.loader.exec_module(app)
 
+# The loaded app keeps direct references to its fakes. Restore the process import table so discovery
+# order can never make unrelated tests import a partial Docker/client module.
+for module_name, module in tuple(sys.modules.items()):
+    source = getattr(module, "__file__", None)
+    if source is None:
+        continue
+    try:
+        belongs_to_team = Path(source).resolve().is_relative_to(TEAM)
+    except OSError, RuntimeError, ValueError:
+        belongs_to_team = False
+    if belongs_to_team and module_name not in {__name__, spec.name}:
+        previous = _MODULES_BEFORE_APP_LOAD.get(module_name)
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+for module_name in (
+    "docker",
+    "docker.types",
+    "docker.errors",
+    "docker.utils",
+    "docker.utils.socket",
+    "accounts_client",
+    "audit",
+    "brain_credentials_client",
+    "pgdriver_client",
+    "token_store",
+):
+    previous = _MODULES_BEFORE_APP_LOAD.get(module_name)
+    if previous is None:
+        sys.modules.pop(module_name, None)
+    else:
+        sys.modules[module_name] = previous
+
 ANCHOR_ID = "a" * 64
 
 
@@ -154,10 +190,10 @@ class _RouteHarness:
 
 class HostedCredentialLeaseTests(unittest.TestCase):
     def _journal_chat_environment(self, journal, runtime, rpc):
-        contract = app.marketplace.APPS["hello-pulse"].assistant
+        contract = app.marketplace.APPS["shimpz-assistant"].assistant
         assert contract is not None
         assistant = app._ActiveAssistant(
-            "hello-pulse",
+            "shimpz-assistant",
             contract,
             types.SimpleNamespace(id="b" * 64),
         )
@@ -331,9 +367,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
     def test_completed_power_is_cached_until_a_successful_brain_resume(self) -> None:
         request = app.brain_runtime_client.PowerRequest(
             "power-1",
-            "hello-pulse",
-            "hello",
-            {},
+            "shimpz-assistant",
+            "search-location",
+            {"query": "Lisbon"},
             "none",
         )
 
@@ -353,7 +389,18 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 return app.brain_runtime_client.RuntimeTurn("completed", "Cached reply", ())
 
         runtime = Runtime()
-        rpc = mock.Mock(return_value={"result": {"message": "Hello, Shimpz!"}})
+        power_result = {
+            "locations": [
+                {
+                    "name": "Lisbon",
+                    "country": "Portugal",
+                    "latitude": 38.72,
+                    "longitude": -9.14,
+                    "timezone": "Europe/Lisbon",
+                }
+            ]
+        }
+        rpc = mock.Mock(return_value={"result": power_result})
         with tempfile.TemporaryDirectory() as directory:
             journal = app.power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
             self.addCleanup(journal.close)
@@ -385,8 +432,8 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         self.assertEqual(
             runtime.results,
             [
-                {"power-1": {"message": "Hello, Shimpz!"}},
-                {"power-1": {"message": "Hello, Shimpz!"}},
+                {"power-1": power_result},
+                {"power-1": power_result},
             ],
         )
         delivered.assert_called_once()
@@ -395,9 +442,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
     def test_uncertain_power_fails_closed_before_a_second_rpc(self) -> None:
         normalized = app.brain_runtime_client.PowerRequest(
             "power-1",
-            "hello-pulse",
-            "hello",
-            {"name": "Shimpz"},
+            "shimpz-assistant",
+            "search-location",
+            {"query": "Lisbon", "limit": 5},
             "none",
         )
         thread_id = app._brain_thread_id("team_1", ANCHOR_ID)
@@ -405,7 +452,13 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         class Runtime:
             @staticmethod
             def start(_context, _message):
-                raw = app.brain_runtime_client.PowerRequest("power-1", "hello-pulse", "hello", {}, "none")
+                raw = app.brain_runtime_client.PowerRequest(
+                    "power-1",
+                    "shimpz-assistant",
+                    "search-location",
+                    {"query": "Lisbon"},
+                    "none",
+                )
                 return app.brain_runtime_client.RuntimeTurn("power-required", "", (raw,))
 
             @staticmethod

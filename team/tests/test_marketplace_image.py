@@ -43,10 +43,10 @@ class _Images:
         return self.image
 
 
-def _hello_image(
+def _assistant_image(
     *,
-    digest: str = marketplace.HELLO_PULSE_IMAGE,
-    assistant_id: str = "hello-pulse",
+    digest: str = marketplace.SHIMPZ_ASSISTANT_IMAGE,
+    assistant_id: str = "shimpz-assistant",
     assistant_api: str = "1",
 ) -> _Image:
     return _Image(
@@ -59,38 +59,39 @@ def _hello_image(
 
 
 class MarketplaceImageTests(unittest.TestCase):
-    def test_hello_pulse_registry_contract_is_digest_backed_and_resource_free(self) -> None:
-        spec = marketplace.APPS["hello-pulse"]
+    def test_shimpz_assistant_registry_contract_is_digest_backed_and_resource_free(self) -> None:
+        spec = marketplace.APPS["shimpz-assistant"]
         self.assertEqual(
             spec.image,
-            "ghcr.io/roxygens/shimpz-space@sha256:cf907cf814ebeeb8bd2d01d927583b071592405b1597d7ad04fbfdb4afd04855",
+            "ghcr.io/roxygens/shimpz-space@sha256:c68a7d055c8dbe0cf350d00975caa259741dec7a072ca30efa077a688e5b41b4",
         )
         self.assertTrue(marketplace.is_digest_image(spec.image))
         self.assertEqual((spec.port, spec.health_path), (8080, "/health"))
         self.assertFalse(spec.db)
-        self.assertEqual(spec.egress, ())
+        self.assertEqual(spec.egress, ("api.open-meteo.com", "geocoding-api.open-meteo.com"))
         self.assertTrue(spec.first_party)
         self.assertEqual(
             dict(spec.required_image_labels),
-            {"org.shimpz.assistant.id": "hello-pulse", "org.shimpz.assistant.api": "1"},
+            {"org.shimpz.assistant.id": "shimpz-assistant", "org.shimpz.assistant.api": "1"},
         )
         self.assertIsNotNone(spec.assistant)
-        self.assertEqual(set(spec.assistant.powers), {"hello"})
-        self.assertEqual(spec.assistant.powers["hello"].path, "/v1/powers/hello")
-        self.assertIn("Respond naturally to questions and conversation", spec.assistant.rules)
-        self.assertIn("only when the Captain explicitly asks", spec.assistant.rules)
+        self.assertEqual(set(spec.assistant.powers), {"search-location", "current-weather", "daily-forecast"})
+        self.assertEqual(spec.assistant.powers["search-location"].path, "/v1/powers/search-location")
+        self.assertIn("Use search-location", spec.assistant.rules)
+        self.assertIn("Never claim that a forecast is a guarantee", spec.assistant.rules)
 
-    def test_hello_power_exposes_the_runtime_schema_and_approval_policy(self) -> None:
-        power = marketplace.APPS["hello-pulse"].assistant.powers["hello"]
+    def test_weather_powers_expose_closed_runtime_schemas_without_approval_prompts(self) -> None:
+        powers = marketplace.APPS["shimpz-assistant"].assistant.powers
 
-        self.assertEqual(power.approval, "none")
-        self.assertEqual(power.input_schema["type"], "object")
-        self.assertFalse(power.input_schema["additionalProperties"])
-        self.assertEqual(power.output_schema["required"], ["message"])
+        for power in powers.values():
+            self.assertEqual(power.approval, "none")
+            self.assertEqual(power.input_schema["type"], "object")
+            self.assertFalse(power.input_schema["additionalProperties"])
+            self.assertFalse(power.output_schema["additionalProperties"])
 
     def test_missing_digest_is_pulled_by_the_exact_registry_reference_then_rechecked(self) -> None:
-        spec = marketplace.APPS["hello-pulse"]
-        images = _Images(_hello_image(), missing_once=True)
+        spec = marketplace.APPS["shimpz-assistant"]
+        images = _Images(_assistant_image(), missing_once=True)
 
         image_id = marketplace_image.ensure_digest_artifact(images, spec)
 
@@ -99,11 +100,11 @@ class MarketplaceImageTests(unittest.TestCase):
         self.assertEqual(images.pulls, [spec.image])
 
     def test_digest_or_assistant_label_mismatch_is_refused_without_a_pull(self) -> None:
-        spec = marketplace.APPS["hello-pulse"]
+        spec = marketplace.APPS["shimpz-assistant"]
         mismatches = (
-            _hello_image(digest="ghcr.io/roxygens/shimpz-space@sha256:" + "c" * 64),
-            _hello_image(assistant_id="other-assistant"),
-            _hello_image(assistant_api="2"),
+            _assistant_image(digest="ghcr.io/roxygens/shimpz-space@sha256:" + "c" * 64),
+            _assistant_image(assistant_id="other-assistant"),
+            _assistant_image(assistant_api="2"),
         )
         for image in mismatches:
             with self.subTest(attrs=image.attrs):
@@ -114,27 +115,43 @@ class MarketplaceImageTests(unittest.TestCase):
 
     def test_tag_backed_notification_center_is_not_eligible_for_registry_pull(self) -> None:
         spec = marketplace.APPS["notification-center"]
-        images = _Images(_hello_image())
+        images = _Images(_assistant_image())
         self.assertFalse(marketplace.is_digest_image(spec.image))
         with self.assertRaises(marketplace_image.ImageTrustError):
             marketplace_image.ensure_digest_artifact(images, spec)
         self.assertEqual(images.gets, [])
         self.assertEqual(images.pulls, [])
 
-    def test_hello_power_input_and_output_contracts_are_closed(self) -> None:
+    def test_shimpz_assistant_power_input_and_output_contracts_are_closed(self) -> None:
         self.assertEqual(
-            marketplace.validate_power_input("hello-pulse", "hello", {"name": "Ada"}),
-            {"name": "Ada"},
+            marketplace.validate_power_input("shimpz-assistant", "search-location", {"query": " Lisbon "}),
+            {"query": "Lisbon", "limit": 5},
         )
         self.assertEqual(
-            marketplace.validate_power_output("hello-pulse", "hello", {"message": "Hello, Ada."}),
-            {"message": "Hello, Ada."},
+            marketplace.validate_power_input(
+                "shimpz-assistant",
+                "daily-forecast",
+                {"latitude": 38.72, "longitude": -9.14, "days": 3},
+            ),
+            {"latitude": 38.72, "longitude": -9.14, "days": 3},
         )
-        for payload in ({"name": ""}, {"name": " Ada"}, {"shell": "id"}, []):
+        current = {
+            "observed_at": "2026-07-18T10:00",
+            "temperature_c": 22.5,
+            "apparent_temperature_c": 22.0,
+            "wind_speed_kmh": 11.2,
+            "weather_code": 1,
+            "timezone": "Europe/Lisbon",
+        }
+        self.assertEqual(
+            marketplace.validate_power_output("shimpz-assistant", "current-weather", current),
+            current,
+        )
+        for payload in ({"query": 12}, {"query": "x"}, {"query": "Lisbon", "shell": "id"}, []):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
-                marketplace.validate_power_input("hello-pulse", "hello", payload)
+                marketplace.validate_power_input("shimpz-assistant", "search-location", payload)
         with self.assertRaises(ValueError):
-            marketplace.validate_power_output("hello-pulse", "hello", {"message": "ok", "path": "/host/x"})
+            marketplace.validate_power_output("shimpz-assistant", "current-weather", current | {"path": "/host/x"})
 
 
 if __name__ == "__main__":

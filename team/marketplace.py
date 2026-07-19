@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import assistant_contract
 import network_policy
 
 # Also bounds derived names: the per-app DB project "team_<sha10>_<app>" stays within pg-driver's
@@ -21,8 +22,8 @@ import network_policy
 APP_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$")
 DIGEST_IMAGE_RE = re.compile(r"^[a-z0-9.-]+(?::[0-9]{1,5})?/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$")
 RESERVED_APP_IDS = network_policy.RESERVED_SERVICE_ALIASES
-HELLO_PULSE_IMAGE = (
-    "ghcr.io/roxygens/shimpz-space@sha256:cf907cf814ebeeb8bd2d01d927583b071592405b1597d7ad04fbfdb4afd04855"
+SHIMPZ_ASSISTANT_IMAGE = (
+    "ghcr.io/roxygens/shimpz-space@sha256:c68a7d055c8dbe0cf350d00975caa259741dec7a072ca30efa077a688e5b41b4"
 )
 
 
@@ -73,56 +74,22 @@ APPS: dict[str, AppSpec] = {
     ),
     # First closed Rules/Powers adapter for the hosted Team controller. The browser supplies only
     # this ID; the controller owns the digest, runtime envelope and identity labels below.
-    "hello-pulse": AppSpec(
-        image=HELLO_PULSE_IMAGE,
+    assistant_contract.ASSISTANT_ID: AppSpec(
+        image=SHIMPZ_ASSISTANT_IMAGE,
         port=8080,
         health_path="/health",
         db=False,
-        egress=(),
+        egress=assistant_contract.ASSISTANT_EGRESS,
         first_party=True,
         required_image_labels=(
-            ("org.shimpz.assistant.id", "hello-pulse"),
+            ("org.shimpz.assistant.id", assistant_contract.ASSISTANT_ID),
             ("org.shimpz.assistant.api", "1"),
         ),
         assistant=AssistantContract(
-            rules=(
-                "Respond naturally to questions and conversation. Use the declared hello Power only when the "
-                "Captain explicitly asks to run or demonstrate it. After a Power result, explain the outcome "
-                "naturally. "
-                "Never infer additional authority, install dependencies, access files, or send data "
-                "outside the Team."
-            ),
-            rpc_command="/usr/local/bin/shimpz-assistant-rpc",
+            rules=assistant_contract.ASSISTANT_RULES,
+            rpc_command=assistant_contract.ASSISTANT_RPC_COMMAND,
             powers={
-                "hello": PowerSpec(
-                    method="POST",
-                    path="/v1/powers/hello",
-                    summary="Return a friendly greeting for an optional name of 1 to 80 characters.",
-                    input_schema={
-                        "type": "object",
-                        "properties": {
-                            "name": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 80,
-                            }
-                        },
-                        "additionalProperties": False,
-                    },
-                    output_schema={
-                        "type": "object",
-                        "properties": {
-                            "message": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 256,
-                            }
-                        },
-                        "required": ["message"],
-                        "additionalProperties": False,
-                    },
-                    approval="none",
-                )
+                power_id: PowerSpec(**contract) for power_id, contract in assistant_contract.power_contracts().items()
             },
         ),
     ),
@@ -158,32 +125,9 @@ def resolve(app_id: object) -> tuple[str, AppSpec]:
     return aid, spec
 
 
-def validate_power_input(assistant_id: str, power: str, payload: object) -> dict[str, str]:
-    if assistant_id != "hello-pulse" or power != "hello":
-        raise ValueError("the Power has no declared input contract")
-    if not isinstance(payload, dict) or not set(payload).issubset({"name"}):
-        raise ValueError("hello accepts only an optional name")
-    name = payload.get("name", "Shimpz")
-    if (
-        not isinstance(name, str)
-        or not 1 <= len(name) <= 80
-        or name.strip() != name
-        or any(ord(character) < 32 or ord(character) == 127 for character in name)
-    ):
-        raise ValueError("name must contain 1 to 80 trimmed characters")
-    return {"name": name}
+def validate_power_input(assistant_id: str, power: str, payload: object) -> dict[str, object]:
+    return assistant_contract.validate_power_input(assistant_id, power, payload)
 
 
-def validate_power_output(assistant_id: str, power: str, payload: object) -> dict[str, str]:
-    if assistant_id != "hello-pulse" or power != "hello":
-        raise ValueError("the Power has no declared output contract")
-    if not isinstance(payload, dict) or set(payload) != {"message"}:
-        raise ValueError("the Assistant returned an invalid result")
-    message = payload["message"]
-    if (
-        not isinstance(message, str)
-        or not 1 <= len(message) <= 256
-        or any(ord(character) < 32 and character not in "\t\n" for character in message)
-    ):
-        raise ValueError("the Assistant returned an invalid result")
-    return {"message": message}
+def validate_power_output(assistant_id: str, power: str, payload: object) -> dict[str, object]:
+    return assistant_contract.validate_power_output(assistant_id, power, payload)

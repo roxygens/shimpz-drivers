@@ -25,6 +25,19 @@ import local_healthcheck
 import local_registry
 import local_token_store
 
+SEARCH_INPUT = {"query": "Lisbon", "limit": 5}
+SEARCH_RESULT = {
+    "locations": [
+        {
+            "name": "Lisbon",
+            "country": "Portugal",
+            "latitude": 38.72,
+            "longitude": -9.14,
+            "timezone": "Europe/Lisbon",
+        }
+    ]
+}
+
 
 class LocalContractTests(unittest.TestCase):
     def test_local_state_defaults_match_the_installer_mount_contract(self) -> None:
@@ -41,11 +54,11 @@ class LocalContractTests(unittest.TestCase):
     def _registry(self, image: str) -> dict[str, local_registry.AssistantSpec]:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "registry.json"
-            path.write_text(json.dumps({"schema": 1, "hello_pulse_image": image}), encoding="utf-8")
+            path.write_text(json.dumps({"schema": 1, "shimpz_assistant_image": image}), encoding="utf-8")
             return local_registry.load_registry(path)
 
     def _chat_controller(self, directory: str, runtime) -> local_app.LocalController:
-        image = "127.0.0.1:5000/shimpz/hello-pulse@sha256:" + "a" * 64
+        image = "127.0.0.1:5000/shimpz/shimpz-assistant@sha256:" + "a" * 64
         controller = object.__new__(local_app.LocalController)
         controller.space_id = "local-space"
         controller.registry = self._registry(image)
@@ -74,18 +87,28 @@ class LocalContractTests(unittest.TestCase):
         controller._assistant_container = lambda _team_id, _assistant: container
         controller._validate_container = lambda *_args: None
         controller._active_chat_assistants = lambda _team_id, _network: (
-            local_app._ActiveAssistant(controller.registry["hello-pulse"], container.id),
+            local_app._ActiveAssistant(controller.registry["shimpz-assistant"], container.id),
         )
         return controller
 
     def test_registry_accepts_only_a_non_placeholder_digest(self) -> None:
-        digest = "127.0.0.1:5000/shimpz/hello-pulse@sha256:" + "a" * 64
+        digest = "127.0.0.1:5000/shimpz/shimpz-assistant@sha256:" + "a" * 64
         registry = self._registry(digest)
-        self.assertEqual(registry["hello-pulse"].image, digest)
-        self.assertEqual(set(registry["hello-pulse"].powers), {"hello"})
-        self.assertEqual(registry["hello-pulse"].powers["hello"].path, "/v1/powers/hello")
-        self.assertIn("Respond naturally to questions and conversation", registry["hello-pulse"].rules)
-        self.assertIn("only when the Captain explicitly asks", registry["hello-pulse"].rules)
+        self.assertEqual(registry["shimpz-assistant"].image, digest)
+        self.assertEqual(registry["shimpz-assistant"].name, "Shimpz Assistant")
+        self.assertEqual(
+            set(registry["shimpz-assistant"].powers),
+            {"search-location", "current-weather", "daily-forecast"},
+        )
+        self.assertEqual(
+            registry["shimpz-assistant"].powers["search-location"].path,
+            "/v1/powers/search-location",
+        )
+        self.assertEqual(
+            registry["shimpz-assistant"].egress,
+            ("api.open-meteo.com", "geocoding-api.open-meteo.com"),
+        )
+        self.assertIn("Use search-location", registry["shimpz-assistant"].rules)
 
         invalid = (
             "ghcr.io/roxygens/shimpz-space:latest",
@@ -100,18 +123,46 @@ class LocalContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "registry.json"
             path.write_text(
-                json.dumps({"schema": 1, "hello_pulse_image": "x", "command": ["/bin/sh"]}),
+                json.dumps({"schema": 1, "shimpz_assistant_image": "x", "command": ["/bin/sh"]}),
                 encoding="utf-8",
             )
             with self.assertRaises(local_registry.RegistryError):
                 local_registry.load_registry(path)
 
-    def test_hello_contract_is_closed_and_bounded(self) -> None:
-        self.assertEqual(local_registry.validate_hello_input({}), {"name": "Shimpz"})
-        self.assertEqual(local_registry.validate_hello_input({"name": "Captain"}), {"name": "Captain"})
-        for invalid in ({"name": ""}, {"name": " x"}, {"name": "x\n"}, {"extra": True}, []):
+    def test_shimpz_assistant_contract_is_closed_and_bounded(self) -> None:
+        self.assertEqual(
+            local_registry.validate_power_input("shimpz-assistant", "search-location", {"query": " Lisbon "}),
+            SEARCH_INPUT,
+        )
+        self.assertEqual(
+            local_registry.validate_power_input(
+                "shimpz-assistant",
+                "current-weather",
+                {"latitude": 38.72, "longitude": -9.14},
+            ),
+            {"latitude": 38.72, "longitude": -9.14},
+        )
+        self.assertEqual(
+            local_registry.validate_power_input(
+                "shimpz-assistant",
+                "daily-forecast",
+                {"latitude": 38.72, "longitude": -9.14},
+            ),
+            {"latitude": 38.72, "longitude": -9.14, "days": 7},
+        )
+        self.assertEqual(
+            local_registry.validate_power_output("shimpz-assistant", "search-location", SEARCH_RESULT),
+            SEARCH_RESULT,
+        )
+        for invalid in ({"query": ""}, {"query": 12}, {"query": "x\n"}, {"extra": True}, []):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                local_registry.validate_hello_input(invalid)
+                local_registry.validate_power_input("shimpz-assistant", "search-location", invalid)
+        with self.assertRaises(ValueError):
+            local_registry.validate_power_output(
+                "shimpz-assistant",
+                "search-location",
+                SEARCH_RESULT | {"extra": True},
+            )
 
     def test_identifiers_are_strict_and_bounded(self) -> None:
         self.assertEqual(local_app.validate_team_id("demo_team"), "demo_team")
@@ -157,9 +208,9 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(local_app.half_cpu_set(1), "0")
         readiness = local_app.ApiProblem(HTTPStatus.BAD_GATEWAY, "not ready", code="assistant-not-ready")
         ownership = local_app.ApiProblem(HTTPStatus.CONFLICT, "drift", code="ownership-conflict")
-        self.assertTrue(local_app._is_replaceable_readiness_failure("hello-pulse", readiness))
+        self.assertTrue(local_app._is_replaceable_readiness_failure("shimpz-assistant", readiness))
         self.assertFalse(local_app._is_replaceable_readiness_failure("future-stateful-assistant", readiness))
-        self.assertFalse(local_app._is_replaceable_readiness_failure("hello-pulse", ownership))
+        self.assertFalse(local_app._is_replaceable_readiness_failure("shimpz-assistant", ownership))
 
     def test_local_controller_owns_private_runtime_token_bootstrap(self) -> None:
         source = (TEAM / "local_app.py").read_text(encoding="utf-8")
@@ -178,7 +229,7 @@ class LocalContractTests(unittest.TestCase):
         self.assertIn("SHIMPZ_LOCAL_POWER_JOURNAL_PATH", source)
 
     def test_local_controller_accepts_an_injected_power_journal(self) -> None:
-        image = "127.0.0.1:5000/shimpz/hello-pulse@sha256:" + "a" * 64
+        image = "127.0.0.1:5000/shimpz/shimpz-assistant@sha256:" + "a" * 64
         injected = SimpleNamespace()
         client = SimpleNamespace(
             info=lambda: {"SecurityOptions": ["name=seccomp"], "NCPU": 2},
@@ -419,7 +470,7 @@ class LocalContractTests(unittest.TestCase):
         self.assertNotIn(key, repr(runtime.context))
         self.assertEqual(runtime.context.api_key, key)
         self.assertEqual(runtime.context.team_name, "Marketing")
-        self.assertEqual([assistant.id for assistant in runtime.context.assistants], ["hello-pulse"])
+        self.assertEqual([assistant.id for assistant in runtime.context.assistants], ["shimpz-assistant"])
 
     def test_chat_exposes_every_active_assistant_to_the_team_brain(self) -> None:
         class Runtime:
@@ -432,13 +483,13 @@ class LocalContractTests(unittest.TestCase):
         runtime = Runtime()
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, runtime)
-            hello = controller.registry["hello-pulse"]
+            hello = controller.registry["shimpz-assistant"]
             weather = replace(
                 hello,
                 assistant_id="weather-pulse",
                 image=hello.image.replace("a" * 64, "b" * 64),
                 rules="Use weather Powers only for weather data.",
-                powers={"current": replace(hello.powers["hello"], path="/v1/powers/current")},
+                powers={"current": replace(hello.powers["current-weather"], path="/v1/powers/current")},
             )
             controller.registry[weather.assistant_id] = weather
             controller._active_chat_assistants = lambda _team_id, _network: (
@@ -453,7 +504,9 @@ class LocalContractTests(unittest.TestCase):
                 "sk-test-0123456789",
             )
 
-        self.assertEqual([assistant.id for assistant in runtime.context.assistants], ["hello-pulse", "weather-pulse"])
+        self.assertEqual(
+            [assistant.id for assistant in runtime.context.assistants], ["shimpz-assistant", "weather-pulse"]
+        )
         self.assertEqual(
             runtime.context.thread_id,
             f"local:local-space:team_1:{'a' * 64}:default",
@@ -488,11 +541,13 @@ class LocalContractTests(unittest.TestCase):
         network = SimpleNamespace(
             id="a" * 64,
             name="team-network",
+            attrs={"Containers": {}},
+            reload=lambda: None,
             remove=lambda: events.append("network-remove"),
         )
         container = SimpleNamespace(
             id="assistant-container",
-            labels={local_app.ASSISTANT_LABEL: "hello-pulse"},
+            labels={local_app.ASSISTANT_LABEL: "shimpz-assistant"},
             remove=lambda *, force: events.append(("container-remove", force)),
         )
 
@@ -506,7 +561,7 @@ class LocalContractTests(unittest.TestCase):
         controller._network = lambda _team_id, *, required=False: events.append("network-read") or network
         controller._assistant_filters = lambda _team_id: {}
         controller._validate_container = lambda *_args: events.append("container-validated")
-        controller.registry = {"hello-pulse": object()}
+        controller.registry = {"shimpz-assistant": SimpleNamespace(egress=())}
         controller.client = SimpleNamespace(containers=SimpleNamespace(list=list_containers))
         controller.brain_runtime = SimpleNamespace(
             delete_thread=lambda thread_id: events.append(("thread-delete", thread_id))
@@ -564,7 +619,7 @@ class LocalContractTests(unittest.TestCase):
         )
         container = SimpleNamespace(
             id="assistant-container",
-            labels={local_app.ASSISTANT_LABEL: "hello-pulse"},
+            labels={local_app.ASSISTANT_LABEL: "shimpz-assistant"},
             remove=lambda *, force: events.append("container-remove"),
         )
         controller._chat_lock = lambda _team_id: lock
@@ -572,7 +627,7 @@ class LocalContractTests(unittest.TestCase):
         controller._network = lambda _team_id, *, required=False: network
         controller._assistant_filters = lambda _team_id: {}
         controller._validate_container = lambda *_args: None
-        controller.registry = {"hello-pulse": object()}
+        controller.registry = {"shimpz-assistant": SimpleNamespace(egress=())}
         controller.client = SimpleNamespace(containers=SimpleNamespace(list=lambda **_filters: [container]))
 
         def fail_delete(_thread_id: str) -> None:
@@ -611,7 +666,7 @@ class LocalContractTests(unittest.TestCase):
         )
         container = SimpleNamespace(
             id="assistant-container",
-            labels={local_app.ASSISTANT_LABEL: "hello-pulse"},
+            labels={local_app.ASSISTANT_LABEL: "shimpz-assistant"},
             remove=lambda *, force: events.append(("container-remove", force)),
         )
         controller._chat_lock = lambda _team_id: lock
@@ -619,7 +674,7 @@ class LocalContractTests(unittest.TestCase):
         controller._network = lambda _team_id, *, required=False: network
         controller._assistant_filters = lambda _team_id: {}
         controller._validate_container = lambda *_args: None
-        controller.registry = {"hello-pulse": object()}
+        controller.registry = {"shimpz-assistant": SimpleNamespace(egress=())}
         controller.client = SimpleNamespace(containers=SimpleNamespace(list=lambda **_filters: [container]))
         controller.brain_runtime = SimpleNamespace(
             delete_thread=lambda thread_id: events.append(("thread-delete", thread_id))
@@ -676,16 +731,16 @@ class LocalContractTests(unittest.TestCase):
                     powers=(
                         brain_runtime_client.PowerRequest(
                             interrupt_id="power-1",
-                            assistant_id="hello-pulse",
-                            power="hello",
-                            input={"name": "Captain"},
+                            assistant_id="shimpz-assistant",
+                            power="search-location",
+                            input=SEARCH_INPUT,
                             approval="none",
                         ),
                     ),
                 )
 
             def resume(self, _context, results):
-                if results != {"power-1": {"message": "Hello, Captain!"}}:
+                if results != {"power-1": SEARCH_RESULT}:
                     raise AssertionError("Power result did not return through the Controller")
                 return brain_runtime_client.RuntimeTurn(status="completed", reply="Done", powers=())
 
@@ -694,7 +749,7 @@ class LocalContractTests(unittest.TestCase):
             invoked: list[tuple[str, str, object]] = []
             controller.invoke = lambda team_id, assistant, power, payload: (
                 invoked.append((team_id, assistant, payload))
-                or {"assistant": assistant, "power": power, "result": {"message": "Hello, Captain!"}}
+                or {"assistant": assistant, "power": power, "result": SEARCH_RESULT}
             )
             response = controller.chat(
                 "team_1",
@@ -703,15 +758,15 @@ class LocalContractTests(unittest.TestCase):
                 "sk-test-0123456789",
             )
 
-        self.assertEqual(invoked, [("team_1", "hello-pulse", {"name": "Captain"})])
+        self.assertEqual(invoked, [("team_1", "shimpz-assistant", SEARCH_INPUT)])
         self.assertEqual(response, {"team_id": "team_1", "team_name": "Marketing", "reply": "Done"})
 
     def test_chat_reuses_a_completed_power_after_resume_failure_then_delivers(self) -> None:
         request = brain_runtime_client.PowerRequest(
             interrupt_id="power-1",
-            assistant_id="hello-pulse",
-            power="hello",
-            input={"name": "Captain"},
+            assistant_id="shimpz-assistant",
+            power="search-location",
+            input=SEARCH_INPUT,
             approval="none",
         )
 
@@ -723,7 +778,7 @@ class LocalContractTests(unittest.TestCase):
 
             def resume(self, _context, results):
                 self.resumes += 1
-                if results != {"power-1": {"message": "Hello, Captain!"}}:
+                if results != {"power-1": SEARCH_RESULT}:
                     raise AssertionError("cached Power result changed")
                 if self.resumes == 1:
                     raise brain_runtime_client.BrainRuntimeError("private-resume-failure")
@@ -733,8 +788,7 @@ class LocalContractTests(unittest.TestCase):
             controller = self._chat_controller(directory, Runtime())
             invocations: list[object] = []
             controller.invoke = lambda _team_id, assistant, power, payload: (
-                invocations.append(payload)
-                or {"assistant": assistant, "power": power, "result": {"message": "Hello, Captain!"}}
+                invocations.append(payload) or {"assistant": assistant, "power": power, "result": SEARCH_RESULT}
             )
             with self.assertRaises(local_app.ApiProblem) as first:
                 controller.chat(
@@ -755,16 +809,16 @@ class LocalContractTests(unittest.TestCase):
 
         self.assertEqual(first.exception.code, "brain-runtime-failed")
         self.assertNotIn("private-resume-failure", str(first.exception))
-        self.assertEqual(invocations, [{"name": "Captain"}])
+        self.assertEqual(invocations, [SEARCH_INPUT])
         self.assertEqual(response["reply"], "Done")
         self.assertEqual(pending, (0,))
 
     def test_chat_refuses_to_repeat_an_uncertain_power_execution(self) -> None:
         request = brain_runtime_client.PowerRequest(
             interrupt_id="power-1",
-            assistant_id="hello-pulse",
-            power="hello",
-            input={"name": "Captain"},
+            assistant_id="shimpz-assistant",
+            power="search-location",
+            input=SEARCH_INPUT,
             approval="none",
         )
 
@@ -819,9 +873,9 @@ class LocalContractTests(unittest.TestCase):
                     powers=(
                         brain_runtime_client.PowerRequest(
                             interrupt_id="power-1",
-                            assistant_id="hello-pulse",
-                            power="hello",
-                            input={},
+                            assistant_id="shimpz-assistant",
+                            power="search-location",
+                            input=SEARCH_INPUT,
                             approval="each-run",
                         ),
                     ),
@@ -829,10 +883,15 @@ class LocalContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, Runtime())
-            spec = controller.registry["hello-pulse"]
-            controller.registry["hello-pulse"] = replace(
+            spec = controller.registry["shimpz-assistant"]
+            controller.registry["shimpz-assistant"] = replace(
                 spec,
-                powers={"hello": replace(spec.powers["hello"], approval="each-run")},
+                powers={
+                    "search-location": replace(
+                        spec.powers["search-location"],
+                        approval="each-run",
+                    )
+                },
             )
             controller.invoke = lambda *_args: self.fail("approval-gated Power executed")
             with self.assertRaises(local_app.ApiProblem) as caught:

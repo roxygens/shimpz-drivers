@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
-# check=skip=SecretsUsedInArgOrEnv ; HELLO_PULSE_IMAGE is a public OCI digest, not a credential
+# check=skip=SecretsUsedInArgOrEnv ; SHIMPZ_ASSISTANT_IMAGE is a public OCI digest, not a credential
 #
 # Separate local-only Team controller. It does not copy the hosted app.py/runsc/PG/R2 control
 # plane; only the narrow LangGraph runtime protocol and Controller-owned Power loop are shared.
@@ -37,26 +37,30 @@ RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-install-project --no-
     rm -rf /root/.cache/uv
 
 COPY local_app.py local_audit.py local_registry.py local_token_store.py local_healthcheck.py team_storage.py \
+    assistant_contract.py \
     assistant_chat.py brain_runtime_client.py brain_runtime_token_store.py chat_orchestrator.py inference_config.py \
     power_journal.py ./
 
 # A normal source build remains possible, but cannot start until release automation supplies the
-# published Hello Pulse digest with `--build-arg HELLO_PULSE_IMAGE=repo@sha256:...`.
-ARG HELLO_PULSE_IMAGE=ghcr.io/roxygens/shimpz-space@sha256:0000000000000000000000000000000000000000000000000000000000000000
-RUN mkdir -p /etc/shimpz && HELLO_PULSE_IMAGE="$HELLO_PULSE_IMAGE" /opt/venv/bin/python -c \
-    'import json, os, pathlib; pathlib.Path("/etc/shimpz/local-assistants.json").write_text(json.dumps({"schema": 1, "hello_pulse_image": os.environ["HELLO_PULSE_IMAGE"]}, separators=(",", ":")) + "\n", encoding="utf-8")'
+# published Shimpz Assistant digest with `--build-arg SHIMPZ_ASSISTANT_IMAGE=repo@sha256:...`.
+ARG SHIMPZ_ASSISTANT_IMAGE=ghcr.io/roxygens/shimpz-space@sha256:0000000000000000000000000000000000000000000000000000000000000000
+RUN mkdir -p /etc/shimpz && SHIMPZ_ASSISTANT_IMAGE="$SHIMPZ_ASSISTANT_IMAGE" /opt/venv/bin/python -c \
+    'import json, os, pathlib; pathlib.Path("/etc/shimpz/local-assistants.json").write_text(json.dumps({"schema": 1, "shimpz_assistant_image": os.environ["SHIMPZ_ASSISTANT_IMAGE"]}, separators=(",", ":")) + "\n", encoding="utf-8")'
 
 RUN groupadd --gid 10001 shimpzlocal && \
     groupadd --gid 10010 shimpzteamdriver-token && \
     groupadd --gid 10016 shimpzbrain-runtime-token && \
-    useradd --uid 10001 --gid 10001 --groups 10010,10016 --no-create-home --shell /usr/sbin/nologin shimpzlocal && \
+    groupadd --gid 10017 shimpzapp-egress-policy && \
+    useradd --uid 10001 --gid 10001 --groups 10010,10016,10017 --no-create-home --shell /usr/sbin/nologin shimpzlocal && \
     mkdir -p /run/shimpz-local /run/shimpz-brain-runtime /var/log/shimpz-local /var/lib/shimpz-local/storage \
-        /var/lib/shimpz-local/inference /var/lib/shimpz-local/power-journal && \
+        /var/lib/shimpz-local/inference /var/lib/shimpz-local/power-journal /var/lib/shimpz-local/app-egress && \
     chown shimpzlocal:shimpzteamdriver-token /run/shimpz-local && chmod 2750 /run/shimpz-local && \
     chown shimpzlocal:shimpzbrain-runtime-token /run/shimpz-brain-runtime && \
     chmod 0750 /run/shimpz-brain-runtime && \
     chown shimpzlocal:shimpzlocal /var/log/shimpz-local /var/lib/shimpz-local/storage \
         /var/lib/shimpz-local/inference /var/lib/shimpz-local/power-journal && \
+    chown shimpzlocal:shimpzapp-egress-policy /var/lib/shimpz-local/app-egress && \
+    chmod 0770 /var/lib/shimpz-local/app-egress && \
     chmod 0700 /var/log/shimpz-local /var/lib/shimpz-local/storage /var/lib/shimpz-local/inference \
         /var/lib/shimpz-local/power-journal && \
     chmod 0555 /app/local_healthcheck.py && chmod 0444 /etc/shimpz/local-assistants.json

@@ -51,9 +51,9 @@ All routes require the bearer token, including health and read routes.
 | `POST` | `/v1/teams/{team_id}/create` | `{team_name:"My Team"}` | idempotently creates an empty Team |
 | `DELETE` | `/v1/teams/{team_id}` | none | idempotently removes its Assistants, then its network |
 | `GET` | `/v1/teams/{team_id}/assistants` | none | `{assistants:[{assistant,status}]}` |
-| `POST` | `/v1/teams/{team_id}/assistants` | `{assistant:"hello-pulse"}` | idempotently installs the allowlisted digest |
+| `POST` | `/v1/teams/{team_id}/assistants` | `{assistant:"shimpz-assistant"}` | idempotently installs the allowlisted digest |
 | `DELETE` | `/v1/teams/{team_id}/assistants/{assistant}` | none | idempotently uninstalls it |
-| `POST` | `/v1/teams/{team_id}/assistants/hello-pulse/powers/hello` | `{name:"Captain"}` | invokes only the declared Power |
+| `POST` | `/v1/teams/{team_id}/assistants/shimpz-assistant/powers/search-location` | `{query:"Lisbon"}` | invokes only the declared Power |
 | `GET` | `/v1/teams/{team_id}/files` | none | lists opaque metadata and the 100 MiB logical quota |
 | `POST` | `/v1/teams/{team_id}/files` | `{filename,media_type?,content_b64}` | stores one opaque object, up to 25 MiB |
 | `DELETE` | `/v1/teams/{team_id}/files/{opaque_id}` | none | deletes one object from that Team only |
@@ -79,7 +79,7 @@ automation binds the published first-party digest without changing runtime confi
 ```sh
 docker build \
   --file team/Dockerfile.local \
-  --build-arg HELLO_PULSE_IMAGE='ghcr.io/roxygens/shimpz-space@sha256:<digest>' \
+  --build-arg SHIMPZ_ASSISTANT_IMAGE='ghcr.io/roxygens/shimpz-space@sha256:<digest>' \
   team
 ```
 

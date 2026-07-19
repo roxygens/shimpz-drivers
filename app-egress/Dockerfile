@@ -14,14 +14,17 @@ ARG SOURCE_DATE_EPOCH=0
 # dual-stack allowlisted host doesn't stall on an unreachable AAAA. Same fix as every other image here.
 RUN echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf
 
-RUN useradd -u 10005 -M -s /usr/sbin/nologin appegressproxy
+RUN groupadd --gid 10017 shimpzapp-egress-policy && \
+    useradd -u 10005 -M -s /usr/sbin/nologin --groups shimpzapp-egress-policy appegressproxy
 
 WORKDIR /app
 COPY app.py audit.py healthcheck.py ./
 
 # Pre-create + own the audit-log volume mountpoint (Docker copies image-dir ownership into a fresh empty
 # named volume on first mount). The policy dir is mounted read-only by the driver; not owned here.
-RUN mkdir -p /var/log/app-egress-proxy && chown -R appegressproxy:appegressproxy /var/log/app-egress-proxy
+RUN mkdir -p /var/log/app-egress-proxy /policy && \
+    chown -R appegressproxy:appegressproxy /var/log/app-egress-proxy && \
+    chown appegressproxy:shimpzapp-egress-policy /policy && chmod 0770 /policy
 
 USER appegressproxy
 EXPOSE 8889
