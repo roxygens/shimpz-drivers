@@ -673,6 +673,38 @@ class LocalContractTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "team-context-changed")
 
+    def test_chat_power_rejects_a_container_replaced_between_selection_and_rpc(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, object())
+            frozen = SimpleNamespace(id="assistant-v1", status="running", reload=lambda: None)
+            replacement = SimpleNamespace(id="assistant-v2", status="running", reload=lambda: None)
+            discovered = iter((frozen, replacement))
+            lookups: list[str] = []
+
+            def assistant_container(_team_id: str, _assistant_id: str):
+                container = next(discovered)
+                lookups.append(container.id)
+                return container
+
+            controller._assistant_container = assistant_container
+            controller._rpc = lambda *_args: self.fail("a replacement Assistant container executed the Power")
+            controller._active_chat_tokens["team_1"] = "turn-token"
+
+            with self.assertRaises(local_app.ApiProblem) as caught:
+                controller._invoke_chat_power(
+                    "team_1",
+                    "turn-token",
+                    "shimpz-assistant",
+                    frozen.id,
+                    "search-location",
+                    SEARCH_INPUT,
+                )
+
+        self.assertEqual(lookups, [frozen.id, replacement.id])
+        self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+        self.assertEqual(caught.exception.code, "team-context-changed")
+        self.assertEqual(controller._active_power_containers, {})
+
     def test_chat_never_exposes_or_executes_an_unselected_assistant(self) -> None:
         class Runtime:
             def start(self, context, _message):

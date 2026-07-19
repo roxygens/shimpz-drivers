@@ -133,6 +133,20 @@ class _ActiveAssistant:
     container_id: str
 
 
+def _required_active_assistant(
+    bindings: dict[str, _ActiveAssistant],
+    assistant_id: str,
+) -> _ActiveAssistant:
+    active = bindings.get(assistant_id)
+    if active is None:
+        raise ApiProblem(
+            HTTPStatus.CONFLICT,
+            "Brain requested an unavailable Assistant",
+            code="assistant-unavailable",
+        )
+    return active
+
+
 def _power_operation(
     request: brain_runtime_client.PowerRequest,
     active: _ActiveAssistant,
@@ -1141,6 +1155,7 @@ class LocalController:
         team_id: str,
         token: str,
         assistant_id: str,
+        frozen_container_id: str,
         power: str,
         payload: object,
     ) -> object:
@@ -1149,6 +1164,12 @@ class LocalController:
             network = self._network(team_id)
             container = self._assistant_container(team_id, assistant_id)
             self._validate_container(container, team_id, spec, network.name)
+            if container.id != frozen_container_id:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Team capabilities changed; retry",
+                    code="team-context-changed",
+                )
             with self._active_chat_guard:
                 if (
                     self._active_chat_tokens.get(team_id) != token
@@ -1234,13 +1255,7 @@ class LocalController:
             bindings = {active.spec.assistant_id: active for active in assistants}
 
             def validate_power(assistant_id: str, power: str, payload) -> object:
-                active = bindings.get(assistant_id)
-                if active is None:
-                    raise ApiProblem(
-                        HTTPStatus.CONFLICT,
-                        "Brain requested an unavailable Assistant",
-                        code="assistant-unavailable",
-                    )
+                _required_active_assistant(bindings, assistant_id)
                 try:
                     return validate_power_input(assistant_id, power, payload)
                 except ValueError as exc:
@@ -1251,10 +1266,12 @@ class LocalController:
                     ) from exc
 
             def execute_power(request: brain_runtime_client.PowerRequest) -> object:
+                active = _required_active_assistant(bindings, request.assistant_id)
                 return self._invoke_chat_power(
                     team_id,
                     token,
                     request.assistant_id,
+                    active.container_id,
                     request.power,
                     request.input,
                 )
@@ -2021,6 +2038,15 @@ class LocalController:
             container.reload()
             if container.status != "running":
                 raise ApiProblem(HTTPStatus.CONFLICT, "Assistant is not running", code="assistant-not-running")
+            with self._active_chat_guard:
+                active = self._active_power_containers.get(team_id)
+                frozen_container = active[1] if active is not None else None
+            if frozen_container is not None and frozen_container.id != container.id:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Team capabilities changed; retry",
+                    code="team-context-changed",
+                )
             local_audit.record(
                 "assistant-power",
                 result="ok",
