@@ -33,6 +33,7 @@ from urllib.parse import urlsplit
 import assistant_chat
 import assistant_contract
 import assistant_genesis
+import assistant_manifest
 import brain_runtime_client
 import brain_runtime_token_store
 import chat_orchestrator
@@ -456,6 +457,7 @@ class LocalController:
             power_state if power_state is not None else power_journal.PowerJournal(LOCAL_POWER_JOURNAL_PATH)
         )
         self._assistant_genesis_cache = assistant_genesis.GenesisCache()
+        self._assistant_allowed_hosts_cache = assistant_manifest.AllowedHostsCache()
         self._blocked_power_workloads: set[str] = set()
         self._locks = tuple(threading.RLock() for _ in range(64))
         self._active_chat_guard = threading.Lock()
@@ -601,7 +603,12 @@ class LocalController:
             "no_proxy": "127.0.0.1,localhost",
         }
 
-    def _write_egress_policy(self, team_id: str, spec: AssistantSpec) -> dict[str, str]:
+    def _write_egress_policy(
+        self,
+        team_id: str,
+        spec: AssistantSpec,
+        allowed_hosts: tuple[str, ...],
+    ) -> dict[str, str]:
         token = self._egress_token(team_id, spec.assistant_id, create=True)
         if token is None:
             raise ApiProblem(
@@ -610,7 +617,7 @@ class LocalController:
                 code="egress-policy-unavailable",
             )
         policy_path = _require_policy_root() / f"{token}.json"
-        encoded = json.dumps(sorted(spec.egress), separators=(",", ":")).encode("ascii")
+        encoded = json.dumps(list(allowed_hosts), separators=(",", ":")).encode("ascii")
         try:
             _atomic_policy_write(
                 policy_path,
@@ -639,7 +646,12 @@ class LocalController:
             )
         return self._proxy_environment(token)
 
-    def _validate_egress_policy(self, team_id: str, spec: AssistantSpec) -> dict[str, str]:
+    def _validate_egress_policy(
+        self,
+        team_id: str,
+        spec: AssistantSpec,
+        allowed_hosts: tuple[str, ...],
+    ) -> dict[str, str]:
         token = self._egress_token(team_id, spec.assistant_id, create=False)
         if token is None:
             raise ApiProblem(
@@ -657,7 +669,7 @@ class LocalController:
                 "Assistant egress policy failed its ownership contract",
                 code="egress-policy-drift",
             ) from exc
-        expected = json.dumps(sorted(spec.egress), separators=(",", ":")).encode("ascii")
+        expected = json.dumps(list(allowed_hosts), separators=(",", ":")).encode("ascii")
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_uid != os.geteuid()
@@ -844,7 +856,7 @@ class LocalController:
                     "an installed Assistant is no longer allowlisted",
                     code="assistant-registry-drift",
                 )
-            if spec.egress:
+            if spec.allowed_hosts:
                 return True
         return False
 
@@ -859,18 +871,19 @@ class LocalController:
         assistant_id: str,
         spec: AssistantSpec,
     ) -> None:
-        if spec.egress:
+        if spec.allowed_hosts:
             self._remove_egress_policy(team_id, assistant_id)
 
-    def _prepare_assistant_egress(
+    def _activate_assistant_egress(
         self,
         team_id: str,
         spec: AssistantSpec,
         network,
+        allowed_hosts: tuple[str, ...],
     ) -> dict[str, str]:
-        if not spec.egress:
+        if not allowed_hosts:
             return {}
-        environment = self._write_egress_policy(team_id, spec)
+        environment = self._write_egress_policy(team_id, spec, allowed_hosts)
         try:
             self._connect_egress_proxy(network)
         except ApiProblem:
@@ -1145,6 +1158,16 @@ class LocalController:
                 HTTPStatus.CONFLICT,
                 "installed Assistant Genesis failed its contract",
                 code="assistant-genesis-invalid",
+            ) from exc
+
+    def _admit_assistant_allowed_hosts(self, container, spec: AssistantSpec) -> tuple[str, ...]:
+        try:
+            return self._assistant_allowed_hosts_cache.get(container, spec.allowed_hosts)
+        except assistant_manifest.ManifestError as exc:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "installed Assistant allowed_hosts failed its contract",
+                code="assistant-allowed-hosts-invalid",
             ) from exc
 
     def _active_chat_assistants(self, team_id: str, network_name: str) -> tuple[_ActiveAssistant, ...]:
@@ -1550,14 +1573,6 @@ class LocalController:
             "ALL_PROXY",
             "all_proxy",
         }
-        if spec.egress:
-            expected_proxy_environment = self._validate_egress_policy(team_id, spec)
-            self._validate_egress_proxy_attachment(network_name)
-            proxy_environment_valid = all(
-                environment.get(key) == value for key, value in expected_proxy_environment.items()
-            ) and not {"HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"}.intersection(environment)
-        else:
-            proxy_environment_valid = not proxy_keys.intersection(environment)
         if (
             not self._labels_include(labels, expected_labels)
             or container.name != self._container_name(team_id, spec.assistant_id)
@@ -1589,8 +1604,22 @@ class LocalController:
             or host.get("DeviceRequests") not in (None, [])
             or attrs.get("Mounts") not in (None, [])
             or set(networks) != {network_name}
-            or not proxy_environment_valid
         ):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "the installed Assistant failed its isolation profile",
+                code="assistant-isolation-drift",
+            )
+        allowed_hosts = self._admit_assistant_allowed_hosts(container, spec)
+        if allowed_hosts:
+            expected_proxy_environment = self._validate_egress_policy(team_id, spec, allowed_hosts)
+            self._validate_egress_proxy_attachment(network_name)
+            proxy_environment_valid = all(
+                environment.get(key) == value for key, value in expected_proxy_environment.items()
+            ) and not {"HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"}.intersection(environment)
+        else:
+            proxy_environment_valid = not proxy_keys.intersection(environment)
+        if not proxy_environment_valid:
             raise ApiProblem(
                 HTTPStatus.CONFLICT,
                 "the installed Assistant failed its isolation profile",
@@ -1853,8 +1882,17 @@ class LocalController:
         container = None
         egress_prepared = False
         try:
-            proxy_environment = self._prepare_assistant_egress(team_id, spec, network)
-            egress_prepared = bool(spec.egress)
+            proxy_environment: dict[str, str] = {}
+            if spec.allowed_hosts:
+                token = self._egress_token(team_id, spec.assistant_id, create=True)
+                if token is None:
+                    raise ApiProblem(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        "Assistant egress token could not be saved",
+                        code="egress-policy-unavailable",
+                    )
+                proxy_environment = self._proxy_environment(token)
+                egress_prepared = True
             container = self.client.containers.create(
                 image=spec.image,
                 name=self._container_name(team_id, spec.assistant_id),
@@ -1891,6 +1929,9 @@ class LocalController:
                     "Docker resolved an unexpected Assistant image",
                     code="image-resolution-mismatch",
                 )
+            allowed_hosts = self._admit_assistant_allowed_hosts(container, spec)
+            if allowed_hosts:
+                self._activate_assistant_egress(team_id, spec, network, allowed_hosts)
             container.start()
             self._validate_container(container, team_id, spec, network.name)
             self._wait_ready(container, spec)
@@ -1898,6 +1939,7 @@ class LocalController:
         except ApiProblem as exc:
             if container is not None:
                 self._assistant_genesis_cache.discard(container.id)
+                self._assistant_allowed_hosts_cache.discard(container.id)
                 container.remove(force=True)
             if egress_prepared:
                 try:
@@ -1907,6 +1949,7 @@ class LocalController:
             raise
         except DockerException as exc:
             if container is not None:
+                self._assistant_allowed_hosts_cache.discard(container.id)
                 with suppress(DockerException):
                     container.remove(force=True)
             if egress_prepared:
@@ -1927,6 +1970,7 @@ class LocalController:
         self._validate_container(existing, team_id, spec, network.name)
         try:
             self._assistant_genesis_cache.discard(existing.id)
+            self._assistant_allowed_hosts_cache.discard(existing.id)
             existing.remove(force=True)
         except DockerException as exc:
             raise ApiProblem(
@@ -1941,6 +1985,7 @@ class LocalController:
         self._validate_container_security(existing, team_id, spec, network.name)
         try:
             self._assistant_genesis_cache.discard(existing.id)
+            self._assistant_allowed_hosts_cache.discard(existing.id)
             existing.remove(force=True)
         except DockerException as exc:
             raise ApiProblem(
@@ -1994,7 +2039,7 @@ class LocalController:
             network = self._network(team_id)
             container = self._assistant_container(team_id, assistant_id, required=False)
             if container is None:
-                if spec.egress:
+                if spec.allowed_hosts:
                     self._release_assistant_egress(team_id, assistant_id, network)
                 return {"assistant": assistant_id, "uninstalled": False}
             self._validate_removable_container(container, team_id, spec, network.name)
@@ -2008,7 +2053,8 @@ class LocalController:
                 ) from exc
             self._blocked_power_workloads.discard(container.id)
             self._assistant_genesis_cache.discard(container.id)
-            if spec.egress:
+            self._assistant_allowed_hosts_cache.discard(container.id)
+            if spec.allowed_hosts:
                 self._release_assistant_egress(team_id, assistant_id, network)
             return {"assistant": assistant_id, "uninstalled": True}
 
@@ -2304,7 +2350,7 @@ class LocalController:
                 for network in networks:
                     team_id = network.attrs["Labels"][TEAM_LABEL]
                     for assistant_id, spec in self.registry.items():
-                        if spec.egress:
+                        if spec.allowed_hosts:
                             self._remove_egress_policy(team_id, assistant_id)
                     self._disconnect_egress_proxy_if_attached(network)
                 storage_removed = self.storage.destroy_all()

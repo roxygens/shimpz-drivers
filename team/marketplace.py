@@ -53,7 +53,7 @@ class AppSpec:
     port: int  # where the app answers HTTP inside the team's own network
     health_path: str = "/health"  # exact endpoint that must answer 200 before install commits
     db: bool = True  # provision a scoped per-(team, app) Postgres DB via pg-driver
-    egress: tuple[str, ...] = ()  # external HTTPS hosts, reached ONLY via the token-gated app-egress-proxy
+    allowed_hosts: tuple[str, ...] = ()  # reviewed maximum; packaged intent must match before proxy admission
     first_party: bool = True  # False = a marketplace app → the install REQUIRES a verified Shimpz account
     archs: tuple[str, ...] = ("amd64", "arm64")  # CPU archs the image supports; an amd64-only Shimpz
     # (e.g. the Chrome browser) can't deploy onto an arm64 Team — mirrors the storefront's `archs`.
@@ -78,7 +78,7 @@ APPS: dict[str, AppSpec] = {
         port=8080,
         health_path="/health",
         db=False,
-        egress=assistant_contract.ASSISTANT_EGRESS,
+        allowed_hosts=assistant_contract.ASSISTANT_ALLOWED_HOSTS,
         first_party=True,
         required_image_labels=(
             ("org.shimpz.assistant.id", assistant_contract.ASSISTANT_ID),

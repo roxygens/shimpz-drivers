@@ -189,6 +189,117 @@ class _RouteHarness:
         self.sent.append((status, payload))
 
 
+class HostedAllowedHostsAdmissionTests(unittest.TestCase):
+    def test_manifest_must_match_reviewed_hosts_before_admission(self) -> None:
+        spec = app.marketplace.APPS["shimpz-assistant"]
+        container = types.SimpleNamespace(id="assistant-generation")
+        cache = types.SimpleNamespace(
+            get=lambda _container, reviewed: tuple(sorted(reviewed)),
+        )
+        with _patched(
+            _assistant_allowed_hosts_cache=cache,
+            _require_assistant_genesis=lambda _container: "Use reviewed Powers.",
+        ):
+            self.assertEqual(app._admit_app_contract(spec, container), tuple(sorted(spec.allowed_hosts)))
+
+        def reject(_container, _reviewed):
+            raise app.assistant_manifest.ManifestError("mismatch")
+
+        with (
+            _patched(_assistant_allowed_hosts_cache=types.SimpleNamespace(get=reject)),
+            self.assertRaises(app.ApiError) as caught,
+        ):
+            app._admit_app_contract(spec, container)
+        self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+
+    def test_manifest_mismatch_rolls_back_before_policy_proxy_or_start(self) -> None:
+        events: list[object] = []
+        spec = app.marketplace.APPS["shimpz-assistant"]
+        state = {"created": False}
+        container = types.SimpleNamespace(
+            id="assistant-generation",
+            attrs={},
+            labels={"team.app.db": "0"},
+            reload=lambda: None,
+        )
+        network = types.SimpleNamespace(
+            disconnect=lambda target: events.append(("disconnect", target.id)),
+            connect=lambda target, *, aliases: events.append(("connect-app", target.id, tuple(aliases))),
+        )
+
+        def create(**_kwargs):
+            state["created"] = True
+            events.append("create")
+            return container
+
+        engine = types.SimpleNamespace(
+            containers=types.SimpleNamespace(create=create)
+        )
+
+        def reject(_spec, _container):
+            events.append("admit")
+            raise app.ApiError(HTTPStatus.CONFLICT, "allowed_hosts mismatch")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                _patched(
+                    _lock_for=lambda _team_id: contextlib.nullcontext(),
+                    _require_current_authorization=lambda *_args, **_kwargs: types.SimpleNamespace(
+                        labels={"team.name": "Marketing"}
+                    ),
+                    _prepare_marketplace_image=lambda _spec: None,
+                    _get_container=lambda _name: container if state["created"] else None,
+                    _team_app_containers=lambda _team_id: [],
+                    _reserve_capacity=lambda *_args, **_kwargs: contextlib.nullcontext(),
+                    _require_team_runtime=lambda: None,
+                    _ensure_team_network=lambda _team_id: network,
+                    _docker=engine,
+                    _admit_app_contract=reject,
+                    _write_egress_policy=lambda *_args: events.append("write-policy"),
+                    _safe_connect=lambda *_args, **_kwargs: events.append("connect-proxy"),
+                    _start_team_with_isolation=lambda _container: events.append("start"),
+                    _remove_team_container=lambda target: events.append(("remove-container", target.id)) or True,
+                    APP_EGRESS_POLICY_DIR=Path(directory),
+                ),
+                mock.patch.object(app.manifests, "build_team_app_kwargs", return_value={}),
+                mock.patch.object(app.network_policy, "app_identity_valid", return_value=True),
+                self.assertRaises(app.ApiError) as caught,
+            ):
+                app._install_app(
+                    "team_1",
+                    "shimpz-assistant",
+                    spec,
+                    "account_1",
+                    types.SimpleNamespace(owner="account_1"),
+                )
+            self.assertEqual(list(Path(directory).rglob("*")), [Path(directory) / ".tokens"])
+
+        self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+        self.assertEqual(
+            events,
+            [
+                "create",
+                ("disconnect", "assistant-generation"),
+                ("connect-app", "assistant-generation", ("shimpz-assistant", "shimpz-assistant.team")),
+                "admit",
+                ("remove-container", "assistant-generation"),
+            ],
+        )
+
+    def test_existing_policy_bytes_must_match_the_admitted_hosts(self) -> None:
+        hosts = ("api.open-meteo.com", "geocoding-api.open-meteo.com")
+        with tempfile.TemporaryDirectory() as directory, _patched(APP_EGRESS_POLICY_DIR=Path(directory)):
+            token = app._app_egress_token("team_1", "shimpz-assistant")
+            assert token is not None
+            app._write_egress_policy(token, hosts)
+            app._validate_egress_policy("team_1", "shimpz-assistant", hosts)
+
+            (Path(directory) / f"{token}.json").write_text('["evil.example"]', encoding="ascii")
+            with self.assertRaises(app.ApiError) as caught:
+                app._validate_egress_policy("team_1", "shimpz-assistant", hosts)
+        self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+
+
 class HostedCredentialLeaseTests(unittest.TestCase):
     def _journal_chat_environment(self, journal, runtime, rpc):
         contract = app.marketplace.APPS["shimpz-assistant"].assistant

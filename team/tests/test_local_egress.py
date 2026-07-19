@@ -88,7 +88,7 @@ class LocalAssistantEgressTests(unittest.TestCase):
         self.controller.client = types.SimpleNamespace(containers=_Containers(self.proxy))
         self.spec = types.SimpleNamespace(
             assistant_id="shimpz-assistant",
-            egress=("api.open-meteo.com", "geocoding-api.open-meteo.com"),
+            allowed_hosts=("api.open-meteo.com", "geocoding-api.open-meteo.com"),
         )
         self.controller.registry = {self.spec.assistant_id: self.spec}
         self.patches = (
@@ -101,10 +101,11 @@ class LocalAssistantEgressTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def test_policy_is_private_stable_exact_and_proxy_attachment_is_dynamic(self) -> None:
-        environment = self.controller._prepare_assistant_egress(
+        environment = self.controller._activate_assistant_egress(
             "team_1",
             self.spec,
             self.network,
+            tuple(sorted(self.spec.allowed_hosts)),
         )
 
         token = environment["HTTPS_PROXY"].split("@", 1)[0].rsplit("/", 1)[-1]
@@ -117,18 +118,35 @@ class LocalAssistantEgressTests(unittest.TestCase):
             self.proxy.attrs["NetworkSettings"]["Networks"][self.network.name]["Aliases"],
         )
         policy = self.policy_root / f"{token}.json"
-        self.assertEqual(json.loads(policy.read_text(encoding="ascii")), sorted(self.spec.egress))
+        self.assertEqual(json.loads(policy.read_text(encoding="ascii")), sorted(self.spec.allowed_hosts))
         self.assertEqual(policy.stat().st_mode & 0o777, 0o640)
         token_files = list((self.policy_root / ".tokens").glob("*.token"))
         self.assertEqual(len(token_files), 1)
         self.assertEqual(token_files[0].stat().st_mode & 0o777, 0o600)
 
-        repeated = self.controller._prepare_assistant_egress("team_1", self.spec, self.network)
+        repeated = self.controller._activate_assistant_egress(
+            "team_1",
+            self.spec,
+            self.network,
+            tuple(sorted(self.spec.allowed_hosts)),
+        )
         self.assertEqual(repeated, environment)
-        self.assertEqual(self.controller._validate_egress_policy("team_1", self.spec), environment)
+        self.assertEqual(
+            self.controller._validate_egress_policy(
+                "team_1",
+                self.spec,
+                tuple(sorted(self.spec.allowed_hosts)),
+            ),
+            environment,
+        )
 
     def test_last_uninstall_removes_policy_and_detaches_proxy(self) -> None:
-        environment = self.controller._prepare_assistant_egress("team_1", self.spec, self.network)
+        environment = self.controller._activate_assistant_egress(
+            "team_1",
+            self.spec,
+            self.network,
+            tuple(sorted(self.spec.allowed_hosts)),
+        )
         token = environment["HTTPS_PROXY"].split("@", 1)[0].rsplit("/", 1)[-1]
 
         self.controller._release_assistant_egress("team_1", self.spec.assistant_id, self.network)
@@ -138,13 +156,22 @@ class LocalAssistantEgressTests(unittest.TestCase):
         self.assertNotIn(self.network.name, self.proxy.attrs["NetworkSettings"]["Networks"])
 
     def test_policy_tampering_fails_closed(self) -> None:
-        environment = self.controller._prepare_assistant_egress("team_1", self.spec, self.network)
+        environment = self.controller._activate_assistant_egress(
+            "team_1",
+            self.spec,
+            self.network,
+            tuple(sorted(self.spec.allowed_hosts)),
+        )
         token = environment["HTTPS_PROXY"].split("@", 1)[0].rsplit("/", 1)[-1]
         policy = self.policy_root / f"{token}.json"
         policy.write_text('["evil.example"]', encoding="ascii")
 
         with self.assertRaises(local_app.ApiProblem) as caught:
-            self.controller._validate_egress_policy("team_1", self.spec)
+            self.controller._validate_egress_policy(
+                "team_1",
+                self.spec,
+                tuple(sorted(self.spec.allowed_hosts)),
+            )
 
         self.assertEqual(caught.exception.code, "egress-policy-drift")
 

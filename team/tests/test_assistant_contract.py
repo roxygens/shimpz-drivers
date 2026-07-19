@@ -10,7 +10,7 @@ class AssistantContractTests(unittest.TestCase):
         self.assertEqual(assistant_contract.ASSISTANT_ID, "shimpz-assistant")
         self.assertEqual(assistant_contract.ASSISTANT_NAME, "Shimpz Assistant")
         self.assertEqual(
-            assistant_contract.ASSISTANT_EGRESS,
+            assistant_contract.ASSISTANT_ALLOWED_HOSTS,
             ("api.open-meteo.com", "geocoding-api.open-meteo.com"),
         )
         powers = assistant_contract.power_contracts()

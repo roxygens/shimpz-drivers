@@ -1,0 +1,17 @@
+schema_version = 2
+name = "Shimpz Assistant"
+summary = "Exercise the local Assistant contract."
+creators = ["@roxygens"]
+allowed_hosts = [
+    "api.open-meteo.com",
+    "geocoding-api.open-meteo.com",
+]
+
+[powers.search-location]
+summary = "Find a place."
+
+[powers.current-weather]
+summary = "Read current weather."
+
+[powers.daily-forecast]
+summary = "Read a daily forecast."

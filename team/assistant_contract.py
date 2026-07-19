@@ -14,7 +14,7 @@ ASSISTANT_ID = "shimpz-assistant"
 ASSISTANT_NAME = "Shimpz Assistant"
 ASSISTANT_SUMMARY = "Search places and inspect current and forecast weather through Open-Meteo."
 ASSISTANT_RPC_COMMAND = "/usr/local/bin/shimpz-assistant-rpc"
-ASSISTANT_EGRESS = (
+ASSISTANT_ALLOWED_HOSTS = (
     "api.open-meteo.com",
     "geocoding-api.open-meteo.com",
 )

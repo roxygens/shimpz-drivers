@@ -83,6 +83,8 @@ class LocalContractTests(unittest.TestCase):
         controller._active_power_containers = {}
         controller._cancelled_chat_tokens = set()
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
+        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.AllowedHostsCache()
+        controller._admit_assistant_allowed_hosts = lambda _container, spec: tuple(sorted(spec.allowed_hosts))
         container = SimpleNamespace(id="assistant-container", status="running", reload=lambda: None)
         network = SimpleNamespace(id="a" * 64, name="team-network")
         controller._network = lambda _team_id: network
@@ -103,10 +105,12 @@ class LocalContractTests(unittest.TestCase):
         controller._locks = tuple(threading.RLock() for _ in range(64))
         controller._blocked_power_workloads = set()
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
+        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.AllowedHostsCache()
+        controller._admit_assistant_allowed_hosts = lambda _container, spec: tuple(sorted(spec.allowed_hosts))
         spec = SimpleNamespace(
             assistant_id="shimpz-assistant",
             image=CURRENT_ASSISTANT_IMAGE,
-            egress=(),
+            allowed_hosts=(),
         )
         controller.registry = {spec.assistant_id: spec}
         network_name = controller._network_name("team_1")
@@ -175,7 +179,7 @@ class LocalContractTests(unittest.TestCase):
             "/v1/powers/search-location",
         )
         self.assertEqual(
-            registry["shimpz-assistant"].egress,
+            registry["shimpz-assistant"].allowed_hosts,
             ("api.open-meteo.com", "geocoding-api.open-meteo.com"),
         )
         invalid = (
@@ -804,7 +808,7 @@ class LocalContractTests(unittest.TestCase):
         controller._network = lambda _team_id, *, required=False: events.append("network-read") or network
         controller._assistant_filters = lambda _team_id: {}
         controller._validate_removable_container = lambda *_args: events.append("container-validated")
-        controller.registry = {"shimpz-assistant": SimpleNamespace(egress=())}
+        controller.registry = {"shimpz-assistant": SimpleNamespace(allowed_hosts=())}
         controller.client = SimpleNamespace(containers=SimpleNamespace(list=list_containers))
         controller.brain_runtime = SimpleNamespace(
             delete_thread=lambda thread_id: events.append(("thread-delete", thread_id))
@@ -870,7 +874,7 @@ class LocalContractTests(unittest.TestCase):
         controller._network = lambda _team_id, *, required=False: network
         controller._assistant_filters = lambda _team_id: {}
         controller._validate_removable_container = lambda *_args: None
-        controller.registry = {"shimpz-assistant": SimpleNamespace(egress=())}
+        controller.registry = {"shimpz-assistant": SimpleNamespace(allowed_hosts=())}
         controller.client = SimpleNamespace(containers=SimpleNamespace(list=lambda **_filters: [container]))
 
         def fail_delete(_thread_id: str) -> None:
@@ -917,7 +921,7 @@ class LocalContractTests(unittest.TestCase):
         controller._network = lambda _team_id, *, required=False: network
         controller._assistant_filters = lambda _team_id: {}
         controller._validate_removable_container = lambda *_args: None
-        controller.registry = {"shimpz-assistant": SimpleNamespace(egress=())}
+        controller.registry = {"shimpz-assistant": SimpleNamespace(allowed_hosts=())}
         controller.client = SimpleNamespace(containers=SimpleNamespace(list=lambda **_filters: [container]))
         controller.brain_runtime = SimpleNamespace(
             delete_thread=lambda thread_id: events.append(("thread-delete", thread_id))
@@ -1199,6 +1203,89 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(result, {"assistant": "shimpz-assistant", "installed": False})
         self.assertEqual(events, ["reload", "trusted", "reload", ("remove", True), ("create", trusted_image)])
         self.assertEqual(container.attrs["Config"]["Image"], LEGACY_ASSISTANT_IMAGE)
+
+    def test_new_assistant_is_admitted_before_egress_and_start(self) -> None:
+        events: list[object] = []
+        controller = object.__new__(local_app.LocalController)
+        controller.space_id = "local-space"
+        controller.cpuset_cpus = "0"
+        controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
+        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.AllowedHostsCache()
+        controller._blocked_power_workloads = set()
+        spec = SimpleNamespace(
+            assistant_id="shimpz-assistant",
+            image=CURRENT_ASSISTANT_IMAGE,
+            allowed_hosts=("api.open-meteo.com", "geocoding-api.open-meteo.com"),
+        )
+        network = SimpleNamespace(name=controller._network_name("team_1"))
+        image = SimpleNamespace(id="sha256:" + "d" * 64)
+        container = SimpleNamespace(
+            id="assistant-generation",
+            attrs={"Image": image.id},
+            reload=lambda: events.append("reload"),
+            start=lambda: events.append("start"),
+            remove=lambda *, force: events.append(("remove", force)),
+        )
+        controller.client = SimpleNamespace(
+            containers=SimpleNamespace(
+                create=lambda **_kwargs: events.append("create") or container,
+            )
+        )
+        controller._egress_token = lambda *_args, **_kwargs: events.append("token") or "a" * 32
+        controller._admit_assistant_allowed_hosts = lambda _container, _spec: events.append("admit") or tuple(
+            sorted(_spec.allowed_hosts)
+        )
+        controller._activate_assistant_egress = lambda *_args: events.append("activate-egress")
+        controller._validate_container = lambda *_args: events.append("validate")
+        controller._wait_ready = lambda *_args: events.append("ready")
+        controller._active_assistant_genesis = lambda *_args: events.append("genesis") or "Genesis"
+
+        controller._create_assistant_container("team_1", spec, network, image)
+
+        self.assertLess(events.index("admit"), events.index("activate-egress"))
+        self.assertLess(events.index("admit"), events.index("start"))
+        self.assertEqual(events[-4:], ["start", "validate", "ready", "genesis"])
+
+    def test_manifest_mismatch_removes_stopped_container_without_activating_egress(self) -> None:
+        events: list[object] = []
+        controller = object.__new__(local_app.LocalController)
+        controller.space_id = "local-space"
+        controller.cpuset_cpus = "0"
+        controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
+        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.AllowedHostsCache()
+        spec = SimpleNamespace(
+            assistant_id="shimpz-assistant",
+            image=CURRENT_ASSISTANT_IMAGE,
+            allowed_hosts=("api.open-meteo.com",),
+        )
+        network = SimpleNamespace(name=controller._network_name("team_1"))
+        image = SimpleNamespace(id="sha256:" + "d" * 64)
+        container = SimpleNamespace(
+            id="assistant-generation",
+            attrs={"Image": image.id},
+            reload=lambda: events.append("reload"),
+            start=lambda: events.append("start"),
+            remove=lambda *, force: events.append(("remove", force)),
+        )
+        controller.client = SimpleNamespace(containers=SimpleNamespace(create=lambda **_kwargs: container))
+        controller._egress_token = lambda *_args, **_kwargs: "a" * 32
+        controller._admit_assistant_allowed_hosts = lambda *_args: (_ for _ in ()).throw(
+            local_app.ApiProblem(
+                HTTPStatus.CONFLICT,
+                "installed Assistant allowed_hosts failed its contract",
+                code="assistant-allowed-hosts-invalid",
+            )
+        )
+        controller._activate_assistant_egress = lambda *_args: events.append("activate-egress")
+        controller._release_assistant_egress = lambda *_args: events.append("release-egress")
+
+        with self.assertRaises(local_app.ApiProblem) as caught:
+            controller._create_assistant_container("team_1", spec, network, image)
+
+        self.assertEqual(caught.exception.code, "assistant-allowed-hosts-invalid")
+        self.assertNotIn("start", events)
+        self.assertNotIn("activate-egress", events)
+        self.assertEqual(events, ["reload", ("remove", True), "release-egress"])
 
     def test_uninstall_removes_an_owned_outdated_assistant(self) -> None:
         controller, _container, events = self._lifecycle_controller()

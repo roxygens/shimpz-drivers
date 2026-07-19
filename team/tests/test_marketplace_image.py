@@ -68,7 +68,7 @@ class MarketplaceImageTests(unittest.TestCase):
         self.assertTrue(marketplace.is_digest_image(spec.image))
         self.assertEqual((spec.port, spec.health_path), (8080, "/health"))
         self.assertFalse(spec.db)
-        self.assertEqual(spec.egress, ("api.open-meteo.com", "geocoding-api.open-meteo.com"))
+        self.assertEqual(spec.allowed_hosts, ("api.open-meteo.com", "geocoding-api.open-meteo.com"))
         self.assertTrue(spec.first_party)
         self.assertEqual(
             dict(spec.required_image_labels),

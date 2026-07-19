@@ -38,6 +38,7 @@ import accounts_client
 import assistant_chat
 import assistant_contract
 import assistant_genesis
+import assistant_manifest
 import audit
 import brain_credentials_client
 import brain_runtime_client
@@ -141,6 +142,7 @@ _power_journal_lock = threading.Lock()
 _power_journal_instance: power_journal.PowerJournal | None = None
 _brain_runtime = brain_runtime_client.BrainRuntimeClient()
 _assistant_genesis_cache = assistant_genesis.GenesisCache()
+_assistant_allowed_hosts_cache = assistant_manifest.AllowedHostsCache()
 
 
 def _validated_team_name(value: object) -> str:
@@ -1051,7 +1053,7 @@ def _team_app_containers(team_id: str) -> list:
     return _docker.containers.list(all=True, filters={"label": ["team.app.driver", f"team.id={team_id}"]})
 
 
-def _app_egress_token(team_id: str, app_id: str) -> str:
+def _app_egress_token(team_id: str, app_id: str, *, create: bool = True) -> str | None:
     """The app instance's stable egress token (its Proxy-Authorization to app-egress-proxy).
 
     Kept in the policy volume (drivers + proxy only) and reused across reinstalls, exactly like
@@ -1064,14 +1066,69 @@ def _app_egress_token(team_id: str, app_id: str) -> str:
         tok = tf.read_text(encoding="utf-8").strip()
         if tok:
             return tok
+    if not create:
+        return None
     tok = secrets.token_hex(16)
     tf.write_text(tok, encoding="utf-8")
     return tok
 
 
-def _write_egress_policy(token: str, egress: tuple[str, ...]) -> None:
+def _write_egress_policy(token: str, allowed_hosts: tuple[str, ...]) -> None:
     APP_EGRESS_POLICY_DIR.mkdir(parents=True, exist_ok=True)
-    (APP_EGRESS_POLICY_DIR / f"{token}.json").write_text(json.dumps(sorted(egress)), encoding="utf-8")
+    encoded = json.dumps(list(allowed_hosts), separators=(",", ":")).encode("ascii")
+    (APP_EGRESS_POLICY_DIR / f"{token}.json").write_bytes(encoded)
+
+
+def _validate_egress_policy(team_id: str, app_id: str, allowed_hosts: tuple[str, ...]) -> None:
+    token = _app_egress_token(team_id, app_id, create=False)
+    if token is None:
+        raise ApiError(HTTPStatus.CONFLICT, "installed Assistant egress policy is missing")
+    try:
+        actual = (APP_EGRESS_POLICY_DIR / f"{token}.json").read_bytes()
+    except OSError as exc:
+        raise ApiError(HTTPStatus.CONFLICT, "installed Assistant egress policy is unavailable") from exc
+    expected = json.dumps(list(allowed_hosts), separators=(",", ":")).encode("ascii")
+    if actual != expected:
+        raise ApiError(HTTPStatus.CONFLICT, "installed Assistant egress policy failed its contract")
+
+
+def _validate_admitted_egress(team_id: str, app_id: str, allowed_hosts: tuple[str, ...]) -> None:
+    if allowed_hosts:
+        _validate_egress_policy(team_id, app_id, allowed_hosts)
+
+
+def _reserve_egress_environment(
+    team_id: str,
+    app_id: str,
+    allowed_hosts: tuple[str, ...],
+) -> tuple[str | None, dict[str, str]]:
+    if not allowed_hosts:
+        return None, {}
+    token = _app_egress_token(team_id, app_id)
+    if token is None:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant egress token is unavailable")
+    proxy = f"http://{token}@app-egress-proxy:8889"
+    return token, {"HTTPS_PROXY": proxy, "https_proxy": proxy}
+
+
+def _activate_admitted_egress(
+    network,
+    token: str | None,
+    allowed_hosts: tuple[str, ...],
+) -> None:
+    if not allowed_hosts:
+        return
+    if token is None:
+        raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "Assistant egress admission failed")
+    _write_egress_policy(token, allowed_hosts)
+    # Only the authenticated app proxy may join the core network. The broad Brain proxy
+    # is confined to the separate Brain-egress network and is unreachable from this App.
+    _safe_connect(
+        network,
+        manifests.APP_EGRESS_CONTAINER,
+        aliases=["app-egress-proxy"],
+        required=True,
+    )
 
 
 def _remove_egress_policy(team_id: str, app_id: str) -> bool:
@@ -1198,6 +1255,7 @@ def _teardown_app(
         container_removed = _remove_team_container(container)
         if container_removed:
             _assistant_genesis_cache.discard(container_id)
+            _assistant_allowed_hosts_cache.discard(container_id)
     elif container is not None:
         # Preserve the labeled retry anchor, but do not leave tenant code running after a failed removal.
         with contextlib.suppress(ApiError):
@@ -1256,13 +1314,14 @@ def _install_app(
                     HTTPStatus.CONFLICT,
                     f"installed app {app_id!r} uses a different image; uninstall it before reinstalling",
                 )
+            admitted_hosts = _admit_app_contract(spec, existing)
+            _validate_admitted_egress(team_id, app_id, admitted_hosts)
             ready, status = _app_ready_now(existing, spec.port, spec.health_path)
             if not ready:
                 raise ApiError(
                     HTTPStatus.CONFLICT,
                     f"installed app {app_id!r} is not ready ({status}); uninstall it before reinstalling",
                 )
-            _admit_app_genesis(spec, existing)
             return {"team_id": team_id, "app": app_id, "status": status, "installed": False}
         if len(_team_app_containers(team_id)) >= MAX_APPS_PER_TEAM:
             raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, f"app limit reached for {team_id!r} ({MAX_APPS_PER_TEAM})")
@@ -1280,22 +1339,7 @@ def _install_app(
                 if spec.db:
                     database_url = pgdriver_client.create_app_db(team_id, app_id)["database_url"]
                 network = _ensure_team_network(team_id)
-                proxy_env: dict[str, str] = {}
-                if spec.egress:
-                    token = _app_egress_token(team_id, app_id)
-                    _write_egress_policy(token, spec.egress)
-                    # Only the authenticated app proxy may join the core network. The broad Brain proxy
-                    # is confined to the separate Brain-egress network and is unreachable from this App.
-                    _safe_connect(
-                        network,
-                        manifests.APP_EGRESS_CONTAINER,
-                        aliases=["app-egress-proxy"],
-                        required=True,
-                    )
-                    proxy_env = {
-                        "HTTPS_PROXY": f"http://{token}@app-egress-proxy:8889",
-                        "https_proxy": f"http://{token}@app-egress-proxy:8889",
-                    }
+                token, proxy_env = _reserve_egress_environment(team_id, app_id, spec.allowed_hosts)
                 kwargs = manifests.build_team_app_kwargs(
                     team_id,
                     app_id,
@@ -1313,6 +1357,8 @@ def _install_app(
                 # proxied clients skip egress. The App remains attached only to the internal core plane.
                 network.disconnect(container)
                 network.connect(container, aliases=[app_id, f"{app_id}.team"])
+                admitted_hosts = _admit_app_contract(spec, container)
+                _activate_admitted_egress(network, token, admitted_hosts)
                 _start_team_with_isolation(container)
                 healthy, reason = _wait_app_healthy(container, spec.port, spec.health_path)
                 if not healthy:
@@ -1321,7 +1367,6 @@ def _install_app(
                         f"app {app_id!r} failed its health probe ({reason}; rolled back)",
                     )
                 _require_team_isolation(container)
-                _admit_app_genesis(spec, container)
                 ready, committed_status = _app_ready_now(container, spec.port, spec.health_path)
                 if not ready:
                     raise ApiError(
@@ -1405,9 +1450,20 @@ def _require_assistant_genesis(container) -> str:
         raise ApiError(HTTPStatus.CONFLICT, "installed Assistant Genesis failed its contract") from exc
 
 
-def _admit_app_genesis(spec: marketplace.AppSpec, container) -> None:
+def _require_assistant_allowed_hosts(spec: marketplace.AppSpec, container) -> tuple[str, ...]:
+    """Admit network intent only when immutable package and reviewed registry agree."""
+    try:
+        return _assistant_allowed_hosts_cache.get(container, spec.allowed_hosts)
+    except assistant_manifest.ManifestError as exc:
+        raise ApiError(HTTPStatus.CONFLICT, "installed Assistant allowed_hosts failed its contract") from exc
+
+
+def _admit_app_contract(spec: marketplace.AppSpec, container) -> tuple[str, ...]:
     if spec.assistant is not None:
+        allowed_hosts = _require_assistant_allowed_hosts(spec, container)
         _require_assistant_genesis(container)
+        return allowed_hosts
+    return spec.allowed_hosts
 
 
 def _power_operation(
@@ -1527,6 +1583,9 @@ def _installed_assistant(team_id: str, assistant_id: object):
     ):
         raise ApiError(HTTPStatus.CONFLICT, "installed Assistant failed its identity contract")
     _require_running_team_isolation(container)
+    allowed_hosts = _require_assistant_allowed_hosts(spec, container)
+    if allowed_hosts:
+        _validate_egress_policy(team_id, assistant_id, allowed_hosts)
     return assistant_id, contract, container
 
 
