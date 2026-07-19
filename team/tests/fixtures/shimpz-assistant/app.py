@@ -7,6 +7,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_BODY = 16 * 1024
+HELP_PATHS = {"/v1/help", *(f"/v1/help/{locale}" for locale in ("en", "pt", "es", "zh", "fr", "de", "ja", "ar"))}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -27,7 +28,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/healthz":
             self._send(HTTPStatus.OK, {"status": "ok"})
             return
-        if self.path in {f"/v1/help/{locale}" for locale in ("en", "pt", "es", "zh", "fr", "de", "ja", "ar")}:
+        if self.path in HELP_PATHS:
             self._send(
                 HTTPStatus.OK,
                 {"markdown": "# Shimpz Assistant\n\nAsk me to find Lisbon or check its weather."},

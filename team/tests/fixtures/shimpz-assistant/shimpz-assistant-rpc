@@ -9,6 +9,7 @@ import sys
 
 MAX_BODY = 16 * 1024
 MAX_RESPONSE = 32 * 1024
+HELP_PATHS = {"/v1/help", *(f"/v1/help/{locale}" for locale in ("en", "pt", "es", "zh", "fr", "de", "ja", "ar"))}
 
 
 def main() -> int:
@@ -17,7 +18,7 @@ def main() -> int:
     method, path = sys.argv[1:]
     if path not in {
         "/healthz",
-        "/v1/help",
+        *HELP_PATHS,
         "/v1/powers/search-location",
         "/v1/powers/current-weather",
         "/v1/powers/daily-forecast",
