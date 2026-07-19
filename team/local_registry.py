@@ -49,10 +49,18 @@ class AssistantSpec:
     egress: tuple[str, ...]
 
 
+def is_digest_ref(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and _DIGEST_REF.fullmatch(value) is not None
+        and not value.endswith(f"sha256:{_ZERO_DIGEST}")
+    )
+
+
 def _digest_ref(value: object) -> str:
     if not isinstance(value, str) or _DIGEST_REF.fullmatch(value) is None:
         raise RegistryError("the Shimpz Assistant image must be an OCI sha256 digest reference")
-    if value.endswith(f"sha256:{_ZERO_DIGEST}"):
+    if not is_digest_ref(value):
         raise RegistryError("the Shimpz Assistant release digest has not been bound")
     return value
 

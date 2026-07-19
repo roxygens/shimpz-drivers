@@ -46,6 +46,7 @@ from docker.types import LogConfig, Ulimit
 from local_registry import (
     AssistantSpec,
     RegistryError,
+    is_digest_ref,
     load_registry,
     validate_power_input,
     validate_power_output,
@@ -1437,12 +1438,21 @@ class LocalController:
         labels.update({ASSISTANT_LABEL: spec.assistant_id, IMAGE_LABEL: spec.image})
         return labels
 
-    def _validate_container(self, container, team_id: str, spec: AssistantSpec, network_name: str) -> None:
+    def _validate_container_security(
+        self,
+        container,
+        team_id: str,
+        spec: AssistantSpec,
+        network_name: str,
+    ) -> dict:
         container.reload()
         attrs = container.attrs
         config = attrs.get("Config") or {}
         host = attrs.get("HostConfig") or {}
+        labels = config.get("Labels") or {}
+        installed_image = labels.get(IMAGE_LABEL)
         expected_labels = self._assistant_labels(team_id, spec)
+        expected_labels.pop(IMAGE_LABEL)
         security_options = host.get("SecurityOpt") or []
         networks = (attrs.get("NetworkSettings") or {}).get("Networks") or {}
         environment = _environment_map(config.get("Env"))
@@ -1465,8 +1475,11 @@ class LocalController:
         else:
             proxy_environment_valid = not proxy_keys.intersection(environment)
         if (
-            not self._labels_include(config.get("Labels"), expected_labels)
-            or config.get("Image") != spec.image
+            not self._labels_include(labels, expected_labels)
+            or container.name != self._container_name(team_id, spec.assistant_id)
+            or not is_digest_ref(installed_image)
+            or config.get("Image") != installed_image
+            or installed_image.rpartition("@sha256:")[0] != spec.image.rpartition("@sha256:")[0]
             or config.get("User") != ASSISTANT_UID
             or host.get("ReadonlyRootfs") is not True
             or "ALL" not in (host.get("CapDrop") or [])
@@ -1499,6 +1512,29 @@ class LocalController:
                 "the installed Assistant failed its isolation profile",
                 code="assistant-isolation-drift",
             )
+        return config
+
+    @staticmethod
+    def _has_current_assistant_artifact(config: dict, spec: AssistantSpec) -> bool:
+        labels = config.get("Labels") or {}
+        return config.get("Image") == spec.image and labels.get(IMAGE_LABEL) == spec.image
+
+    def _validate_current_assistant_artifact(self, config: dict, spec: AssistantSpec) -> None:
+        if not self._has_current_assistant_artifact(config, spec):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "the installed Assistant must be updated",
+                code="assistant-update-required",
+            )
+
+    def _validate_container(self, container, team_id: str, spec: AssistantSpec, network_name: str) -> None:
+        config = self._validate_container_security(container, team_id, spec, network_name)
+        self._validate_current_assistant_artifact(config, spec)
+
+    def _validate_removable_container(self, container, team_id: str, spec: AssistantSpec, network_name: str) -> None:
+        config = self._validate_container_security(container, team_id, spec, network_name)
+        if spec.assistant_id not in STATELESS_RECOVERY_ASSISTANTS:
+            self._validate_current_assistant_artifact(config, spec)
 
     @staticmethod
     def _close_exec_stream(stream) -> None:
@@ -1718,8 +1754,14 @@ class LocalController:
                     "an installed Assistant is no longer allowlisted",
                     code="assistant-registry-drift",
                 )
-            self._validate_container(container, team_id, spec, self._network_name(team_id))
-            output.append({"assistant": assistant_id, "status": container.status})
+            config = self._validate_container_security(container, team_id, spec, self._network_name(team_id))
+            if self._has_current_assistant_artifact(config, spec):
+                status = container.status
+            elif assistant_id in STATELESS_RECOVERY_ASSISTANTS:
+                status = "outdated"
+            else:
+                self._validate_current_assistant_artifact(config, spec)
+            output.append({"assistant": assistant_id, "status": status})
         output.sort(key=lambda item: item["assistant"])
         return {"assistants": output}
 
@@ -1807,6 +1849,19 @@ class LocalController:
             ) from exc
         self._create_assistant_container(team_id, spec, network, image)
 
+    def _replace_outdated_assistant(self, team_id: str, spec: AssistantSpec, network, existing) -> None:
+        image = self._trusted_image(spec)
+        self._validate_container_security(existing, team_id, spec, network.name)
+        try:
+            existing.remove(force=True)
+        except DockerException as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Docker could not replace the Assistant",
+                code="docker-remove-failed",
+            ) from exc
+        self._create_assistant_container(team_id, spec, network, image)
+
     def install_assistant(self, team_id: str, assistant_id: str) -> dict[str, object]:
         team_id = validate_team_id(team_id)
         spec = self._resolve(assistant_id)
@@ -1814,7 +1869,12 @@ class LocalController:
             network = self._network(team_id)
             existing = self._assistant_container(team_id, assistant_id, required=False)
             if existing is not None:
-                self._validate_container(existing, team_id, spec, network.name)
+                config = self._validate_container_security(existing, team_id, spec, network.name)
+                if not self._has_current_assistant_artifact(config, spec):
+                    if assistant_id not in STATELESS_RECOVERY_ASSISTANTS:
+                        self._validate_current_assistant_artifact(config, spec)
+                    self._replace_outdated_assistant(team_id, spec, network, existing)
+                    return {"assistant": assistant_id, "installed": False}
                 existing.reload()
                 if existing.status != "running":
                     try:
@@ -1847,7 +1907,7 @@ class LocalController:
                 if spec.egress:
                     self._release_assistant_egress(team_id, assistant_id, network)
                 return {"assistant": assistant_id, "uninstalled": False}
-            self._validate_container(container, team_id, spec, network.name)
+            self._validate_removable_container(container, team_id, spec, network.name)
             try:
                 container.remove(force=True)
             except DockerException as exc:
@@ -2008,7 +2068,7 @@ class LocalController:
                             "Team resources failed their ownership contract",
                             code="ownership-conflict",
                         )
-                    self._validate_container(container, team_id, spec, network.name)
+                    self._validate_removable_container(container, team_id, spec, network.name)
 
                 if network is not None:
                     thread_id = _brain_thread_id(self.space_id, team_id, network.id)

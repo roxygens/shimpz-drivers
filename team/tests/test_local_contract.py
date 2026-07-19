@@ -37,6 +37,8 @@ SEARCH_RESULT = {
         }
     ]
 }
+CURRENT_ASSISTANT_IMAGE = "ghcr.io/roxygens/shimpz-space@sha256:" + "b" * 64
+LEGACY_ASSISTANT_IMAGE = "ghcr.io/roxygens/shimpz-space@sha256:" + "a" * 64
 
 
 class LocalContractTests(unittest.TestCase):
@@ -90,6 +92,71 @@ class LocalContractTests(unittest.TestCase):
             local_app._ActiveAssistant(controller.registry["shimpz-assistant"], container.id),
         )
         return controller
+
+    def _lifecycle_controller(self) -> tuple[local_app.LocalController, SimpleNamespace, list[object]]:
+        events: list[object] = []
+        controller = object.__new__(local_app.LocalController)
+        controller.space_id = "local-space"
+        controller.cpuset_cpus = "0"
+        controller._locks = tuple(threading.RLock() for _ in range(64))
+        controller._blocked_power_workloads = set()
+        spec = SimpleNamespace(
+            assistant_id="shimpz-assistant",
+            image=CURRENT_ASSISTANT_IMAGE,
+            egress=(),
+        )
+        controller.registry = {spec.assistant_id: spec}
+        network_name = controller._network_name("team_1")
+        network = SimpleNamespace(name=network_name)
+        controller._network = lambda _team_id: network
+        labels = controller._assistant_labels("team_1", spec)
+        labels[local_app.IMAGE_LABEL] = LEGACY_ASSISTANT_IMAGE
+        container = SimpleNamespace(
+            id="assistant-container",
+            name=controller._container_name("team_1", spec.assistant_id),
+            status="running",
+            labels=labels,
+            attrs={
+                "Config": {
+                    "Labels": labels,
+                    "Image": LEGACY_ASSISTANT_IMAGE,
+                    "User": local_app.ASSISTANT_UID,
+                    "Env": [],
+                },
+                "HostConfig": {
+                    "ReadonlyRootfs": True,
+                    "CapDrop": ["ALL"],
+                    "SecurityOpt": ["no-new-privileges:true"],
+                    "Privileged": False,
+                    "NetworkMode": network_name,
+                    "Memory": local_app.ASSISTANT_MEMORY,
+                    "MemorySwap": local_app.ASSISTANT_MEMORY,
+                    "NanoCpus": local_app.ASSISTANT_NANO_CPUS,
+                    "CpusetCpus": controller.cpuset_cpus,
+                    "PidsLimit": local_app.ASSISTANT_PIDS,
+                    "IpcMode": "private",
+                    "CgroupnsMode": "private",
+                    "Tmpfs": None,
+                    "AutoRemove": False,
+                    "RestartPolicy": {"Name": "no"},
+                    "LogConfig": {
+                        "Type": "json-file",
+                        "Config": {"max-file": "2", "max-size": "1m"},
+                    },
+                    "PortBindings": None,
+                    "Binds": None,
+                    "Devices": None,
+                    "DeviceRequests": None,
+                },
+                "Mounts": [],
+                "NetworkSettings": {"Networks": {network_name: {}}},
+            },
+        )
+        container.reload = lambda: events.append("reload")
+        container.remove = lambda *, force: events.append(("remove", force))
+        controller._assistant_container = lambda *_args, **_kwargs: container
+        controller.client = SimpleNamespace(containers=SimpleNamespace(list=lambda **_kwargs: [container]))
+        return controller, container, events
 
     def test_registry_accepts_only_a_non_placeholder_digest(self) -> None:
         digest = "127.0.0.1:5000/shimpz/shimpz-assistant@sha256:" + "a" * 64
@@ -560,7 +627,7 @@ class LocalContractTests(unittest.TestCase):
         controller._lock = lambda _team_id: LifecycleLock()
         controller._network = lambda _team_id, *, required=False: events.append("network-read") or network
         controller._assistant_filters = lambda _team_id: {}
-        controller._validate_container = lambda *_args: events.append("container-validated")
+        controller._validate_removable_container = lambda *_args: events.append("container-validated")
         controller.registry = {"shimpz-assistant": SimpleNamespace(egress=())}
         controller.client = SimpleNamespace(containers=SimpleNamespace(list=list_containers))
         controller.brain_runtime = SimpleNamespace(
@@ -626,7 +693,7 @@ class LocalContractTests(unittest.TestCase):
         controller._lock = lambda _team_id: threading.RLock()
         controller._network = lambda _team_id, *, required=False: network
         controller._assistant_filters = lambda _team_id: {}
-        controller._validate_container = lambda *_args: None
+        controller._validate_removable_container = lambda *_args: None
         controller.registry = {"shimpz-assistant": SimpleNamespace(egress=())}
         controller.client = SimpleNamespace(containers=SimpleNamespace(list=lambda **_filters: [container]))
 
@@ -673,7 +740,7 @@ class LocalContractTests(unittest.TestCase):
         controller._lock = lambda _team_id: threading.RLock()
         controller._network = lambda _team_id, *, required=False: network
         controller._assistant_filters = lambda _team_id: {}
-        controller._validate_container = lambda *_args: None
+        controller._validate_removable_container = lambda *_args: None
         controller.registry = {"shimpz-assistant": SimpleNamespace(egress=())}
         controller.client = SimpleNamespace(containers=SimpleNamespace(list=lambda **_filters: [container]))
         controller.brain_runtime = SimpleNamespace(
@@ -942,6 +1009,100 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIsInstance(failures[0], local_app.ApiProblem)
         self.assertEqual(failures[0].code, "chat-stopped")
+
+    def test_install_replaces_an_outdated_stateless_assistant_after_resolving_trusted_image(self) -> None:
+        controller, container, events = self._lifecycle_controller()
+        trusted_image = object()
+        controller._trusted_image = lambda _spec: events.append("trusted") or trusted_image
+        controller._create_assistant_container = lambda _team_id, _spec, _network, image: events.append(
+            ("create", image)
+        )
+
+        result = controller.install_assistant("team_1", "shimpz-assistant")
+
+        self.assertEqual(result, {"assistant": "shimpz-assistant", "installed": False})
+        self.assertEqual(events, ["reload", "trusted", "reload", ("remove", True), ("create", trusted_image)])
+        self.assertEqual(container.attrs["Config"]["Image"], LEGACY_ASSISTANT_IMAGE)
+
+    def test_uninstall_removes_an_owned_outdated_assistant(self) -> None:
+        controller, _container, events = self._lifecycle_controller()
+
+        result = controller.uninstall_assistant("team_1", "shimpz-assistant")
+
+        self.assertEqual(result, {"assistant": "shimpz-assistant", "uninstalled": True})
+        self.assertEqual(events, ["reload", ("remove", True)])
+
+    def test_install_rejects_security_drift_without_resolving_or_removing(self) -> None:
+        controller, container, events = self._lifecycle_controller()
+        container.attrs["HostConfig"]["Privileged"] = True
+        controller._trusted_image = lambda _spec: self.fail("security drift reached image resolution")
+
+        with self.assertRaises(local_app.ApiProblem) as caught:
+            controller.install_assistant("team_1", "shimpz-assistant")
+
+        self.assertEqual(
+            (caught.exception.status, caught.exception.code),
+            (HTTPStatus.CONFLICT, "assistant-isolation-drift"),
+        )
+        self.assertEqual(events, ["reload"])
+
+    def test_uninstall_never_removes_a_container_with_wrong_ownership(self) -> None:
+        controller, container, events = self._lifecycle_controller()
+        container.labels[local_app.SPACE_LABEL] = "other-space"
+
+        with self.assertRaises(local_app.ApiProblem) as caught:
+            controller.uninstall_assistant("team_1", "shimpz-assistant")
+
+        self.assertEqual(caught.exception.code, "assistant-isolation-drift")
+        self.assertEqual(events, ["reload"])
+
+    def test_list_marks_only_artifact_drift_outdated_and_rejects_security_drift(self) -> None:
+        controller, container, events = self._lifecycle_controller()
+
+        self.assertEqual(
+            controller.list_assistants("team_1"),
+            {"assistants": [{"assistant": "shimpz-assistant", "status": "outdated"}]},
+        )
+        with self.assertRaises(local_app.ApiProblem) as update_required:
+            controller._validate_container(
+                container,
+                "team_1",
+                controller.registry["shimpz-assistant"],
+                controller._network_name("team_1"),
+            )
+        self.assertEqual(update_required.exception.code, "assistant-update-required")
+        self.assertEqual(update_required.exception.message, "the installed Assistant must be updated")
+        container.attrs["HostConfig"]["ReadonlyRootfs"] = False
+        with self.assertRaises(local_app.ApiProblem) as caught:
+            controller.list_assistants("team_1")
+
+        self.assertEqual(caught.exception.code, "assistant-isolation-drift")
+        self.assertEqual(events, ["reload", "reload", "reload"])
+
+    def test_outdated_artifact_lineage_is_closed_before_lifecycle_actions(self) -> None:
+        self.assertTrue(local_registry.is_digest_ref(LEGACY_ASSISTANT_IMAGE))
+        self.assertFalse(local_registry.is_digest_ref("ghcr.io/roxygens/shimpz-space@sha256:" + "0" * 64))
+        self.assertFalse(local_registry.is_digest_ref("ghcr.io/roxygens/shimpz-space:latest"))
+
+        for drift in ("missing-label", "image-label-mismatch", "foreign-repository", "wrong-name"):
+            with self.subTest(drift=drift):
+                controller, container, events = self._lifecycle_controller()
+                if drift == "missing-label":
+                    container.labels.pop(local_app.IMAGE_LABEL)
+                elif drift == "image-label-mismatch":
+                    container.attrs["Config"]["Image"] = CURRENT_ASSISTANT_IMAGE
+                elif drift == "foreign-repository":
+                    foreign = "evil.example/shimpz-space@sha256:" + "c" * 64
+                    container.labels[local_app.IMAGE_LABEL] = foreign
+                    container.attrs["Config"]["Image"] = foreign
+                else:
+                    container.name = "foreign-container"
+
+                with self.assertRaises(local_app.ApiProblem) as caught:
+                    controller.list_assistants("team_1")
+
+                self.assertEqual(caught.exception.code, "assistant-isolation-drift")
+                self.assertEqual(events, ["reload"])
 
 
 if __name__ == "__main__":
