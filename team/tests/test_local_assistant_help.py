@@ -21,7 +21,7 @@ class LocalAssistantHelpTests(unittest.TestCase):
         controller._assistant_container = lambda _team_id, _assistant_id: container
         controller._validate_container = lambda *_args: None
         calls: list[tuple[str, str, object]] = []
-        controller._rpc = lambda _container, _spec, method, path, payload: (
+        controller._rpc = lambda _container, _spec, method, path, payload, **_kwargs: (
             calls.append((method, path, payload)) or {"markdown": markdown}
         )
         return controller, calls
@@ -39,7 +39,7 @@ class LocalAssistantHelpTests(unittest.TestCase):
             },
         )
         self.assertEqual(calls, [("GET", "/v1/help/pt", {})])
-        controller._rpc = lambda *_args: {"markdown": "x" * (32 * 1024 + 1)}
+        controller._rpc = lambda *_args, **_kwargs: {"markdown": "x" * (32 * 1024 + 1)}
         with self.assertRaises(local_app.ApiProblem) as caught:
             controller.assistant_help("team_1", "example-assistant", "pt")
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_GATEWAY)
@@ -51,6 +51,39 @@ class LocalAssistantHelpTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_REQUEST)
         self.assertEqual(caught.exception.code, "invalid-help-locale")
         self.assertEqual(calls, [])
+
+    def test_help_falls_back_only_when_the_localized_rpc_path_is_unsupported(self) -> None:
+        controller, calls = self._controller("# English fallback")
+
+        def rpc(_container, _spec, method, path, payload, **kwargs):
+            calls.append((method, path, payload))
+            if path == "/v1/help/pt":
+                self.assertTrue(kwargs["detect_unsupported_path"])
+                raise local_app._UnsupportedAssistantRpcPathError(path)
+            self.assertNotIn("detect_unsupported_path", kwargs)
+            return {"markdown": "# English fallback"}
+
+        controller._rpc = rpc
+
+        result = controller.assistant_help("team_1", "example-assistant", "pt")
+
+        self.assertEqual(result["markdown"], "# English fallback")
+        self.assertEqual(calls, [("GET", "/v1/help/pt", {}), ("GET", "/v1/help", {})])
+
+        calls.clear()
+
+        def fail_rpc(_container, _spec, method, path, payload, **_kwargs):
+            calls.append((method, path, payload))
+            raise local_app.ApiProblem(
+                HTTPStatus.BAD_GATEWAY,
+                "Assistant Power failed",
+                code="assistant-rpc-failed",
+            )
+
+        controller._rpc = fail_rpc
+        with self.assertRaises(local_app.ApiProblem):
+            controller.assistant_help("team_1", "example-assistant", "pt")
+        self.assertEqual(calls, [("GET", "/v1/help/pt", {})])
 
     def test_help_route_is_exact_and_has_no_request_body(self) -> None:
         controller = SimpleNamespace(

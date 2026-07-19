@@ -61,7 +61,11 @@ class HostedAssistantHelpTests(unittest.TestCase):
                 "GET",
                 "/v1/help/pt",
                 {},
-                {"token": None, "operation": "Assistant Help"},
+                {
+                    "token": None,
+                    "operation": "Assistant Help",
+                    "detect_unsupported_path": True,
+                },
             ),
         )
 
@@ -81,6 +85,47 @@ class HostedAssistantHelpTests(unittest.TestCase):
             app._assistant_help("team_1", "shimpz-assistant", lease, "pt-BR")
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_REQUEST)
         self.assertEqual(calls, [])
+
+    def test_help_falls_back_only_when_the_localized_rpc_path_is_unsupported(self) -> None:
+        lease = object()
+        contract = types.SimpleNamespace(rpc_command="/usr/local/bin/shimpz-assistant-rpc")
+        container = types.SimpleNamespace(id="b" * 64)
+        paths: list[str] = []
+
+        def rpc(_team_id, _container, _command, _method, path, _payload, **kwargs):
+            paths.append(path)
+            if path == "/v1/help/pt":
+                self.assertTrue(kwargs["detect_unsupported_path"])
+                raise app._UnsupportedAssistantRpcPathError(path)
+            self.assertNotIn("detect_unsupported_path", kwargs)
+            return {"markdown": "# English fallback"}
+
+        with _patched(
+            _require_current_authorization=lambda *_args: None,
+            _installed_assistant=lambda *_args: ("shimpz-assistant", contract, container),
+            _assistant_rpc_exchange=rpc,
+        ):
+            result = app._assistant_help("team_1", "shimpz-assistant", lease, "pt")
+
+        self.assertEqual(result["markdown"], "# English fallback")
+        self.assertEqual(paths, ["/v1/help/pt", "/v1/help"])
+
+        paths.clear()
+
+        def fail_rpc(_team_id, _container, _command, _method, path, _payload, **_kwargs):
+            paths.append(path)
+            raise app.ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Help failed")
+
+        with (
+            _patched(
+                _require_current_authorization=lambda *_args: None,
+                _installed_assistant=lambda *_args: ("shimpz-assistant", contract, container),
+                _assistant_rpc_exchange=fail_rpc,
+            ),
+            self.assertRaises(app.ApiError),
+        ):
+            app._assistant_help("team_1", "shimpz-assistant", lease, "pt")
+        self.assertEqual(paths, ["/v1/help/pt"])
 
     def test_help_route_is_exact_and_disables_caching(self) -> None:
         handler = _RouteHarness()

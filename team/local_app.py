@@ -121,6 +121,10 @@ class ApiProblem(RuntimeError):
         self.code = code
 
 
+class _UnsupportedAssistantRpcPathError(RuntimeError):
+    """The fixed Assistant RPC adapter rejected a path it does not implement."""
+
+
 @dataclass(frozen=True, slots=True)
 class _ActiveAssistant:
     spec: AssistantSpec
@@ -1577,7 +1581,16 @@ class LocalController:
                     raise ValueError("oversized Assistant error")
         return bytes(stdout), stderr_bytes
 
-    def _rpc(self, container, spec: AssistantSpec, method: str, path: str, payload: dict) -> object:
+    def _rpc(
+        self,
+        container,
+        spec: AssistantSpec,
+        method: str,
+        path: str,
+        payload: dict,
+        *,
+        detect_unsupported_path: bool = False,
+    ) -> object:
         encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         if len(encoded) > MAX_BODY_BYTES:
             raise ApiProblem(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request is too large", code="body-too-large")
@@ -1632,13 +1645,14 @@ class LocalController:
                 "Assistant Power status is ambiguous",
                 code="assistant-rpc-failed",
             )
+        if exit_code != 0 or stderr_bytes:
+            if detect_unsupported_path and exit_code == 2 and stderr_bytes == 0 and not stdout:
+                raise _UnsupportedAssistantRpcPathError(path)
+            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant Power failed", code="assistant-rpc-failed")
         try:
-            decoded = json.loads(bytes(stdout))
+            return json.loads(bytes(stdout))
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant Power failed", code="assistant-rpc-failed") from exc
-        if exit_code != 0 or stderr_bytes:
-            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant Power failed", code="assistant-rpc-failed")
-        return decoded
 
     def _wait_ready(self, container, spec: AssistantSpec) -> None:
         deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS
@@ -1866,7 +1880,17 @@ class LocalController:
             container.reload()
             if container.status != "running":
                 raise ApiProblem(HTTPStatus.CONFLICT, "Assistant is not running", code="assistant-not-running")
-            raw_result = self._rpc(container, spec, "GET", f"/v1/help/{locale}", {})
+            try:
+                raw_result = self._rpc(
+                    container,
+                    spec,
+                    "GET",
+                    f"/v1/help/{locale}",
+                    {},
+                    detect_unsupported_path=True,
+                )
+            except _UnsupportedAssistantRpcPathError:
+                raw_result = self._rpc(container, spec, "GET", "/v1/help", {})
         try:
             help_payload = assistant_contract.validate_help_payload(raw_result)
         except ValueError as exc:

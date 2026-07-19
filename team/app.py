@@ -195,6 +195,10 @@ class ApiError(Exception):
         self.message = message
 
 
+class _UnsupportedAssistantRpcPathError(RuntimeError):
+    """The fixed Assistant RPC adapter rejected a path it does not implement."""
+
+
 def _brain_thread_id(team_id: str, anchor_id: str) -> str:
     """Bind hosted conversation state to one immutable Team lifecycle."""
     if (
@@ -1621,6 +1625,7 @@ def _assistant_rpc_exchange(
     *,
     token: str | None,
     operation: str,
+    detect_unsupported_path: bool = False,
 ) -> object:
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
     if len(encoded) > MAX_ASSISTANT_RPC_INPUT_BYTES:
@@ -1673,6 +1678,8 @@ def _assistant_rpc_exchange(
             _raise_if_rpc_cancelled(token)
             raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} status is ambiguous")
         if details["ExitCode"] != 0 or stderr:
+            if detect_unsupported_path and details["ExitCode"] == 2 and not stdout and not stderr:
+                raise _UnsupportedAssistantRpcPathError(path)
             _raise_if_rpc_cancelled(token)
             raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} failed")
         try:
@@ -1718,16 +1725,29 @@ def _assistant_help(
     with _lock_for(team_id):
         _require_current_authorization(team_id, lease)
         current_id, contract, container = _installed_assistant(team_id, assistant_id)
-        raw_result = _assistant_rpc_exchange(
-            team_id,
-            container,
-            contract.rpc_command,
-            "GET",
-            f"/v1/help/{locale}",
-            {},
-            token=None,
-            operation="Assistant Help",
-        )
+        try:
+            raw_result = _assistant_rpc_exchange(
+                team_id,
+                container,
+                contract.rpc_command,
+                "GET",
+                f"/v1/help/{locale}",
+                {},
+                token=None,
+                operation="Assistant Help",
+                detect_unsupported_path=True,
+            )
+        except _UnsupportedAssistantRpcPathError:
+            raw_result = _assistant_rpc_exchange(
+                team_id,
+                container,
+                contract.rpc_command,
+                "GET",
+                "/v1/help",
+                {},
+                token=None,
+                operation="Assistant Help",
+            )
     try:
         help_payload = assistant_contract.validate_help_payload(raw_result)
     except ValueError as exc:
@@ -2798,9 +2818,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._route_apps(method, parts, team_id, principal, lease)
                 return
             if sub == "assistants":
-                if len(parts) >= 6 and parts[5] == "help" and (
-                    parsed.query or parsed.fragment or "%" in parsed.path
-                ):
+                if len(parts) >= 6 and parts[5] == "help" and (parsed.query or parsed.fragment or "%" in parsed.path):
                     raise ApiError(HTTPStatus.BAD_REQUEST, "query and encoded paths are not accepted")
                 self._route_assistants(method, parts, team_id, lease)
                 return
