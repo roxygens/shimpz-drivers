@@ -67,6 +67,8 @@ class AssistantManifestTests(unittest.TestCase):
             "example.com.",
             "example..com",
             "tést.example",
+            "api.example.test",
+            "api.example.123",
         )
         for host in unsafe:
             with self.subTest(host=host), self.assertRaises(assistant_manifest.ManifestError):

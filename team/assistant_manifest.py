@@ -15,9 +15,25 @@ from contextlib import ExitStack
 MANIFEST_PATH = "/opt/shimpz-assistant/shimpz.assistant.toml"
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_ARCHIVE_BYTES = MAX_MANIFEST_BYTES + (32 * 1024)
-MAX_ALLOWED_HOSTS = 64
+MAX_ALLOWED_HOSTS = 32
 DEFAULT_CACHE_ENTRIES = 256
-_HOST_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_PUBLIC_HOST_RE = re.compile(
+    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?\Z"
+)
+_NON_PUBLIC_HOST_SUFFIXES = (
+    ".arpa",
+    ".example",
+    ".home",
+    ".internal",
+    ".invalid",
+    ".lan",
+    ".local",
+    ".localdomain",
+    ".localhost",
+    ".onion",
+    ".test",
+)
 
 
 class ManifestError(RuntimeError):
@@ -32,8 +48,7 @@ def canonical_allowed_hosts(value: object) -> tuple[str, ...]:
     for host in value:
         if not isinstance(host, str) or not 1 <= len(host) <= 253 or not host.isascii() or host != host.lower():
             raise ManifestError("Assistant allowed_hosts is invalid")
-        labels = host.split(".")
-        if len(labels) < 2 or any(_HOST_LABEL_RE.fullmatch(label) is None for label in labels):
+        if _PUBLIC_HOST_RE.fullmatch(host) is None or host.endswith(_NON_PUBLIC_HOST_SUFFIXES):
             raise ManifestError("Assistant allowed_hosts is invalid")
         try:
             ipaddress.ip_address(host)
