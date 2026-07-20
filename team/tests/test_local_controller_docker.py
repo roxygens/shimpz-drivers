@@ -228,7 +228,11 @@ class DockerFlowTests(unittest.TestCase):
             ).stdout.strip()
         )
         brain_server = ThreadingHTTPServer((str(bridge_gateway), 0), _BrainLifecycleHandler)
-        brain_thread = threading.Thread(target=brain_server.serve_forever, daemon=True)
+        brain_thread = threading.Thread(
+            target=brain_server.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
         brain_thread.start()
 
         try:
