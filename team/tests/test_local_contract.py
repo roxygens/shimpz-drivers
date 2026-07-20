@@ -1558,7 +1558,7 @@ class LocalContractTests(unittest.TestCase):
             )
             self.assertEqual(invocations, [])
             self.assertEqual(challenge["status"], "approval-required")
-            self.assertNotIn("Approved test Post", repr(challenge))
+            self.assertEqual(challenge["requirements"][0]["input"], {"text": "Approved test Post"})
             self.assertNotIn("power-1", repr(challenge))
 
             submission = {"challenge_id": challenge["challenge_id"], "approved": True}
@@ -1587,6 +1587,128 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(invocations, [("create-post", {"text": "Approved test Post"})])
         self.assertEqual(runtime.resumes, [{"power-1": {"id": "123", "text": "Approved test Post"}}])
         self.assertEqual(replay.exception.code, "assistant-approval-challenge-expired")
+
+    def test_secret_continuation_can_pause_for_approval_before_any_power_runs(self) -> None:
+        request = brain_runtime_client.PowerRequest(
+            interrupt_id="create-1",
+            assistant_id="shimpz-assistant",
+            power="create-post",
+            input={"text": "Publish only after both gates"},
+            approval="each-run",
+        )
+
+        class Runtime:
+            def start(self, _context, _message):
+                return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=(request,))
+
+            def resume(self, _context, results):
+                self.results = dict(results)
+                return brain_runtime_client.RuntimeTurn(status="completed", reply="Published.", powers=())
+
+        runtime = Runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, runtime, configure_secrets=False)
+            invocations: list[object] = []
+            controller.invoke = lambda _team, _assistant, power, payload: (
+                invocations.append((power, payload)) or {"result": {"id": "post-1"}}
+            )
+            secret_challenge = controller.chat(
+                "team_1",
+                {"message": "Publish", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                "openai",
+                "sk-test-0123456789",
+            )
+            approval_challenge = controller.submit_chat_secrets(
+                "team_1",
+                self._secret_submission(secret_challenge),
+                "openai",
+                "sk-test-0123456789",
+            )
+            self.assertEqual(invocations, [])
+            self.assertEqual(approval_challenge["status"], "approval-required")
+            self.assertEqual(
+                approval_challenge["requirements"][0]["input"],
+                {"text": "Publish only after both gates"},
+            )
+            response = controller.submit_chat_approval(
+                "team_1",
+                {"challenge_id": approval_challenge["challenge_id"], "approved": True},
+                "openai",
+                "sk-test-0123456789",
+            )
+
+        self.assertEqual(response["reply"], "Published.")
+        self.assertEqual(invocations, [("create-post", {"text": "Publish only after both gates"})])
+        self.assertEqual(runtime.results, {"create-1": {"id": "post-1"}})
+
+    def test_approval_challenge_transfers_to_a_cancellable_active_turn_without_a_gap(self) -> None:
+        request = brain_runtime_client.PowerRequest(
+            interrupt_id="power-1",
+            assistant_id="shimpz-assistant",
+            power="create-post",
+            input={"text": "Must never run after Stop"},
+            approval="each-run",
+        )
+
+        class Runtime:
+            def start(self, _context, _message):
+                return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=(request,))
+
+            def resume(self, _context, _results):
+                raise AssertionError("a cancelled approval must never resume")
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime())
+            controller.invoke = lambda *_args: self.fail("a cancelled approval must never invoke")
+            challenge = controller.chat(
+                "team_1",
+                {"message": "Publish", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                "openai",
+                "sk-test-0123456789",
+            )
+            claiming = threading.Event()
+            release = threading.Event()
+            original_claim = controller.approval_challenges.claim
+
+            def blocked_claim(team_id, challenge_id):
+                claiming.set()
+                if not release.wait(timeout=2):
+                    raise AssertionError("test did not release approval claim")
+                return original_claim(team_id, challenge_id)
+
+            failures: list[BaseException] = []
+
+            def submit() -> None:
+                try:
+                    controller.submit_chat_approval(
+                        "team_1",
+                        {"challenge_id": challenge["challenge_id"], "approved": True},
+                        "openai",
+                        "sk-test-0123456789",
+                    )
+                except local_app.ApiProblem as exc:
+                    failures.append(exc)
+
+            with mock.patch.object(controller.approval_challenges, "claim", side_effect=blocked_claim):
+                thread = threading.Thread(target=submit)
+                thread.start()
+                self.assertTrue(claiming.wait(timeout=2))
+                repeated = controller.chat(
+                    "team_1",
+                    {"message": "Different turn", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                    "openai",
+                    "sk-test-0123456789",
+                )
+                self.assertEqual(repeated["challenge_id"], challenge["challenge_id"])
+                stopped = controller.stop_chat("team_1")
+                release.set()
+                thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(stopped["accepted"])
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], local_app.ApiProblem)
+        self.assertIn(failures[0].code, {"assistant-approval-challenge-expired", "chat-stopped"})
 
     def test_stop_discards_a_runtime_reply_that_finishes_late(self) -> None:
         started = threading.Event()

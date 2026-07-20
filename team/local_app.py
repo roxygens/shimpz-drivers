@@ -1947,9 +1947,10 @@ class LocalController:
     ) -> dict[str, object]:
         team_id = validate_team_id(team_id)
         challenge_id = body.get("challenge_id") if isinstance(body, dict) else None
-        pending, approved_interrupts = self._store_chat_approval(team_id, challenge_id, provider, body)
-
         with self._exclusive_chat_turn(team_id) as token:
+            # Install the active-turn token before consuming the challenge. Stop can now always
+            # cancel either the pending challenge or this exact continuation; no unowned gap exists.
+            pending, approved_interrupts = self._store_chat_approval(team_id, challenge_id, provider, body)
             team_name, identity, outcome, secret_requirements, approval_requirements = self._run_chat_segment(
                 team_id,
                 list(pending.file_ids),

@@ -14,6 +14,7 @@ def requirement(interrupt_id: str = "interrupt-1") -> assistant_approval_challen
         assistant_name="Shimpz Assistant",
         power_id="create-post",
         power_summary="Publish one approved Post.",
+        input_json='{"text":"Approved Post"}',
     )
 
 
@@ -24,6 +25,7 @@ class ApprovalChallengeTests(unittest.TestCase):
 
         payload = assistant_approval_flow.challenge_payload(challenge)
         self.assertEqual(payload["status"], "approval-required")
+        self.assertEqual(payload["requirements"][0]["input"], {"text": "Approved Post"})
         self.assertNotIn("interrupt", repr(payload))
         self.assertNotIn("continuation", repr(payload))
         with self.assertRaises(assistant_approval_challenges.ApprovalChallengeNotFoundError):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
@@ -10,6 +11,8 @@ import brain_runtime_client
 from local_registry import AssistantSpec
 
 MAX_APPROVAL_REQUESTS = 64
+MAX_APPROVAL_INPUT_BYTES = 16 * 1024
+MAX_APPROVAL_BATCH_INPUT_BYTES = 64 * 1024
 
 
 class ApprovalFlowError(RuntimeError):
@@ -29,6 +32,7 @@ def requirements_for_batch(
         raise ApprovalFlowError("approval batch size is invalid")
     requirements: list[assistant_approval_challenges.ApprovalRequirement] = []
     seen: set[str] = set()
+    total_input_bytes = 0
     for request in requests:
         active = bindings.get(request.assistant_id)
         power = active.spec.powers.get(request.power) if active is not None else None
@@ -37,6 +41,22 @@ def requirements_for_batch(
         if request.interrupt_id in seen:
             raise ApprovalFlowError("approval batch repeats an interrupt")
         seen.add(request.interrupt_id)
+        try:
+            input_json = json.dumps(
+                request.input,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            input_bytes = len(input_json.encode("utf-8"))
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ApprovalFlowError("Power approval input is not public JSON") from exc
+        if input_bytes > MAX_APPROVAL_INPUT_BYTES:
+            raise ApprovalFlowError("Power approval input exceeds its fixed limit")
+        total_input_bytes += input_bytes
+        if total_input_bytes > MAX_APPROVAL_BATCH_INPUT_BYTES:
+            raise ApprovalFlowError("Power approval batch input exceeds its fixed limit")
         requirements.append(
             assistant_approval_challenges.ApprovalRequirement(
                 interrupt_id=request.interrupt_id,
@@ -44,13 +64,14 @@ def requirements_for_batch(
                 assistant_name=active.spec.name,
                 power_id=request.power,
                 power_summary=power.summary,
+                input_json=input_json,
             )
         )
     return tuple(requirements)
 
 
 def challenge_payload(challenge: assistant_approval_challenges.PendingApprovalChallenge) -> dict[str, object]:
-    """Expose no Power input, interrupt id, or provider credential."""
+    """Expose bounded schema-validated input, but no interrupt id or provider credential."""
     return {
         "team_id": challenge.team_id,
         "status": "approval-required",
@@ -62,6 +83,7 @@ def challenge_payload(challenge: assistant_approval_challenges.PendingApprovalCh
                 "assistant_name": requirement.assistant_name,
                 "power_id": requirement.power_id,
                 "power_summary": requirement.power_summary,
+                "input": json.loads(requirement.input_json),
             }
             for requirement in challenge.requirements
         ],
