@@ -199,14 +199,29 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
     def test_manifest_must_match_reviewed_hosts_before_admission(self) -> None:
         spec = app.marketplace.APPS["shimpz-assistant"]
         container = types.SimpleNamespace(id="assistant-generation")
+        reviewed_contracts: list[app.assistant_manifest.ManifestContract] = []
+
+        def admit(_container, reviewed):
+            reviewed_contracts.append(reviewed)
+            return reviewed
+
         cache = types.SimpleNamespace(
-            get=lambda _container, reviewed: tuple(sorted(reviewed)),
+            get=admit,
         )
         with _patched(
             _assistant_allowed_hosts_cache=cache,
             _require_assistant_genesis=lambda _container: "Use reviewed Powers.",
         ):
             self.assertEqual(app._admit_app_contract(spec, container), tuple(sorted(spec.allowed_hosts)))
+        self.assertEqual(len(reviewed_contracts), 1)
+        self.assertEqual(
+            {secret.id for secret in reviewed_contracts[0].secrets},
+            set(spec.assistant.secrets),
+        )
+        self.assertEqual(
+            dict(reviewed_contracts[0].power_secrets),
+            {power_id: tuple(sorted(power.secrets)) for power_id, power in spec.assistant.powers.items()},
+        )
 
         def reject(_container, _reviewed):
             raise app.assistant_manifest.ManifestError("mismatch")

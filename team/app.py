@@ -142,7 +142,7 @@ _power_journal_lock = threading.Lock()
 _power_journal_instance: power_journal.PowerJournal | None = None
 _brain_runtime = brain_runtime_client.BrainRuntimeClient()
 _assistant_genesis_cache = assistant_genesis.GenesisCache()
-_assistant_allowed_hosts_cache = assistant_manifest.AllowedHostsCache()
+_assistant_allowed_hosts_cache = assistant_manifest.ManifestContractCache()
 
 
 def _validated_team_name(value: object) -> str:
@@ -1490,11 +1490,19 @@ def _require_assistant_genesis(container) -> str:
 
 
 def _require_assistant_allowed_hosts(spec: marketplace.AppSpec, container) -> tuple[str, ...]:
-    """Admit network intent only when immutable package and reviewed registry agree."""
+    """Admit the complete security manifest and return its reviewed egress set."""
+    contract = spec.assistant
+    if contract is None:
+        raise ApiError(HTTPStatus.CONFLICT, "installed Assistant has no reviewed manifest contract")
     try:
-        return _assistant_allowed_hosts_cache.get(container, spec.allowed_hosts)
+        reviewed = assistant_manifest.reviewed_manifest_contract(
+            allowed_hosts=spec.allowed_hosts,
+            secrets=contract.secrets,
+            powers=contract.powers,
+        )
+        return _assistant_allowed_hosts_cache.get(container, reviewed).allowed_hosts
     except assistant_manifest.ManifestError as exc:
-        raise ApiError(HTTPStatus.CONFLICT, "installed Assistant allowed_hosts failed its contract") from exc
+        raise ApiError(HTTPStatus.CONFLICT, "installed Assistant manifest failed its reviewed contract") from exc
 
 
 def _admit_app_contract(spec: marketplace.AppSpec, container) -> tuple[str, ...]:

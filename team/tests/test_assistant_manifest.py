@@ -1,10 +1,46 @@
 from __future__ import annotations
 
 import io
+import json
 import tarfile
 import unittest
 
 import assistant_manifest
+
+
+def manifest(
+    *,
+    allowed_hosts: tuple[str, ...] = ("api.example.com",),
+    secrets: dict[str, tuple[str, str]] | None = None,
+    powers: dict[str, tuple[str, ...]] | None = None,
+) -> bytes:
+    declarations = secrets if secrets is not None else {"api-token": ("API Token", "Token for the public API.")}
+    bindings = powers if powers is not None else {"lookup": tuple(declarations)}
+    lines = [
+        "schema_version = 2",
+        'name = "Fixture Assistant"',
+        'summary = "Exercise immutable admission."',
+        'creators = ["@fixture"]',
+        f"allowed_hosts = {json.dumps(list(allowed_hosts))}",
+    ]
+    for secret_id, (name, summary) in declarations.items():
+        lines.extend(
+            (
+                f"[secrets.{secret_id}]",
+                f"name = {json.dumps(name)}",
+                f"summary = {json.dumps(summary)}",
+            )
+        )
+    for power_id, refs in bindings.items():
+        lines.extend(
+            (
+                f"[powers.{power_id}]",
+                f"summary = {json.dumps(f'Run {power_id}.')}",
+                'approval = "never"',
+                f"secrets = {json.dumps(list(refs))}",
+            )
+        )
+    return ("\n".join(lines) + "\n").encode()
 
 
 def archive(
@@ -46,18 +82,35 @@ class AssistantManifestTests(unittest.TestCase):
     def test_manifest_limit_matches_the_public_sdk_contract(self):
         self.assertEqual(assistant_manifest.MAX_MANIFEST_BYTES, 256 * 1024)
 
-    def test_reads_and_canonicalizes_exact_hosts(self):
-        content = b'allowed_hosts = ["geocoding-api.open-meteo.com", "api.open-meteo.com"]\n'
+    def test_reads_and_canonicalizes_complete_security_contract(self):
+        content = manifest(
+            allowed_hosts=("cdn.example.com", "api.example.com"),
+            secrets={
+                "write-key": ("Write Key", "Authorizes reviewed writes."),
+                "read-key": ("Read Key", "Authorizes reviewed reads."),
+            },
+            powers={"write": ("write-key",), "read": ("read-key",)},
+        )
 
-        hosts = assistant_manifest.read_container_allowed_hosts(Container("container-one", content))
+        contract = assistant_manifest.read_container_manifest_contract(Container("container-one", content))
 
-        self.assertEqual(hosts, ("api.open-meteo.com", "geocoding-api.open-meteo.com"))
+        self.assertEqual(contract.allowed_hosts, ("api.example.com", "cdn.example.com"))
+        self.assertEqual(
+            contract.secrets,
+            (
+                assistant_manifest.SecretDeclaration("read-key", "Read Key", "Authorizes reviewed reads."),
+                assistant_manifest.SecretDeclaration("write-key", "Write Key", "Authorizes reviewed writes."),
+            ),
+        )
+        self.assertEqual(contract.power_secrets, (("read", ("read-key",)), ("write", ("write-key",))))
 
-    def test_empty_list_is_valid_and_network_intent_is_required(self):
-        self.assertEqual(assistant_manifest.parse_allowed_hosts(b"allowed_hosts = []\n"), ())
-        for content in (b'name = "No intent"\n', b"allowed_hosts = 1\n"):
+    def test_empty_lists_are_valid_and_security_intent_is_required(self):
+        empty = manifest(allowed_hosts=(), secrets={}, powers={"hello": ()})
+        self.assertEqual(assistant_manifest.parse_manifest_contract(empty).allowed_hosts, ())
+        self.assertEqual(assistant_manifest.parse_allowed_hosts(empty), ())
+        for content in (b'name = "No intent"\n', b"schema_version = 2\nallowed_hosts = 1\n"):
             with self.subTest(content=content), self.assertRaises(assistant_manifest.ManifestError):
-                assistant_manifest.parse_allowed_hosts(content)
+                assistant_manifest.parse_manifest_contract(content)
 
     def test_unsafe_hosts_fail_closed(self):
         unsafe = (
@@ -82,17 +135,32 @@ class AssistantManifestTests(unittest.TestCase):
     def test_invalid_text_toml_and_size_fail_closed(self):
         invalid = (
             b"",
-            b'allowed_hosts = ["example.com"]\x00',
+            manifest() + b"\x00",
             b"\xff",
-            b'allowed_hosts = ["example.com"',
+            b'schema_version = 2\nallowed_hosts = ["example.com"',
             b"x" * (assistant_manifest.MAX_MANIFEST_BYTES + 1),
         )
         for content in invalid:
             with self.subTest(size=len(content)), self.assertRaises(assistant_manifest.ManifestError):
-                assistant_manifest.parse_allowed_hosts(content)
+                assistant_manifest.parse_manifest_contract(content)
+
+    def test_secret_declarations_and_power_references_fail_closed(self):
+        invalid = (
+            manifest(secrets={"unused": ("Unused", "Never exposed.")}, powers={"hello": ()}),
+            manifest(secrets={}, powers={"hello": ("missing",)}),
+            manifest(powers={"hello": ("api-token", "api-token")}),
+            manifest().replace(
+                b'summary = "Token for the public API."',
+                b'summary = "Token for the public API."\nvalue = "must-not-exist"',
+            ),
+            manifest() + b'api_key = "sk-examplecredentialmaterial123"\n',
+        )
+        for content in invalid:
+            with self.subTest(content=content), self.assertRaises(assistant_manifest.ManifestError):
+                assistant_manifest.parse_manifest_contract(content)
 
     def test_archive_shape_and_metadata_fail_closed(self):
-        valid = b'allowed_hosts = ["api.example.com"]\n'
+        valid = manifest()
         invalid_cases = (
             (archive(valid, name="other.toml"), {"name": "shimpz.assistant.toml", "size": len(valid), "mode": 0o444}),
             (
@@ -106,7 +174,7 @@ class AssistantManifestTests(unittest.TestCase):
         )
         for payload, metadata in invalid_cases:
             with self.subTest(metadata=metadata), self.assertRaises(assistant_manifest.ManifestError):
-                assistant_manifest.read_container_allowed_hosts(
+                assistant_manifest.read_container_manifest_contract(
                     type(
                         "InvalidContainer",
                         (),
@@ -119,19 +187,45 @@ class AssistantManifestTests(unittest.TestCase):
                     )()
                 )
 
-    def test_cache_compares_canonical_membership_and_rejects_drift(self):
-        content = b'allowed_hosts = ["api.example.com", "cdn.example.com"]\n'
+    def test_cache_compares_every_reviewed_field_and_rejects_drift(self):
+        content = manifest(
+            allowed_hosts=("api.example.com", "cdn.example.com"),
+            secrets={"api-token": ("API Token", "Token for the public API.")},
+            powers={"lookup": ("api-token",)},
+        )
         container = Container("container-one", content)
-        cache = assistant_manifest.AllowedHostsCache(max_entries=1)
+        cache = assistant_manifest.ManifestContractCache(max_entries=1)
 
-        expected = ("api.example.com", "cdn.example.com")
-        self.assertEqual(cache.get(container, ("cdn.example.com", "api.example.com")), expected)
-        self.assertEqual(cache.get(container, ("api.example.com", "cdn.example.com")), expected)
+        expected = assistant_manifest.canonical_manifest_contract(
+            allowed_hosts=("cdn.example.com", "api.example.com"),
+            secret_declarations={"api-token": ("API Token", "Token for the public API.")},
+            power_secret_refs={"lookup": ("api-token",)},
+        )
+        self.assertEqual(cache.get(container, expected), expected)
+        self.assertEqual(cache.get(container, expected), expected)
         self.assertEqual(container.reads, 1)
-        with self.assertRaises(assistant_manifest.ManifestError):
-            cache.get(container, ("api.example.com", "evil.example.com"))
+        drifted = (
+            assistant_manifest.canonical_manifest_contract(
+                allowed_hosts=("api.example.com", "evil.example.com"),
+                secret_declarations={"api-token": ("API Token", "Token for the public API.")},
+                power_secret_refs={"lookup": ("api-token",)},
+            ),
+            assistant_manifest.canonical_manifest_contract(
+                allowed_hosts=("api.example.com", "cdn.example.com"),
+                secret_declarations={"api-token": ("Different Name", "Token for the public API.")},
+                power_secret_refs={"lookup": ("api-token",)},
+            ),
+            assistant_manifest.canonical_manifest_contract(
+                allowed_hosts=("api.example.com", "cdn.example.com"),
+                secret_declarations={"api-token": ("API Token", "Token for the public API.")},
+                power_secret_refs={"other-power": ("api-token",)},
+            ),
+        )
+        for reviewed in drifted:
+            with self.subTest(reviewed=reviewed), self.assertRaises(assistant_manifest.ManifestError):
+                cache.get(container, reviewed)
         cache.discard(container.id)
-        cache.get(container, ("api.example.com", "cdn.example.com"))
+        cache.get(container, expected)
         self.assertEqual(container.reads, 2)
 
 

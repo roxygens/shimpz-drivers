@@ -457,7 +457,7 @@ class LocalController:
             power_state if power_state is not None else power_journal.PowerJournal(LOCAL_POWER_JOURNAL_PATH)
         )
         self._assistant_genesis_cache = assistant_genesis.GenesisCache()
-        self._assistant_allowed_hosts_cache = assistant_manifest.AllowedHostsCache()
+        self._assistant_allowed_hosts_cache = assistant_manifest.ManifestContractCache()
         self._blocked_power_workloads: set[str] = set()
         self._locks = tuple(threading.RLock() for _ in range(64))
         self._active_chat_guard = threading.Lock()
@@ -1162,12 +1162,17 @@ class LocalController:
 
     def _admit_assistant_allowed_hosts(self, container, spec: AssistantSpec) -> tuple[str, ...]:
         try:
-            return self._assistant_allowed_hosts_cache.get(container, spec.allowed_hosts)
+            reviewed = assistant_manifest.reviewed_manifest_contract(
+                allowed_hosts=spec.allowed_hosts,
+                secrets=spec.secrets,
+                powers=spec.powers,
+            )
+            return self._assistant_allowed_hosts_cache.get(container, reviewed).allowed_hosts
         except assistant_manifest.ManifestError as exc:
             raise ApiProblem(
                 HTTPStatus.CONFLICT,
-                "installed Assistant allowed_hosts failed its contract",
-                code="assistant-allowed-hosts-invalid",
+                "installed Assistant manifest failed its reviewed contract",
+                code="assistant-manifest-invalid",
             ) from exc
 
     def _active_chat_assistants(self, team_id: str, network_name: str) -> tuple[_ActiveAssistant, ...]:

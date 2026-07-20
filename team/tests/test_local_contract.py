@@ -83,7 +83,7 @@ class LocalContractTests(unittest.TestCase):
         controller._active_power_containers = {}
         controller._cancelled_chat_tokens = set()
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
-        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.AllowedHostsCache()
+        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
         controller._admit_assistant_allowed_hosts = lambda _container, spec: tuple(sorted(spec.allowed_hosts))
         container = SimpleNamespace(id="assistant-container", status="running", reload=lambda: None)
         network = SimpleNamespace(id="a" * 64, name="team-network")
@@ -105,7 +105,7 @@ class LocalContractTests(unittest.TestCase):
         controller._locks = tuple(threading.RLock() for _ in range(64))
         controller._blocked_power_workloads = set()
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
-        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.AllowedHostsCache()
+        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
         controller._admit_assistant_allowed_hosts = lambda _container, spec: tuple(sorted(spec.allowed_hosts))
         spec = SimpleNamespace(
             assistant_id="shimpz-assistant",
@@ -1213,7 +1213,7 @@ class LocalContractTests(unittest.TestCase):
         controller.space_id = "local-space"
         controller.cpuset_cpus = "0"
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
-        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.AllowedHostsCache()
+        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
         controller._blocked_power_workloads = set()
         spec = SimpleNamespace(
             assistant_id="shimpz-assistant",
@@ -1249,13 +1249,37 @@ class LocalContractTests(unittest.TestCase):
         self.assertLess(events.index("admit"), events.index("start"))
         self.assertEqual(events[-4:], ["start", "validate", "ready", "genesis"])
 
+    def test_local_admission_reviews_hosts_secrets_and_power_bindings(self) -> None:
+        controller = object.__new__(local_app.LocalController)
+        reviewed_contracts: list[local_app.assistant_manifest.ManifestContract] = []
+
+        def admit(_container, reviewed):
+            reviewed_contracts.append(reviewed)
+            return reviewed
+
+        controller._assistant_allowed_hosts_cache = SimpleNamespace(get=admit)
+        spec = self._registry(CURRENT_ASSISTANT_IMAGE)["shimpz-assistant"]
+
+        allowed_hosts = controller._admit_assistant_allowed_hosts(SimpleNamespace(id="generation"), spec)
+
+        self.assertEqual(allowed_hosts, tuple(sorted(spec.allowed_hosts)))
+        self.assertEqual(len(reviewed_contracts), 1)
+        self.assertEqual(
+            {secret.id for secret in reviewed_contracts[0].secrets},
+            set(spec.secrets),
+        )
+        self.assertEqual(
+            dict(reviewed_contracts[0].power_secrets),
+            {power_id: tuple(sorted(power.secrets)) for power_id, power in spec.powers.items()},
+        )
+
     def test_manifest_mismatch_removes_stopped_container_without_activating_egress(self) -> None:
         events: list[object] = []
         controller = object.__new__(local_app.LocalController)
         controller.space_id = "local-space"
         controller.cpuset_cpus = "0"
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
-        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.AllowedHostsCache()
+        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
         spec = SimpleNamespace(
             assistant_id="shimpz-assistant",
             image=CURRENT_ASSISTANT_IMAGE,
@@ -1275,8 +1299,8 @@ class LocalContractTests(unittest.TestCase):
         controller._admit_assistant_allowed_hosts = lambda *_args: (_ for _ in ()).throw(
             local_app.ApiProblem(
                 HTTPStatus.CONFLICT,
-                "installed Assistant allowed_hosts failed its contract",
-                code="assistant-allowed-hosts-invalid",
+                "installed Assistant manifest failed its reviewed contract",
+                code="assistant-manifest-invalid",
             )
         )
         controller._activate_assistant_egress = lambda *_args: events.append("activate-egress")
@@ -1285,7 +1309,7 @@ class LocalContractTests(unittest.TestCase):
         with self.assertRaises(local_app.ApiProblem) as caught:
             controller._create_assistant_container("team_1", spec, network, image)
 
-        self.assertEqual(caught.exception.code, "assistant-allowed-hosts-invalid")
+        self.assertEqual(caught.exception.code, "assistant-manifest-invalid")
         self.assertNotIn("start", events)
         self.assertNotIn("activate-egress", events)
         self.assertEqual(events, ["reload", ("remove", True), "release-egress"])
@@ -1296,7 +1320,7 @@ class LocalContractTests(unittest.TestCase):
         controller.space_id = "local-space"
         controller.cpuset_cpus = "0"
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
-        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.AllowedHostsCache()
+        controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
         controller._blocked_power_workloads = set()
         spec = SimpleNamespace(
             assistant_id="shimpz-assistant",
@@ -1331,8 +1355,8 @@ class LocalContractTests(unittest.TestCase):
         controller._admit_assistant_allowed_hosts = lambda *_args: (_ for _ in ()).throw(
             local_app.ApiProblem(
                 HTTPStatus.CONFLICT,
-                "installed Assistant allowed_hosts failed its contract",
-                code="assistant-allowed-hosts-invalid",
+                "installed Assistant manifest failed its reviewed contract",
+                code="assistant-manifest-invalid",
             )
         )
         controller._activate_assistant_egress = lambda *_args: events.append("activate-egress")
@@ -1418,15 +1442,15 @@ class LocalContractTests(unittest.TestCase):
         def reject(*_args):
             raise local_app.ApiProblem(
                 HTTPStatus.CONFLICT,
-                "installed Assistant allowed_hosts failed its contract",
-                code="assistant-allowed-hosts-invalid",
+                "installed Assistant manifest failed its reviewed contract",
+                code="assistant-manifest-invalid",
             )
 
         controller._admit_assistant_allowed_hosts = reject
         with self.assertRaises(local_app.ApiProblem) as caught:
             controller.list_assistants("team_1")
 
-        self.assertEqual(caught.exception.code, "assistant-allowed-hosts-invalid")
+        self.assertEqual(caught.exception.code, "assistant-manifest-invalid")
 
     def test_outdated_artifact_lineage_is_closed_before_lifecycle_actions(self) -> None:
         self.assertTrue(local_registry.is_digest_ref(LEGACY_ASSISTANT_IMAGE))
