@@ -68,21 +68,22 @@ class MarketplaceImageTests(unittest.TestCase):
         self.assertTrue(marketplace.is_digest_image(spec.image))
         self.assertEqual((spec.port, spec.health_path), (8080, "/health"))
         self.assertFalse(spec.db)
-        self.assertEqual(spec.allowed_hosts, ("api.open-meteo.com", "geocoding-api.open-meteo.com"))
+        self.assertEqual(spec.allowed_hosts, ("api.x.com",))
         self.assertTrue(spec.first_party)
         self.assertEqual(
             dict(spec.required_image_labels),
             {"org.shimpz.assistant.id": "shimpz-assistant", "org.shimpz.assistant.api": "1"},
         )
         self.assertIsNotNone(spec.assistant)
-        self.assertEqual(set(spec.assistant.powers), {"search-location", "current-weather", "daily-forecast"})
-        self.assertEqual(spec.assistant.powers["search-location"].path, "/v1/powers/search-location")
+        self.assertEqual(set(spec.assistant.powers), {"public-user-lookup", "identity-me", "create-post", "delete-post"})
+        self.assertEqual(spec.assistant.powers["identity-me"].path, "/v1/powers/identity-me")
+        self.assertEqual(len(spec.assistant.secrets), 5)
 
-    def test_weather_powers_expose_closed_runtime_schemas_without_approval_prompts(self) -> None:
+    def test_x_powers_expose_closed_runtime_schemas_and_explicit_approval(self) -> None:
         powers = marketplace.APPS["shimpz-assistant"].assistant.powers
 
-        for power in powers.values():
-            self.assertEqual(power.approval, "none")
+        for power_id, power in powers.items():
+            self.assertEqual(power.approval, "each-run" if power_id in {"create-post", "delete-post"} else "none")
             self.assertEqual(power.input_schema["type"], "object")
             self.assertFalse(power.input_schema["additionalProperties"])
             self.assertFalse(power.output_schema["additionalProperties"])
@@ -122,34 +123,27 @@ class MarketplaceImageTests(unittest.TestCase):
 
     def test_shimpz_assistant_power_input_and_output_contracts_are_closed(self) -> None:
         self.assertEqual(
-            marketplace.validate_power_input("shimpz-assistant", "search-location", {"query": " Lisbon "}),
-            {"query": "Lisbon", "limit": 5},
+            marketplace.validate_power_input("shimpz-assistant", "public-user-lookup", {"username": "XDevelopers"}),
+            {"username": "XDevelopers"},
         )
         self.assertEqual(
             marketplace.validate_power_input(
                 "shimpz-assistant",
-                "daily-forecast",
-                {"latitude": 38.72, "longitude": -9.14, "days": 3},
+                "create-post",
+                {"text": "Hello from Shimpz"},
             ),
-            {"latitude": 38.72, "longitude": -9.14, "days": 3},
+            {"text": "Hello from Shimpz"},
         )
-        current = {
-            "observed_at": "2026-07-18T10:00",
-            "temperature_c": 22.5,
-            "apparent_temperature_c": 22.0,
-            "wind_speed_kmh": 11.2,
-            "weather_code": 1,
-            "timezone": "Europe/Lisbon",
-        }
+        current = {"id": "2244994945", "name": "X Developers", "username": "XDevelopers"}
         self.assertEqual(
-            marketplace.validate_power_output("shimpz-assistant", "current-weather", current),
+            marketplace.validate_power_output("shimpz-assistant", "identity-me", current),
             current,
         )
-        for payload in ({"query": 12}, {"query": "x"}, {"query": "Lisbon", "shell": "id"}, []):
+        for payload in ({"username": 12}, {"username": "bad-name"}, {"username": "XDevelopers", "shell": "id"}, []):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
-                marketplace.validate_power_input("shimpz-assistant", "search-location", payload)
+                marketplace.validate_power_input("shimpz-assistant", "public-user-lookup", payload)
         with self.assertRaises(ValueError):
-            marketplace.validate_power_output("shimpz-assistant", "current-weather", current | {"path": "/host/x"})
+            marketplace.validate_power_output("shimpz-assistant", "identity-me", current | {"path": "/host/x"})
 
 
 if __name__ == "__main__":

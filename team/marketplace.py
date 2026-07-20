@@ -39,12 +39,20 @@ class PowerSpec:
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
     approval: Literal["none", "once", "each-run"] = "none"
+    secrets: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SecretSpec:
+    name: str
+    summary: str
 
 
 @dataclass(frozen=True, slots=True)
 class AssistantContract:
     rpc_command: str
     powers: dict[str, PowerSpec]
+    secrets: dict[str, SecretSpec]
 
 
 @dataclass(frozen=True)
@@ -88,6 +96,10 @@ APPS: dict[str, AppSpec] = {
             rpc_command=assistant_contract.ASSISTANT_RPC_COMMAND,
             powers={
                 power_id: PowerSpec(**contract) for power_id, contract in assistant_contract.power_contracts().items()
+            },
+            secrets={
+                secret_id: SecretSpec(**contract)
+                for secret_id, contract in assistant_contract.secret_contracts().items()
             },
         ),
     ),

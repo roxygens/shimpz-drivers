@@ -2,152 +2,131 @@
 
 The hosted and single-owner controllers deliberately share this module so the
 Brain never sees a Power that one runtime validates differently from the other.
-Artifact bytes and Docker policy remain controller-owned release data.
+Secret declarations are public metadata; values remain Controller-owned.
 """
 
 from __future__ import annotations
 
-import math
+import re
 from typing import Any
 
 ASSISTANT_ID = "shimpz-assistant"
 ASSISTANT_NAME = "Shimpz Assistant"
-ASSISTANT_SUMMARY = "Search places and inspect current and forecast weather through Open-Meteo."
+ASSISTANT_SUMMARY = "Read public X profiles and manage approved Posts for one connected X account."
 ASSISTANT_RPC_COMMAND = "/usr/local/bin/shimpz-assistant-rpc"
-ASSISTANT_ALLOWED_HOSTS = (
-    "api.open-meteo.com",
-    "geocoding-api.open-meteo.com",
-)
+ASSISTANT_ALLOWED_HOSTS = ("api.x.com",)
 MAX_HELP_BYTES = 32 * 1024
 HELP_LOCALES = frozenset({"en", "pt", "es", "zh", "fr", "de", "ja", "ar"})
+_USERNAME = re.compile(r"[A-Za-z0-9_]{1,15}")
+_SNOWFLAKE = re.compile(r"[0-9]{1,19}")
+
+
+def secret_contracts() -> dict[str, dict[str, str]]:
+    """Return fresh public metadata; no secret value or transport hint lives here."""
+    return {
+        "x-bearer-token": {
+            "name": "X Bearer Token",
+            "summary": "App-only token used exclusively for public X profile reads.",
+        },
+        "x-api-key": {
+            "name": "X API Key",
+            "summary": "OAuth 1.0a consumer key identifying the connected X application.",
+        },
+        "x-api-key-secret": {
+            "name": "X API Key Secret",
+            "summary": "OAuth 1.0a consumer secret used to sign account requests.",
+        },
+        "x-access-token": {
+            "name": "X Access Token",
+            "summary": "OAuth 1.0a token identifying the connected X account.",
+        },
+        "x-access-token-secret": {
+            "name": "X Access Token Secret",
+            "summary": "OAuth 1.0a token secret used to sign account requests.",
+        },
+    }
+
+
+def _user_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "pattern": "^[0-9]{1,19}$"},
+            "name": {"type": "string", "minLength": 1, "maxLength": 80},
+            "username": {"type": "string", "pattern": "^[A-Za-z0-9_]{1,15}$"},
+        },
+        "required": ["id", "name", "username"],
+        "additionalProperties": False,
+    }
 
 
 def power_contracts() -> dict[str, dict[str, Any]]:
     """Return fresh closed schemas so callers cannot mutate another registry."""
-    coordinates = {
-        "latitude": {"type": "number", "minimum": -90, "maximum": 90},
-        "longitude": {"type": "number", "minimum": -180, "maximum": 180},
-    }
+    oauth = ("x-api-key", "x-api-key-secret", "x-access-token", "x-access-token-secret")
     return {
-        "search-location": {
+        "public-user-lookup": {
             "method": "POST",
-            "path": "/v1/powers/search-location",
-            "summary": "Find geographic coordinates for a city or postal code.",
+            "path": "/v1/powers/public-user-lookup",
+            "summary": "Read one public X profile by username.",
             "input_schema": {
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string", "minLength": 2, "maxLength": 100},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-                },
-                "required": ["query"],
+                "properties": {"username": {"type": "string", "pattern": "^[A-Za-z0-9_]{1,15}$"}},
+                "required": ["username"],
                 "additionalProperties": False,
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "locations": {
-                        "type": "array",
-                        "maxItems": 10,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string", "minLength": 1, "maxLength": 160},
-                                "country": {"type": "string", "maxLength": 120},
-                                "latitude": coordinates["latitude"],
-                                "longitude": coordinates["longitude"],
-                                "timezone": {"type": "string", "minLength": 1, "maxLength": 100},
-                            },
-                            "required": ["name", "country", "latitude", "longitude", "timezone"],
-                            "additionalProperties": False,
-                        },
-                    }
-                },
-                "required": ["locations"],
-                "additionalProperties": False,
-            },
+            "output_schema": _user_schema(),
             "approval": "none",
+            "secrets": ("x-bearer-token",),
         },
-        "current-weather": {
+        "identity-me": {
             "method": "POST",
-            "path": "/v1/powers/current-weather",
-            "summary": "Read the current weather for one coordinate.",
-            "input_schema": {
-                "type": "object",
-                "properties": coordinates,
-                "required": ["latitude", "longitude"],
-                "additionalProperties": False,
-            },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "observed_at": {"type": "string", "minLength": 1, "maxLength": 64},
-                    "temperature_c": {"type": "number"},
-                    "apparent_temperature_c": {"type": "number"},
-                    "wind_speed_kmh": {"type": "number", "minimum": 0},
-                    "weather_code": {"type": "integer", "minimum": 0, "maximum": 999},
-                    "timezone": {"type": "string", "minLength": 1, "maxLength": 100},
-                },
-                "required": [
-                    "observed_at",
-                    "temperature_c",
-                    "apparent_temperature_c",
-                    "wind_speed_kmh",
-                    "weather_code",
-                    "timezone",
-                ],
-                "additionalProperties": False,
-            },
+            "path": "/v1/powers/identity-me",
+            "summary": "Read the identity of the connected X account.",
+            "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "output_schema": _user_schema(),
             "approval": "none",
+            "secrets": oauth,
         },
-        "daily-forecast": {
+        "create-post": {
             "method": "POST",
-            "path": "/v1/powers/daily-forecast",
-            "summary": "Read a daily weather forecast for one coordinate.",
+            "path": "/v1/powers/create-post",
+            "summary": "Publish one Post from the connected X account after explicit approval.",
             "input_schema": {
                 "type": "object",
-                "properties": {
-                    **coordinates,
-                    "days": {"type": "integer", "minimum": 1, "maximum": 16},
-                },
-                "required": ["latitude", "longitude"],
+                "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 280}},
+                "required": ["text"],
                 "additionalProperties": False,
             },
             "output_schema": {
                 "type": "object",
                 "properties": {
-                    "timezone": {"type": "string", "minLength": 1, "maxLength": 100},
-                    "days": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 16,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "date": {"type": "string", "minLength": 1, "maxLength": 32},
-                                "temperature_min_c": {"type": "number"},
-                                "temperature_max_c": {"type": "number"},
-                                "precipitation_probability_max": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "maximum": 100,
-                                },
-                                "weather_code": {"type": "integer", "minimum": 0, "maximum": 999},
-                            },
-                            "required": [
-                                "date",
-                                "temperature_min_c",
-                                "temperature_max_c",
-                                "precipitation_probability_max",
-                                "weather_code",
-                            ],
-                            "additionalProperties": False,
-                        },
-                    },
+                    "id": {"type": "string", "pattern": "^[0-9]{1,19}$"},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 280},
                 },
-                "required": ["timezone", "days"],
+                "required": ["id", "text"],
                 "additionalProperties": False,
             },
-            "approval": "none",
+            "approval": "each-run",
+            "secrets": oauth,
+        },
+        "delete-post": {
+            "method": "POST",
+            "path": "/v1/powers/delete-post",
+            "summary": "Delete one Post owned by the connected X account after explicit approval.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"id": {"type": "string", "pattern": "^[0-9]{1,19}$"}},
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+            "output_schema": {
+                "type": "object",
+                "properties": {"deleted": {"const": True}},
+                "required": ["deleted"],
+                "additionalProperties": False,
+            },
+            "approval": "each-run",
+            "secrets": oauth,
         },
     }
 
@@ -166,144 +145,61 @@ def _bounded_text(value: object, *, minimum: int, maximum: int, field: str) -> s
     return value
 
 
-def _number(value: object, *, minimum: float | None = None, maximum: float | None = None) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ValueError("coordinate is invalid")
-    result = float(value)
-    if (
-        not math.isfinite(result)
-        or (minimum is not None and result < minimum)
-        or (maximum is not None and result > maximum)
-    ):
-        raise ValueError("coordinate is invalid")
-    return result
-
-
-def _integer(value: object, *, minimum: int, maximum: int, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
-        raise ValueError(f"{field} is invalid")
+def _username(value: object) -> str:
+    if not isinstance(value, str) or _USERNAME.fullmatch(value) is None:
+        raise ValueError("username is invalid")
     return value
 
 
-def _coordinates(payload: dict[str, object]) -> tuple[float, float]:
-    return (
-        _number(payload["latitude"], minimum=-90, maximum=90),
-        _number(payload["longitude"], minimum=-180, maximum=180),
-    )
+def _snowflake(value: object) -> str:
+    if not isinstance(value, str) or _SNOWFLAKE.fullmatch(value) is None:
+        raise ValueError("id is invalid")
+    return value
 
 
 def validate_power_input(assistant_id: str, power: str, payload: object) -> dict[str, object]:
     if assistant_id != ASSISTANT_ID:
         raise ValueError("the Power has no declared input contract")
-    if power == "search-location":
-        safe = _closed_object(payload, {"query", "limit"}, required={"query"})
-        raw_query = safe["query"]
-        if not isinstance(raw_query, str):
-            raise ValueError("query is invalid")
-        query = _bounded_text(raw_query.strip(), minimum=2, maximum=100, field="query")
-        limit = _integer(safe.get("limit", 5), minimum=1, maximum=10, field="limit")
-        return {"query": query, "limit": limit}
-    if power == "current-weather":
-        safe = _closed_object(payload, {"latitude", "longitude"}, required={"latitude", "longitude"})
-        latitude, longitude = _coordinates(safe)
-        return {"latitude": latitude, "longitude": longitude}
-    if power == "daily-forecast":
-        safe = _closed_object(
-            payload,
-            {"latitude", "longitude", "days"},
-            required={"latitude", "longitude"},
-        )
-        latitude, longitude = _coordinates(safe)
-        days = _integer(safe.get("days", 7), minimum=1, maximum=16, field="days")
-        return {"latitude": latitude, "longitude": longitude, "days": days}
+    if power == "public-user-lookup":
+        safe = _closed_object(payload, {"username"}, required={"username"})
+        return {"username": _username(safe["username"])}
+    if power == "identity-me":
+        _closed_object(payload, set(), required=set())
+        return {}
+    if power == "create-post":
+        safe = _closed_object(payload, {"text"}, required={"text"})
+        return {"text": _bounded_text(safe["text"], minimum=1, maximum=280, field="text")}
+    if power == "delete-post":
+        safe = _closed_object(payload, {"id"}, required={"id"})
+        return {"id": _snowflake(safe["id"])}
     raise ValueError("the Power has no declared input contract")
 
 
-def _location(value: object) -> dict[str, object]:
-    safe = _closed_object(
-        value,
-        {"name", "country", "latitude", "longitude", "timezone"},
-        required={"name", "country", "latitude", "longitude", "timezone"},
-    )
-    latitude, longitude = _coordinates(safe)
-    country = _bounded_text(safe["country"], minimum=0, maximum=120, field="country")
+def _user(payload: object) -> dict[str, object]:
+    safe = _closed_object(payload, {"id", "name", "username"}, required={"id", "name", "username"})
     return {
-        "name": _bounded_text(safe["name"], minimum=1, maximum=160, field="name"),
-        "country": country,
-        "latitude": latitude,
-        "longitude": longitude,
-        "timezone": _bounded_text(safe["timezone"], minimum=1, maximum=100, field="timezone"),
+        "id": _snowflake(safe["id"]),
+        "name": _bounded_text(safe["name"], minimum=1, maximum=80, field="name"),
+        "username": _username(safe["username"]),
     }
-
-
-def _finite_measurement(value: object, *, minimum: float | None = None) -> float:
-    return _number(value, minimum=minimum)
 
 
 def validate_power_output(assistant_id: str, power: str, payload: object) -> dict[str, object]:
     if assistant_id != ASSISTANT_ID:
         raise ValueError("the Power has no declared output contract")
-    if power == "search-location":
-        safe = _closed_object(payload, {"locations"}, required={"locations"})
-        locations = safe["locations"]
-        if not isinstance(locations, list) or len(locations) > 10:
-            raise ValueError("locations are invalid")
-        return {"locations": [_location(location) for location in locations]}
-    if power == "current-weather":
-        keys = {
-            "observed_at",
-            "temperature_c",
-            "apparent_temperature_c",
-            "wind_speed_kmh",
-            "weather_code",
-            "timezone",
-        }
-        safe = _closed_object(payload, keys, required=keys)
+    if power in {"public-user-lookup", "identity-me"}:
+        return _user(payload)
+    if power == "create-post":
+        safe = _closed_object(payload, {"id", "text"}, required={"id", "text"})
         return {
-            "observed_at": _bounded_text(safe["observed_at"], minimum=1, maximum=64, field="observed_at"),
-            "temperature_c": _finite_measurement(safe["temperature_c"]),
-            "apparent_temperature_c": _finite_measurement(safe["apparent_temperature_c"]),
-            "wind_speed_kmh": _finite_measurement(safe["wind_speed_kmh"], minimum=0),
-            "weather_code": _integer(safe["weather_code"], minimum=0, maximum=999, field="weather_code"),
-            "timezone": _bounded_text(safe["timezone"], minimum=1, maximum=100, field="timezone"),
+            "id": _snowflake(safe["id"]),
+            "text": _bounded_text(safe["text"], minimum=1, maximum=280, field="text"),
         }
-    if power == "daily-forecast":
-        safe = _closed_object(payload, {"timezone", "days"}, required={"timezone", "days"})
-        days = safe["days"]
-        if not isinstance(days, list) or not 1 <= len(days) <= 16:
-            raise ValueError("forecast days are invalid")
-        normalized_days: list[dict[str, object]] = []
-        keys = {
-            "date",
-            "temperature_min_c",
-            "temperature_max_c",
-            "precipitation_probability_max",
-            "weather_code",
-        }
-        for day in days:
-            item = _closed_object(day, keys, required=keys)
-            minimum = _finite_measurement(item["temperature_min_c"])
-            maximum = _finite_measurement(item["temperature_max_c"])
-            if minimum > maximum:
-                raise ValueError("forecast temperatures are invalid")
-            normalized_days.append(
-                {
-                    "date": _bounded_text(item["date"], minimum=1, maximum=32, field="date"),
-                    "temperature_min_c": minimum,
-                    "temperature_max_c": maximum,
-                    "precipitation_probability_max": _integer(
-                        item["precipitation_probability_max"],
-                        minimum=0,
-                        maximum=100,
-                        field="precipitation_probability_max",
-                    ),
-                    "weather_code": _integer(item["weather_code"], minimum=0, maximum=999, field="weather_code"),
-                }
-            )
-        return {
-            "timezone": _bounded_text(safe["timezone"], minimum=1, maximum=100, field="timezone"),
-            "days": normalized_days,
-        }
+    if power == "delete-post":
+        safe = _closed_object(payload, {"deleted"}, required={"deleted"})
+        if safe["deleted"] is not True:
+            raise ValueError("deleted is invalid")
+        return {"deleted": True}
     raise ValueError("the Power has no declared output contract")
 
 

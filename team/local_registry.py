@@ -34,6 +34,13 @@ class PowerSpec:
     input_schema: dict[str, object]
     output_schema: dict[str, object]
     approval: Literal["none", "once", "each-run"]
+    secrets: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SecretSpec:
+    name: str
+    summary: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +52,7 @@ class AssistantSpec:
     rpc_command: str
     health_path: str
     powers: dict[str, PowerSpec]
+    secrets: dict[str, SecretSpec]
     allowed_hosts: tuple[str, ...]
 
 
@@ -85,6 +93,10 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
         rpc_command=assistant_contract.ASSISTANT_RPC_COMMAND,
         health_path="/healthz",
         powers={power_id: PowerSpec(**contract) for power_id, contract in assistant_contract.power_contracts().items()},
+        secrets={
+            secret_id: SecretSpec(**contract)
+            for secret_id, contract in assistant_contract.secret_contracts().items()
+        },
         allowed_hosts=assistant_contract.ASSISTANT_ALLOWED_HOSTS,
     )
     return {shimpz_assistant.assistant_id: shimpz_assistant}
