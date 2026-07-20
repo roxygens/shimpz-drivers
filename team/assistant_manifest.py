@@ -20,6 +20,8 @@ MAX_ALLOWED_HOSTS = 32
 MAX_SECRETS = 32
 MAX_POWER_SECRETS = 16
 MAX_POWERS = 128
+MAX_IDENTIFIER_LENGTH = 80
+MAX_SECRET_ID_LENGTH = 64
 DEFAULT_CACHE_ENTRIES = 256
 _ID_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
 _SECRET_VALUE_RE = re.compile(
@@ -90,8 +92,8 @@ def canonical_allowed_hosts(value: object) -> tuple[str, ...]:
     return tuple(sorted(hosts))
 
 
-def _identifier(value: object, *, kind: str) -> str:
-    if not isinstance(value, str) or len(value) > 80 or _ID_RE.fullmatch(value) is None:
+def _identifier(value: object, *, kind: str, maximum: int = MAX_IDENTIFIER_LENGTH) -> str:
+    if not isinstance(value, str) or len(value) > maximum or _ID_RE.fullmatch(value) is None:
         raise ManifestError(f"Assistant {kind} identifier is invalid")
     return value
 
@@ -117,7 +119,7 @@ def canonical_secret_declarations(value: object) -> tuple[SecretDeclaration, ...
         raise ManifestError("Assistant secret declarations are invalid")
     declarations: list[SecretDeclaration] = []
     for secret_id, metadata in value.items():
-        identifier = _identifier(secret_id, kind="secret")
+        identifier = _identifier(secret_id, kind="secret", maximum=MAX_SECRET_ID_LENGTH)
         if not isinstance(metadata, list | tuple) or len(metadata) != 2:
             raise ManifestError("Assistant secret declaration is invalid")
         declarations.append(
@@ -144,7 +146,7 @@ def canonical_power_secret_refs(
         identifier = _identifier(power_id, kind="Power")
         if not isinstance(refs, list | tuple) or len(refs) > MAX_POWER_SECRETS:
             raise ManifestError("Assistant Power secret references are invalid")
-        normalized = tuple(_identifier(secret_id, kind="secret") for secret_id in refs)
+        normalized = tuple(_identifier(secret_id, kind="secret", maximum=MAX_SECRET_ID_LENGTH) for secret_id in refs)
         if len(normalized) != len(set(normalized)) or not set(normalized) <= declared_ids:
             raise ManifestError("Assistant Power secret references are invalid")
         used.update(normalized)

@@ -81,6 +81,26 @@ class Container:
 class AssistantManifestTests(unittest.TestCase):
     def test_manifest_limit_matches_the_public_sdk_contract(self):
         self.assertEqual(assistant_manifest.MAX_MANIFEST_BYTES, 256 * 1024)
+        self.assertEqual(assistant_manifest.MAX_SECRET_ID_LENGTH, 64)
+
+    def test_secret_ids_share_the_encrypted_store_bound(self):
+        accepted = "s" + ("a" * 63)
+        rejected = "s" + ("a" * 64)
+
+        contract = assistant_manifest.parse_manifest_contract(
+            manifest(secrets={accepted: ("Bounded", "Exactly sixty-four characters.")})
+        )
+        self.assertEqual(contract.secrets[0].id, accepted)
+
+        for content in (
+            manifest(secrets={rejected: ("Too long", "Exceeds the store bound.")}),
+            manifest(secrets={accepted: ("Bounded", "Exactly sixty-four characters.")}).replace(
+                f'secrets = ["{accepted}"]'.encode(),
+                f'secrets = ["{rejected}"]'.encode(),
+            ),
+        ):
+            with self.subTest(content=content), self.assertRaises(assistant_manifest.ManifestError):
+                assistant_manifest.parse_manifest_contract(content)
 
     def test_reads_and_canonicalizes_complete_security_contract(self):
         content = manifest(
