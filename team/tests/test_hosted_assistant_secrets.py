@@ -7,6 +7,7 @@ import tempfile
 import types
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from http import HTTPStatus
 from pathlib import Path
 from unittest import mock
@@ -96,11 +97,29 @@ class HostedAssistantSecretTests(unittest.TestCase):
         self.journal = app.power_journal.PowerJournal(root / "journal" / "journal.sqlite3")
         self.addCleanup(self.journal.close)
         self.runtime = _Runtime()
-        contract = app.marketplace.APPS[ASSISTANT_ID].assistant
-        assert contract is not None
-        self.contract = contract
+        trusted_contract = app.marketplace.APPS[ASSISTANT_ID].assistant
+        assert trusted_contract is not None
+        secret_contract = {
+            secret_id: app.marketplace.SecretSpec(secret_id.replace("-", " ").title(), "Test credential.")
+            for secret_id in SECRET_VALUES
+        }
+        self.contract = replace(
+            trusted_contract,
+            powers={
+                power_id: replace(
+                    power,
+                    secrets=(
+                        tuple(SECRET_VALUES)[:1] if power_id == "public-user-lookup" else tuple(SECRET_VALUES)[1:]
+                    ),
+                    connections=(),
+                )
+                for power_id, power in trusted_contract.powers.items()
+            },
+            secrets=secret_contract,
+            connections={},
+        )
         self.assistant_container = types.SimpleNamespace(id="b" * 64)
-        self.active = app._ActiveAssistant(ASSISTANT_ID, contract, self.assistant_container)
+        self.active = app._ActiveAssistant(ASSISTANT_ID, self.contract, self.assistant_container)
         self.anchor = types.SimpleNamespace(
             id=ANCHOR_ID,
             labels={"team.name": "Marketing", "team.owner": "account_1"},
@@ -391,6 +410,119 @@ class HostedAssistantSecretTests(unittest.TestCase):
         self.assertIsNone(self.challenge_store.current(TEAM_ID))
         self.assertTrue(pending.id)
         self.assertFalse(self.secret_store.metadata(TEAM_ID, ASSISTANT_ID, ("x-bearer-token",))[0].configured)
+
+    def test_hosted_rotation_is_atomic_masked_and_invalidates_a_stale_challenge(self) -> None:
+        declared = {
+            "primary-token": app.marketplace.SecretSpec("Primary token", "Primary credential."),
+            "secondary-token": app.marketplace.SecretSpec("Secondary token", "Secondary credential."),
+        }
+        contract = app.marketplace.AssistantContract("assistant-rpc", {}, declared)
+        container = types.SimpleNamespace(id="c" * 64)
+        active = app._ActiveAssistant(ASSISTANT_ID, contract, container)
+        spec = app._hosted_secret_spec(active)
+        original = {
+            "primary-token": "primary-original-credential",
+            "secondary-token": "secondary-original-credential",
+        }
+        replacement = "primary-rotated-credential"
+        self.secret_store.put_many(TEAM_ID, ASSISTANT_ID, original)
+        pending = self.challenge_store.create(
+            TEAM_ID,
+            (
+                app.assistant_secret_challenges.SecretRequirement(
+                    ASSISTANT_ID,
+                    "Shimpz Assistant",
+                    ("read-account",),
+                    (("primary-token", "Primary token", "Primary credential."),),
+                ),
+            ),
+            object(),
+        )
+        lease = app._AuthorizationLease(TEAM_ID, ANCHOR_ID, "account_1", ("account", "account_1"))
+        invalid = {
+            "assistant_id": ASSISTANT_ID,
+            "values": [
+                {"secret_id": "primary-token", "value": "must-not-commit"},
+                {"secret_id": "undeclared-token", "value": "attacker-controlled"},
+            ],
+        }
+        with _patched(
+            _require_current_authorization=lambda *_args, **_kwargs: self.anchor,
+            _installed_assistant=lambda *_args: (ASSISTANT_ID, contract, container),
+            _installed_assistant_secret_specs=lambda _team_id: (spec,),
+            _assistant_secrets=self.secret_store,
+            _assistant_secret_challenges=self.challenge_store,
+        ):
+            with self.assertRaises(app.ApiError) as rejected:
+                app._replace_assistant_secrets(TEAM_ID, invalid, lease)
+            self.assertEqual(rejected.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
+            self.assertEqual(self.challenge_store.current(TEAM_ID).id, pending.id)
+
+            response = app._replace_assistant_secrets(
+                TEAM_ID,
+                {
+                    "assistant_id": ASSISTANT_ID,
+                    "values": [{"secret_id": "primary-token", "value": replacement}],
+                },
+                lease,
+            )
+
+        stored = self.secret_store.resolve_many(TEAM_ID, ASSISTANT_ID, tuple(declared))
+        self.assertEqual(stored["primary-token"], replacement)
+        self.assertEqual(stored["secondary-token"], original["secondary-token"])
+        self.assertIsNone(self.challenge_store.current(TEAM_ID))
+        serialized = app.json.dumps(response)
+        for value in (*original.values(), replacement, "must-not-commit", "attacker-controlled"):
+            self.assertNotIn(value, serialized)
+        metadata = {item["id"]: item for item in response["assistants"][0]["secrets"]}
+        self.assertEqual(metadata["primary-token"]["mask"], app.assistant_secret_store.mask_secret(replacement))
+        self.assertTrue(metadata["secondary-token"]["configured"])
+
+    def test_hosted_rotation_is_rejected_before_authorization_or_storage_during_chat(self) -> None:
+        self.secret_store.put_many(TEAM_ID, ASSISTANT_ID, {"primary-token": "original-credential"})
+        before = self.secret_store.state_path.read_bytes()
+        lock = app._chat_lock_for(TEAM_ID)
+        self.assertTrue(lock.acquire(blocking=False))
+        try:
+            with (
+                _patched(
+                    _require_current_authorization=lambda *_args, **_kwargs: self.fail("authorization ran during chat"),
+                    _assistant_secrets=self.secret_store,
+                ),
+                self.assertRaises(app.ApiError) as rejected,
+            ):
+                app._replace_assistant_secrets(TEAM_ID, {}, object())
+        finally:
+            lock.release()
+
+        self.assertEqual(rejected.exception.status, HTTPStatus.CONFLICT)
+        self.assertEqual(self.secret_store.state_path.read_bytes(), before)
+
+    def test_hosted_rotation_route_is_rate_limited_and_never_cacheable(self) -> None:
+        body = {
+            "assistant_id": ASSISTANT_ID,
+            "values": [{"secret_id": "primary-token", "value": "private-value"}],
+        }
+        response = {"team_id": TEAM_ID, "assistants": []}
+        handler = _RouteHarness(body)
+        principal = ("account", "account_1")
+        with (
+            mock.patch.object(app, "_enforce_rate") as enforce,
+            mock.patch.object(app, "_replace_assistant_secrets", return_value=response) as replace_secrets,
+            mock.patch.object(app.audit, "log"),
+        ):
+            app.Handler._route_assistant_secrets(
+                handler,
+                "PUT",
+                ["v1", "teams", TEAM_ID, "assistant-secrets"],
+                TEAM_ID,
+                object(),
+                principal,
+            )
+
+        enforce.assert_called_once_with("secret", principal)
+        replace_secrets.assert_called_once_with(TEAM_ID, body, mock.ANY)
+        self.assertEqual(handler.sent, [(HTTPStatus.OK, response, True)])
 
     def test_chat_rechecks_a_pending_secret_challenge_after_acquiring_its_slot(self) -> None:
         requirement = app.assistant_secret_challenges.SecretRequirement(

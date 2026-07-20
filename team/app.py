@@ -273,6 +273,7 @@ _rate_limiters = {
     "install": _FixedWindowRateLimiter(INSTALL_RATE_LIMIT, INSTALL_RATE_WINDOW_SECONDS),
     "chat": _FixedWindowRateLimiter(CHAT_RATE_LIMIT, CHAT_RATE_WINDOW_SECONDS),
     "stream": _FixedWindowRateLimiter(CHAT_RATE_LIMIT, CHAT_RATE_WINDOW_SECONDS),
+    "secret": _FixedWindowRateLimiter(CHAT_RATE_LIMIT, CHAT_RATE_WINDOW_SECONDS),
     "stop": _FixedWindowRateLimiter(CHAT_RATE_LIMIT, CHAT_RATE_WINDOW_SECONDS),
     "file_upload": _FixedWindowRateLimiter(FILE_UPLOAD_RATE_LIMIT, FILE_UPLOAD_RATE_WINDOW_SECONDS),
 }
@@ -2116,23 +2117,62 @@ def _assistant_secret_inventory(
 ) -> dict[str, object]:
     with _lock_for(team_id):
         _require_current_authorization(team_id, lease, require_isolation=False)
-        specs: list[_HostedAssistantSecretSpec] = []
-        seen: set[str] = set()
         try:
-            containers = _team_app_containers(team_id)
-        except docker.errors.DockerException as exc:
-            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "installed Assistants could not be listed") from exc
-        for container in containers:
-            assistant_id = (container.labels or {}).get("team.app")
-            app_spec = marketplace.APPS.get(assistant_id) if isinstance(assistant_id, str) else None
-            if app_spec is None or app_spec.assistant is None:
-                continue
-            if assistant_id in seen:
-                raise ApiError(HTTPStatus.CONFLICT, "duplicate installed Assistant identity")
-            seen.add(assistant_id)
-            specs.append(_hosted_secret_spec(_ActiveAssistant(assistant_id, app_spec.assistant, container)))
+            return assistant_secret_flow.inventory_payload(
+                team_id,
+                _installed_assistant_secret_specs(team_id),
+                _assistant_secrets,
+            )
+        except assistant_secret_store.AssistantSecretError as exc:
+            _raise_assistant_secret_error(exc)
+    raise AssertionError("unreachable")
+
+
+def _installed_assistant_secret_specs(team_id: str) -> tuple[_HostedAssistantSecretSpec, ...]:
+    specs: list[_HostedAssistantSecretSpec] = []
+    seen: set[str] = set()
+    try:
+        containers = _team_app_containers(team_id)
+    except docker.errors.DockerException as exc:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "installed Assistants could not be listed") from exc
+    for container in containers:
+        assistant_id = (container.labels or {}).get("team.app")
+        app_spec = marketplace.APPS.get(assistant_id) if isinstance(assistant_id, str) else None
+        if app_spec is None or app_spec.assistant is None:
+            continue
+        if assistant_id in seen:
+            raise ApiError(HTTPStatus.CONFLICT, "duplicate installed Assistant identity")
+        seen.add(assistant_id)
+        specs.append(_hosted_secret_spec(_ActiveAssistant(assistant_id, app_spec.assistant, container)))
+    return tuple(specs)
+
+
+@_serialize_against_team_chat
+def _replace_assistant_secrets(
+    team_id: str,
+    body: object,
+    lease: _AuthorizationLease,
+) -> dict[str, object]:
+    """Atomically rotate declared credentials after revalidating the exact installed Assistant."""
+    with _lock_for(team_id):
+        _require_current_authorization(team_id, lease, require_isolation=False)
+        if not isinstance(body, dict):
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "Assistant secret replacement is invalid")
         try:
-            return assistant_secret_flow.inventory_payload(team_id, specs, _assistant_secrets)
+            assistant_id, contract, container = _installed_assistant(team_id, body.get("assistant_id"))
+            spec = _hosted_secret_spec(_ActiveAssistant(assistant_id, contract, container))
+            replacements = assistant_secret_flow.replacement_values(spec, body)
+        except (marketplace.MarketplaceError, assistant_secret_flow.SecretFlowError) as exc:
+            raise ApiError(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "Assistant secret replacement is invalid",
+            ) from exc
+        inventory_specs = _installed_assistant_secret_specs(team_id)
+        # A paused continuation is generation-bound; it must never overwrite this rotation later.
+        _assistant_secret_challenges.cancel_team(team_id)
+        try:
+            _assistant_secrets.put_many(team_id, assistant_id, replacements)
+            return assistant_secret_flow.inventory_payload(team_id, inventory_specs, _assistant_secrets)
         except assistant_secret_store.AssistantSecretError as exc:
             _raise_assistant_secret_error(exc)
     raise AssertionError("unreachable")
@@ -3485,7 +3525,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._route_apps(method, parts, team_id, principal, lease)
                 return
             if sub == "assistant-secrets":
-                self._route_assistant_secrets(method, parts, team_id, lease)
+                self._route_assistant_secrets(method, parts, team_id, lease, principal)
                 return
             if sub == "assistants":
                 if len(parts) >= 6 and parts[5] == "help" and (parsed.query or parsed.fragment or "%" in parsed.path):
@@ -3512,6 +3552,7 @@ class Handler(BaseHTTPRequestHandler):
         parts: list[str],
         team_id: str,
         lease: _AuthorizationLease,
+        principal: tuple[str, str | None],
     ) -> None:
         if method == "GET" and len(parts) == 4:
             self._send_json(
@@ -3519,6 +3560,18 @@ class Handler(BaseHTTPRequestHandler):
                 _assistant_secret_inventory(team_id, lease),
                 no_store=True,
             )
+            return
+        if method == "PUT" and len(parts) == 4:
+            _enforce_rate("secret", principal)
+            body = self._read_body(max_bytes=MAX_ASSISTANT_SECRET_BODY_BYTES)
+            result = _replace_assistant_secrets(team_id, body, lease)
+            audit.log(
+                "assistant_secret_replace",
+                team_id,
+                result="ok",
+                assistant=body.get("assistant_id") if isinstance(body, dict) else None,
+            )
+            self._send_json(HTTPStatus.OK, result, no_store=True)
             return
         raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
 
