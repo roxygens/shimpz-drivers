@@ -13,10 +13,13 @@ from http import HTTPStatus
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 TEAM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEAM))
 
+import assistant_secret_challenges
+import assistant_secret_store
 import brain_runtime_client
 import inference_config
 import local_app
@@ -25,17 +28,14 @@ import local_healthcheck
 import local_registry
 import local_token_store
 
-SEARCH_INPUT = {"query": "Lisbon", "limit": 5}
-SEARCH_RESULT = {
-    "locations": [
-        {
-            "name": "Lisbon",
-            "country": "Portugal",
-            "latitude": 38.72,
-            "longitude": -9.14,
-            "timezone": "Europe/Lisbon",
-        }
-    ]
+LOOKUP_INPUT = {"username": "OpenAI"}
+LOOKUP_RESULT = {"id": "123456789", "name": "OpenAI", "username": "OpenAI"}
+ASSISTANT_SECRET_VALUES = {
+    "x-bearer-token": "bearer-test-credential-123456789",
+    "x-api-key": "api-key-test-credential-123456789",
+    "x-api-key-secret": "api-secret-test-credential-123456789",
+    "x-access-token": "access-token-test-credential-123456789",
+    "x-access-token-secret": "access-secret-test-credential-123456789",
 }
 CURRENT_ASSISTANT_IMAGE = "ghcr.io/roxygens/shimpz-space@sha256:" + "b" * 64
 LEGACY_ASSISTANT_IMAGE = "ghcr.io/roxygens/shimpz-space@sha256:" + "a" * 64
@@ -59,7 +59,13 @@ class LocalContractTests(unittest.TestCase):
             path.write_text(json.dumps({"schema": 1, "shimpz_assistant_image": image}), encoding="utf-8")
             return local_registry.load_registry(path)
 
-    def _chat_controller(self, directory: str, runtime) -> local_app.LocalController:
+    def _chat_controller(
+        self,
+        directory: str,
+        runtime,
+        *,
+        configure_secrets: bool = True,
+    ) -> local_app.LocalController:
         image = "127.0.0.1:5000/shimpz/shimpz-assistant@sha256:" + "a" * 64
         controller = object.__new__(local_app.LocalController)
         controller.space_id = "local-space"
@@ -75,6 +81,17 @@ class LocalContractTests(unittest.TestCase):
             Path(directory) / "power-journal" / "journal.sqlite3"
         )
         self.addCleanup(controller.power_state.close)
+        controller.assistant_secrets = assistant_secret_store.AssistantSecretStore(
+            Path(directory) / "assistant-secrets" / "state" / "secrets.json",
+            Path(directory) / "assistant-secrets" / "key" / "aes256.key",
+        )
+        controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
+        if configure_secrets:
+            controller.assistant_secrets.put_many(
+                "team_1",
+                "shimpz-assistant",
+                ASSISTANT_SECRET_VALUES,
+            )
         controller._blocked_power_workloads = set()
         controller._locks = tuple(threading.RLock() for _ in range(64))
         controller._active_chat_guard = threading.Lock()
@@ -94,8 +111,23 @@ class LocalContractTests(unittest.TestCase):
         controller._active_chat_assistants = lambda _team_id, _network: (
             local_app._ActiveAssistant(controller.registry["shimpz-assistant"], container.id, container),
         )
-        controller._active_assistant_genesis = lambda _active: "Use only the declared weather Powers."
+        controller._active_assistant_genesis = lambda _active: "Use only the declared X Powers."
         return controller
+
+    @staticmethod
+    def _secret_submission(challenge: dict[str, object]) -> dict[str, object]:
+        return {
+            "challenge_id": challenge["challenge_id"],
+            "values": [
+                {
+                    "assistant_id": requirement["assistant_id"],
+                    "secret_id": secret["id"],
+                    "value": ASSISTANT_SECRET_VALUES[secret["id"]],
+                }
+                for requirement in challenge["requirements"]
+                for secret in requirement["secrets"]
+            ],
+        }
 
     def _lifecycle_controller(self) -> tuple[local_app.LocalController, SimpleNamespace, list[object]]:
         events: list[object] = []
@@ -106,6 +138,13 @@ class LocalContractTests(unittest.TestCase):
         controller._blocked_power_workloads = set()
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
         controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
+        secret_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(secret_directory.cleanup)
+        controller.assistant_secrets = assistant_secret_store.AssistantSecretStore(
+            Path(secret_directory.name) / "state" / "secrets.json",
+            Path(secret_directory.name) / "key" / "aes256.key",
+        )
+        controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
         controller._admit_assistant_allowed_hosts = lambda _container, spec: tuple(sorted(spec.allowed_hosts))
         spec = SimpleNamespace(
             assistant_id="shimpz-assistant",
@@ -172,15 +211,15 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(registry["shimpz-assistant"].name, "Shimpz Assistant")
         self.assertEqual(
             set(registry["shimpz-assistant"].powers),
-            {"search-location", "current-weather", "daily-forecast"},
+            {"public-user-lookup", "identity-me", "create-post", "delete-post"},
         )
         self.assertEqual(
-            registry["shimpz-assistant"].powers["search-location"].path,
-            "/v1/powers/search-location",
+            registry["shimpz-assistant"].powers["public-user-lookup"].path,
+            "/v1/powers/public-user-lookup",
         )
         self.assertEqual(
             registry["shimpz-assistant"].allowed_hosts,
-            ("api.open-meteo.com", "geocoding-api.open-meteo.com"),
+            ("api.x.com",),
         )
         invalid = (
             "ghcr.io/roxygens/shimpz-space:latest",
@@ -203,37 +242,37 @@ class LocalContractTests(unittest.TestCase):
 
     def test_shimpz_assistant_contract_is_closed_and_bounded(self) -> None:
         self.assertEqual(
-            local_registry.validate_power_input("shimpz-assistant", "search-location", {"query": " Lisbon "}),
-            SEARCH_INPUT,
+            local_registry.validate_power_input("shimpz-assistant", "public-user-lookup", LOOKUP_INPUT),
+            LOOKUP_INPUT,
         )
         self.assertEqual(
             local_registry.validate_power_input(
                 "shimpz-assistant",
-                "current-weather",
-                {"latitude": 38.72, "longitude": -9.14},
+                "identity-me",
+                {},
             ),
-            {"latitude": 38.72, "longitude": -9.14},
+            {},
         )
         self.assertEqual(
             local_registry.validate_power_input(
                 "shimpz-assistant",
-                "daily-forecast",
-                {"latitude": 38.72, "longitude": -9.14},
+                "create-post",
+                {"text": "Hello from Shimpz"},
             ),
-            {"latitude": 38.72, "longitude": -9.14, "days": 7},
+            {"text": "Hello from Shimpz"},
         )
         self.assertEqual(
-            local_registry.validate_power_output("shimpz-assistant", "search-location", SEARCH_RESULT),
-            SEARCH_RESULT,
+            local_registry.validate_power_output("shimpz-assistant", "public-user-lookup", LOOKUP_RESULT),
+            LOOKUP_RESULT,
         )
-        for invalid in ({"query": ""}, {"query": 12}, {"query": "x\n"}, {"extra": True}, []):
+        for invalid in ({"username": ""}, {"username": 12}, {"username": "x\n"}, {"extra": True}, []):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                local_registry.validate_power_input("shimpz-assistant", "search-location", invalid)
+                local_registry.validate_power_input("shimpz-assistant", "public-user-lookup", invalid)
         with self.assertRaises(ValueError):
             local_registry.validate_power_output(
                 "shimpz-assistant",
-                "search-location",
-                SEARCH_RESULT | {"extra": True},
+                "public-user-lookup",
+                LOOKUP_RESULT | {"extra": True},
             )
 
     def test_identifiers_are_strict_and_bounded(self) -> None:
@@ -567,7 +606,291 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(runtime.context.api_key, key)
         self.assertEqual(runtime.context.team_name, "Marketing")
         self.assertEqual([assistant.id for assistant in runtime.context.assistants], ["shimpz-assistant"])
-        self.assertEqual(runtime.context.assistants[0].genesis, "Use only the declared weather Powers.")
+        self.assertEqual(runtime.context.assistants[0].genesis, "Use only the declared X Powers.")
+
+    def test_chat_collects_a_multi_secret_batch_before_any_power_side_effect(self) -> None:
+        requests = (
+            brain_runtime_client.PowerRequest(
+                interrupt_id="lookup",
+                assistant_id="shimpz-assistant",
+                power="public-user-lookup",
+                input=LOOKUP_INPUT,
+                approval="none",
+            ),
+            brain_runtime_client.PowerRequest(
+                interrupt_id="identity",
+                assistant_id="shimpz-assistant",
+                power="identity-me",
+                input={},
+                approval="none",
+            ),
+        )
+
+        class Runtime:
+            def start(self, _context, _message):
+                return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=requests)
+
+            def resume(self, _context, _results):
+                raise AssertionError("a paused Power batch must not reach resume")
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime(), configure_secrets=False)
+            controller.invoke = lambda *_args: self.fail("a Power ran before every secret was available")
+
+            response = controller.chat(
+                "team_1",
+                {"message": "Read my account", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                "openai",
+                "sk-test-0123456789",
+            )
+
+            with closing(sqlite3.connect(controller.power_state.path)) as connection:
+                pending_batches = connection.execute("SELECT COUNT(*) FROM batches").fetchone()
+            self.assertFalse(controller.assistant_secrets.state_path.exists())
+            self.assertFalse(controller.assistant_secrets.key_path.exists())
+
+        self.assertEqual(response["status"], "secrets-required")
+        self.assertEqual(response["turn_id"], response["challenge_id"])
+        self.assertEqual(len(response["requirements"]), 1)
+        requirement = response["requirements"][0]
+        self.assertEqual(requirement["power_ids"], ["identity-me", "public-user-lookup"])
+        self.assertEqual(
+            {secret["id"] for secret in requirement["secrets"]},
+            set(ASSISTANT_SECRET_VALUES),
+        )
+        self.assertNotIn(LOOKUP_INPUT["username"], repr(response))
+        self.assertEqual(pending_batches, (0,))
+
+    def test_secret_submission_is_exact_team_bound_and_single_use(self) -> None:
+        request = brain_runtime_client.PowerRequest(
+            interrupt_id="identity",
+            assistant_id="shimpz-assistant",
+            power="identity-me",
+            input={},
+            approval="none",
+        )
+
+        class Runtime:
+            def __init__(self) -> None:
+                self.resumes: list[dict[str, object]] = []
+
+            def start(self, _context, _message):
+                return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=(request,))
+
+            def resume(self, _context, results):
+                self.resumes.append(dict(results))
+                return brain_runtime_client.RuntimeTurn(status="completed", reply="Connected.", powers=())
+
+        runtime = Runtime()
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, runtime, configure_secrets=False)
+            invocations: list[tuple[str, str, object]] = []
+            controller.invoke = lambda team_id, assistant_id, power_id, payload: (
+                invocations.append((team_id, power_id, payload))
+                or {"assistant": assistant_id, "power": power_id, "result": LOOKUP_RESULT}
+            )
+            challenge = controller.chat(
+                "team_1",
+                {"message": "Who am I?", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                "openai",
+                "sk-test-0123456789",
+            )
+            exact = self._secret_submission(challenge)
+            values = exact["values"]
+            invalid_submissions = (
+                {**exact, "values": values[:-1]},
+                {
+                    **exact,
+                    "values": [
+                        *values,
+                        {
+                            "assistant_id": "shimpz-assistant",
+                            "secret_id": "undeclared-secret",
+                            "value": "must-not-be-stored",
+                        },
+                    ],
+                },
+                {**exact, "values": [values[0], *values]},
+                {**exact, "unexpected": True},
+            )
+            for invalid in invalid_submissions:
+                with self.subTest(invalid=invalid), self.assertRaises(local_app.ApiProblem) as rejected:
+                    controller.submit_chat_secrets(
+                        "team_1",
+                        invalid,
+                        "openai",
+                        "sk-test-0123456789",
+                    )
+                self.assertEqual(rejected.exception.code, "invalid-assistant-secrets")
+                self.assertIsNotNone(controller.secret_challenges.current("team_1"))
+
+            with self.assertRaises(local_app.ApiProblem) as isolated:
+                controller.submit_chat_secrets(
+                    "team_2",
+                    exact,
+                    "openai",
+                    "sk-test-0123456789",
+                )
+            self.assertEqual(isolated.exception.code, "assistant-secret-challenge-expired")
+
+            response = controller.submit_chat_secrets(
+                "team_1",
+                exact,
+                "openai",
+                "sk-test-0123456789",
+            )
+            with self.assertRaises(local_app.ApiProblem) as replay:
+                controller.submit_chat_secrets(
+                    "team_1",
+                    exact,
+                    "openai",
+                    "sk-test-0123456789",
+                )
+
+            configured_for_other_team = controller.assistant_secrets.metadata(
+                "team_2",
+                "shimpz-assistant",
+                tuple(ASSISTANT_SECRET_VALUES),
+            )
+
+        self.assertEqual(response["reply"], "Connected.")
+        self.assertEqual(invocations, [("team_1", "identity-me", {})])
+        self.assertEqual(runtime.resumes, [{"identity": LOOKUP_RESULT}])
+        self.assertEqual(replay.exception.code, "assistant-secret-challenge-expired")
+        self.assertTrue(all(not item.configured for item in configured_for_other_team))
+        self.assertNotIn("must-not-be-stored", repr(response))
+
+    def test_secret_continuation_rejects_context_drift_before_power_execution(self) -> None:
+        request = brain_runtime_client.PowerRequest(
+            interrupt_id="lookup",
+            assistant_id="shimpz-assistant",
+            power="public-user-lookup",
+            input=LOOKUP_INPUT,
+            approval="none",
+        )
+
+        class Runtime:
+            def start(self, _context, _message):
+                return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=(request,))
+
+            def resume(self, _context, _results):
+                raise AssertionError("a drifted continuation must not reach resume")
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime(), configure_secrets=False)
+            controller.invoke = lambda *_args: self.fail("a drifted continuation executed a Power")
+            challenge = controller.chat(
+                "team_1",
+                {"message": "Find OpenAI", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                "openai",
+                "sk-test-0123456789",
+            )
+            controller._network = lambda _team_id: SimpleNamespace(id="b" * 64, name="team-network")
+
+            with self.assertRaises(local_app.ApiProblem) as drifted:
+                controller.submit_chat_secrets(
+                    "team_1",
+                    self._secret_submission(challenge),
+                    "openai",
+                    "sk-test-0123456789",
+                )
+            with closing(sqlite3.connect(controller.power_state.path)) as connection:
+                pending_batches = connection.execute("SELECT COUNT(*) FROM batches").fetchone()
+
+        self.assertEqual(drifted.exception.code, "team-context-changed")
+        self.assertEqual(pending_batches, (0,))
+
+    def test_secret_inventory_returns_only_team_scoped_masks_and_public_metadata(self) -> None:
+        raw_secret = ASSISTANT_SECRET_VALUES["x-bearer-token"]
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, object(), configure_secrets=False)
+            controller.list_assistants = lambda _team_id: {
+                "assistants": [{"assistant": "shimpz-assistant", "status": "running"}]
+            }
+            controller.assistant_secrets.put_many(
+                "team_1",
+                "shimpz-assistant",
+                {"x-bearer-token": raw_secret},
+            )
+
+            own_inventory = controller.list_assistant_secrets("team_1")
+            other_inventory = controller.list_assistant_secrets("team_2")
+
+        encoded = repr(own_inventory)
+        self.assertNotIn(raw_secret, encoded)
+        self.assertNotIn("generation", encoded)
+        self.assertNotIn("ciphertext", encoded)
+        self.assertEqual(set(own_inventory), {"team_id", "assistants"})
+        own_secrets = {item["id"]: item for item in own_inventory["assistants"][0]["secrets"]}
+        other_secrets = {item["id"]: item for item in other_inventory["assistants"][0]["secrets"]}
+        self.assertEqual(
+            own_secrets["x-bearer-token"],
+            {
+                "id": "x-bearer-token",
+                "name": "X Bearer Token",
+                "summary": "App-only token used exclusively for public X profile reads.",
+                "configured": True,
+                "mask": assistant_secret_store.mask_secret(raw_secret),
+            },
+        )
+        self.assertTrue(all(not item["configured"] and item["mask"] is None for item in other_secrets.values()))
+
+    def test_power_rpc_receives_only_the_validated_input_and_declared_secrets(self) -> None:
+        captured: list[object] = []
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, object())
+
+            def rpc(_container, spec, method, path, payload):
+                captured.append((spec.assistant_id, method, path, payload))
+                return LOOKUP_RESULT
+
+            controller._rpc = rpc
+            with mock.patch.object(local_app.local_audit, "record", return_value="trace"):
+                response = controller.invoke(
+                    "team_1",
+                    "shimpz-assistant",
+                    "public-user-lookup",
+                    LOOKUP_INPUT,
+                )
+
+        self.assertEqual(
+            captured,
+            [
+                (
+                    "shimpz-assistant",
+                    "POST",
+                    "/v1/powers/public-user-lookup",
+                    {
+                        "input": LOOKUP_INPUT,
+                        "secrets": {"x-bearer-token": ASSISTANT_SECRET_VALUES["x-bearer-token"]},
+                    },
+                )
+            ],
+        )
+        self.assertEqual(response["result"], LOOKUP_RESULT)
+
+    def test_power_output_containing_a_secret_is_blocked_and_redacted(self) -> None:
+        raw_secret = ASSISTANT_SECRET_VALUES["x-bearer-token"]
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, object())
+            controller._rpc = lambda *_args: {
+                "id": "123456789",
+                "name": f"unsafe {raw_secret}",
+                "username": "OpenAI",
+            }
+            with (
+                mock.patch.object(local_app.local_audit, "record", return_value="trace"),
+                self.assertRaises(local_app.ApiProblem) as leaked,
+            ):
+                controller.invoke(
+                    "team_1",
+                    "shimpz-assistant",
+                    "public-user-lookup",
+                    LOOKUP_INPUT,
+                )
+
+        self.assertEqual(leaked.exception.code, "assistant-secret-exposure")
+        self.assertNotIn(raw_secret, str(leaked.exception))
 
     def test_chat_exposes_every_active_assistant_to_the_team_brain(self) -> None:
         class Runtime:
@@ -581,35 +904,35 @@ class LocalContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, runtime)
             hello = controller.registry["shimpz-assistant"]
-            weather = replace(
+            account_helper = replace(
                 hello,
-                assistant_id="weather-pulse",
+                assistant_id="account-helper",
                 image=hello.image.replace("a" * 64, "b" * 64),
-                powers={"current": replace(hello.powers["current-weather"], path="/v1/powers/current")},
+                powers={"lookup": replace(hello.powers["public-user-lookup"], path="/v1/powers/lookup")},
             )
-            controller.registry[weather.assistant_id] = weather
+            controller.registry[account_helper.assistant_id] = account_helper
             controller._active_chat_assistants = lambda _team_id, _network: (
                 local_app._ActiveAssistant(hello, "hello-container"),
-                local_app._ActiveAssistant(weather, "weather-container"),
+                local_app._ActiveAssistant(account_helper, "account-helper-container"),
             )
 
             response = controller.chat(
                 "team_1",
                 {
-                    "message": "Check the weather",
+                    "message": "Check the accounts",
                     "files": [],
-                    "assistant_ids": ["weather-pulse", "shimpz-assistant"],
+                    "assistant_ids": ["account-helper", "shimpz-assistant"],
                 },
                 "openai",
                 "sk-test-0123456789",
             )
 
         self.assertEqual(
-            [assistant.id for assistant in runtime.context.assistants], ["shimpz-assistant", "weather-pulse"]
+            [assistant.id for assistant in runtime.context.assistants], ["account-helper", "shimpz-assistant"]
         )
         self.assertEqual(
             [assistant.genesis for assistant in runtime.context.assistants],
-            ["Use only the declared weather Powers.", "Use only the declared weather Powers."],
+            ["Use only the declared X Powers.", "Use only the declared X Powers."],
         )
         self.assertEqual(
             runtime.context.thread_id,
@@ -670,7 +993,7 @@ class LocalContractTests(unittest.TestCase):
             with self.assertRaises(local_app.ApiProblem) as unavailable:
                 controller.chat(
                     "team_1",
-                    {"message": "Hello", "files": [], "assistant_ids": ["weather-pulse"]},
+                    {"message": "Hello", "files": [], "assistant_ids": ["account-helper"]},
                     "openai",
                     "sk-test-0123456789",
                 )
@@ -725,8 +1048,8 @@ class LocalContractTests(unittest.TestCase):
                     "turn-token",
                     "shimpz-assistant",
                     frozen.id,
-                    "search-location",
-                    SEARCH_INPUT,
+                    "public-user-lookup",
+                    LOOKUP_INPUT,
                 )
 
         self.assertEqual(lookups, [frozen.id, replacement.id])
@@ -744,9 +1067,9 @@ class LocalContractTests(unittest.TestCase):
                     powers=(
                         brain_runtime_client.PowerRequest(
                             interrupt_id="power-1",
-                            assistant_id="weather-pulse",
-                            power="current",
-                            input={},
+                            assistant_id="account-helper",
+                            power="lookup",
+                            input=LOOKUP_INPUT,
                             approval="none",
                         ),
                     ),
@@ -756,23 +1079,23 @@ class LocalContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, runtime)
             hello = controller.registry["shimpz-assistant"]
-            weather = replace(
+            account_helper = replace(
                 hello,
-                assistant_id="weather-pulse",
+                assistant_id="account-helper",
                 image=hello.image.replace("a" * 64, "b" * 64),
-                powers={"current": replace(hello.powers["current-weather"], path="/v1/powers/current")},
+                powers={"lookup": replace(hello.powers["public-user-lookup"], path="/v1/powers/lookup")},
             )
-            controller.registry[weather.assistant_id] = weather
+            controller.registry[account_helper.assistant_id] = account_helper
             controller._active_chat_assistants = lambda _team_id, _network: (
                 local_app._ActiveAssistant(hello, "hello-container"),
-                local_app._ActiveAssistant(weather, "weather-container"),
+                local_app._ActiveAssistant(account_helper, "account-helper-container"),
             )
             controller.invoke = lambda *_args: self.fail("an unselected Assistant Power executed")
 
             with self.assertRaises(local_app.ApiProblem) as caught:
                 controller.chat(
                     "team_1",
-                    {"message": "Weather", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                    {"message": "Accounts", "files": [], "assistant_ids": ["shimpz-assistant"]},
                     "openai",
                     "sk-test-0123456789",
                 )
@@ -784,6 +1107,8 @@ class LocalContractTests(unittest.TestCase):
         events: list[object] = []
         controller = object.__new__(local_app.LocalController)
         controller.space_id = "local-space"
+        controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
+        controller.assistant_secrets = SimpleNamespace(delete_team=lambda _team_id: False)
         controller._active_chat_guard = threading.Lock()
         controller._active_chat_tokens = {"team_1": "turn-token"}
         controller._cancelled_chat_tokens = set()
@@ -873,6 +1198,8 @@ class LocalContractTests(unittest.TestCase):
         events: list[str] = []
         controller = object.__new__(local_app.LocalController)
         controller.space_id = "local-space"
+        controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
+        controller.assistant_secrets = SimpleNamespace(delete_team=lambda _team_id: False)
         controller._active_chat_guard = threading.Lock()
         controller._active_chat_tokens = {}
         controller._cancelled_chat_tokens = set()
@@ -920,6 +1247,8 @@ class LocalContractTests(unittest.TestCase):
         events: list[object] = []
         controller = object.__new__(local_app.LocalController)
         controller.space_id = "local-space"
+        controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
+        controller.assistant_secrets = SimpleNamespace(delete_team=lambda _team_id: False)
         controller._active_chat_guard = threading.Lock()
         controller._active_chat_tokens = {}
         controller._cancelled_chat_tokens = set()
@@ -999,15 +1328,15 @@ class LocalContractTests(unittest.TestCase):
                         brain_runtime_client.PowerRequest(
                             interrupt_id="power-1",
                             assistant_id="shimpz-assistant",
-                            power="search-location",
-                            input=SEARCH_INPUT,
+                            power="public-user-lookup",
+                            input=LOOKUP_INPUT,
                             approval="none",
                         ),
                     ),
                 )
 
             def resume(self, _context, results):
-                if results != {"power-1": SEARCH_RESULT}:
+                if results != {"power-1": LOOKUP_RESULT}:
                     raise AssertionError("Power result did not return through the Controller")
                 return brain_runtime_client.RuntimeTurn(status="completed", reply="Done", powers=())
 
@@ -1016,7 +1345,7 @@ class LocalContractTests(unittest.TestCase):
             invoked: list[tuple[str, str, object]] = []
             controller.invoke = lambda team_id, assistant, power, payload: (
                 invoked.append((team_id, assistant, payload))
-                or {"assistant": assistant, "power": power, "result": SEARCH_RESULT}
+                or {"assistant": assistant, "power": power, "result": LOOKUP_RESULT}
             )
             response = controller.chat(
                 "team_1",
@@ -1025,15 +1354,15 @@ class LocalContractTests(unittest.TestCase):
                 "sk-test-0123456789",
             )
 
-        self.assertEqual(invoked, [("team_1", "shimpz-assistant", SEARCH_INPUT)])
+        self.assertEqual(invoked, [("team_1", "shimpz-assistant", LOOKUP_INPUT)])
         self.assertEqual(response, {"team_id": "team_1", "team_name": "Marketing", "reply": "Done"})
 
     def test_chat_reuses_a_completed_power_after_resume_failure_then_delivers(self) -> None:
         request = brain_runtime_client.PowerRequest(
             interrupt_id="power-1",
             assistant_id="shimpz-assistant",
-            power="search-location",
-            input=SEARCH_INPUT,
+            power="public-user-lookup",
+            input=LOOKUP_INPUT,
             approval="none",
         )
 
@@ -1045,7 +1374,7 @@ class LocalContractTests(unittest.TestCase):
 
             def resume(self, _context, results):
                 self.resumes += 1
-                if results != {"power-1": SEARCH_RESULT}:
+                if results != {"power-1": LOOKUP_RESULT}:
                     raise AssertionError("cached Power result changed")
                 if self.resumes == 1:
                     raise brain_runtime_client.BrainRuntimeError("private-resume-failure")
@@ -1055,7 +1384,7 @@ class LocalContractTests(unittest.TestCase):
             controller = self._chat_controller(directory, Runtime())
             invocations: list[object] = []
             controller.invoke = lambda _team_id, assistant, power, payload: (
-                invocations.append(payload) or {"assistant": assistant, "power": power, "result": SEARCH_RESULT}
+                invocations.append(payload) or {"assistant": assistant, "power": power, "result": LOOKUP_RESULT}
             )
             with self.assertRaises(local_app.ApiProblem) as first:
                 controller.chat(
@@ -1076,7 +1405,7 @@ class LocalContractTests(unittest.TestCase):
 
         self.assertEqual(first.exception.code, "brain-runtime-failed")
         self.assertNotIn("private-resume-failure", str(first.exception))
-        self.assertEqual(invocations, [SEARCH_INPUT])
+        self.assertEqual(invocations, [LOOKUP_INPUT])
         self.assertEqual(response["reply"], "Done")
         self.assertEqual(pending, (0,))
 
@@ -1084,8 +1413,8 @@ class LocalContractTests(unittest.TestCase):
         request = brain_runtime_client.PowerRequest(
             interrupt_id="power-1",
             assistant_id="shimpz-assistant",
-            power="search-location",
-            input=SEARCH_INPUT,
+            power="public-user-lookup",
+            input=LOOKUP_INPUT,
             approval="none",
         )
 
@@ -1141,8 +1470,8 @@ class LocalContractTests(unittest.TestCase):
                         brain_runtime_client.PowerRequest(
                             interrupt_id="power-1",
                             assistant_id="shimpz-assistant",
-                            power="search-location",
-                            input=SEARCH_INPUT,
+                            power="public-user-lookup",
+                            input=LOOKUP_INPUT,
                             approval="each-run",
                         ),
                     ),
@@ -1154,8 +1483,8 @@ class LocalContractTests(unittest.TestCase):
             controller.registry["shimpz-assistant"] = replace(
                 spec,
                 powers={
-                    "search-location": replace(
-                        spec.powers["search-location"],
+                    "public-user-lookup": replace(
+                        spec.powers["public-user-lookup"],
                         approval="each-run",
                     )
                 },
