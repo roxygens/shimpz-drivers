@@ -68,6 +68,23 @@ class SecretChallengeStoreTests(unittest.TestCase):
         with self.assertRaises(assistant_secret_challenges.SecretChallengeNotFoundError):
             store.get("team_2", second.id)
 
+    def test_claim_after_keeps_challenge_on_failed_commit_and_consumes_after_success(self) -> None:
+        store = assistant_secret_challenges.SecretChallengeStore()
+        challenge = store.create("team_1", (requirement(),), object())
+
+        def fail(_challenge) -> None:
+            raise RuntimeError("storage failed")
+
+        with self.assertRaisesRegex(RuntimeError, "storage failed"):
+            store.claim_after("team_1", challenge.id, fail)
+        self.assertIs(store.current("team_1"), challenge)
+
+        committed: list[str] = []
+        claimed = store.claim_after("team_1", challenge.id, lambda item: committed.append(item.id))
+        self.assertIs(claimed, challenge)
+        self.assertEqual(committed, [challenge.id])
+        self.assertIsNone(store.current("team_1"))
+
 
 if __name__ == "__main__":
     unittest.main()

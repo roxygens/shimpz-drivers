@@ -11,6 +11,7 @@ import re
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -134,6 +135,29 @@ class SecretChallengeStore:
             challenge = self._pending.get(identifier)
             if challenge is None or challenge.team_id != team:
                 raise SecretChallengeNotFoundError("secret challenge is unavailable")
+            self._pending.pop(identifier)
+            if self._by_team.get(team) == identifier:
+                self._by_team.pop(team, None)
+            return challenge
+
+    def claim_after(
+        self,
+        team_id: object,
+        challenge_id: object,
+        commit: Callable[[PendingSecretChallenge], None],
+    ) -> PendingSecretChallenge:
+        """Consume one challenge only after its bounded controller transaction commits."""
+        team = _team_id(team_id)
+        identifier = _challenge_id(challenge_id)
+        if not callable(commit):
+            raise SecretChallengeError("secret challenge commit is invalid")
+        now = time.monotonic()
+        with self._lock:
+            self._expire(now)
+            challenge = self._pending.get(identifier)
+            if challenge is None or challenge.team_id != team:
+                raise SecretChallengeNotFoundError("secret challenge is unavailable")
+            commit(challenge)
             self._pending.pop(identifier)
             if self._by_team.get(team) == identifier:
                 self._by_team.pop(team, None)

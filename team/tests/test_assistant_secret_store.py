@@ -73,6 +73,57 @@ class AssistantSecretStoreTests(unittest.TestCase):
                 {"first-secret": "qrstuvwx", "second-secret": "ijklmnop"},
             )
 
+    def test_multi_assistant_transaction_uses_one_atomic_state_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            writes = 0
+            original = store._write_state
+
+            def counted(state) -> None:
+                nonlocal writes
+                writes += 1
+                original(state)
+
+            store._write_state = counted
+            result = store.put_for_assistants(
+                "team_1",
+                {
+                    "first-assistant": {"first-secret": "abcdefgh"},
+                    "second-assistant": {"second-secret": "ijklmnop"},
+                },
+            )
+
+            self.assertEqual(writes, 1)
+            self.assertEqual(set(result), {"first-assistant", "second-assistant"})
+            self.assertEqual(
+                store.resolve_many("team_1", "first-assistant", ["first-secret"]),
+                {"first-secret": "abcdefgh"},
+            )
+            self.assertEqual(
+                store.resolve_many("team_1", "second-assistant", ["second-secret"]),
+                {"second-secret": "ijklmnop"},
+            )
+
+    def test_invalid_multi_assistant_transaction_changes_no_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            store.put_many("team_1", "first-assistant", {"first-secret": "abcdefgh"})
+            original = store.state_path.read_bytes()
+
+            with self.assertRaises(assistant_secret_store.AssistantSecretValidationError):
+                store.put_for_assistants(
+                    "team_1",
+                    {
+                        "first-assistant": {"first-secret": "replacement"},
+                        "second-assistant": {"second-secret": "line\nbreak"},
+                    },
+                )
+
+            self.assertEqual(store.state_path.read_bytes(), original)
+            self.assertFalse(store.metadata("team_1", "second-assistant", ["second-secret"])[0].configured)
+
     def test_release_pruning_removes_obsolete_records_without_touching_declared_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = self._store(Path(directory))

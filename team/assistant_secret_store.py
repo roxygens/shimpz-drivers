@@ -29,6 +29,7 @@ KEY_PATH = Path("/var/lib/shimpz-local/assistant-secrets/key/aes256.key")
 MAX_STATE_BYTES = 2 * 1024 * 1024
 MAX_SECRET_BYTES = 16 * 1024
 MAX_SECRETS_PER_ASSISTANT = 32
+MAX_VALUES_PER_TRANSACTION = 64
 MAX_TOTAL_RECORDS = 4096
 _ID = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 _TEAM_ID = re.compile(r"[a-z0-9_]{1,40}")
@@ -373,51 +374,82 @@ class AssistantSecretStore:
             raise AssistantSecretError("Assistant secret state is malformed")
         return records
 
-    def put_many(self, team_id: object, assistant_id: object, values: object) -> tuple[SecretMetadata, ...]:
-        team = _canonical_team_id(team_id)
-        assistant = _canonical_id(assistant_id, "Assistant id")
-        if not isinstance(values, Mapping) or not 1 <= len(values) <= MAX_SECRETS_PER_ASSISTANT:
+    @staticmethod
+    def _canonical_transaction(values_by_assistant: object) -> dict[str, dict[str, str]]:
+        if not isinstance(values_by_assistant, Mapping) or not values_by_assistant:
             raise AssistantSecretValidationError("Assistant secret values are invalid")
-        canonical: dict[str, str] = {}
-        for raw_id, raw_value in values.items():
-            secret_id = _canonical_id(raw_id, "secret id")
-            if secret_id in canonical:
+        transaction: dict[str, dict[str, str]] = {}
+        total = 0
+        for raw_assistant, raw_values in values_by_assistant.items():
+            assistant = _canonical_id(raw_assistant, "Assistant id")
+            if assistant in transaction or not isinstance(raw_values, Mapping) or not raw_values:
                 raise AssistantSecretValidationError("Assistant secret values are invalid")
-            canonical[secret_id] = _canonical_secret(raw_value)
+            if len(raw_values) > MAX_SECRETS_PER_ASSISTANT:
+                raise AssistantSecretValidationError("Assistant secret values are invalid")
+            canonical: dict[str, str] = {}
+            for raw_id, raw_value in raw_values.items():
+                secret_id = _canonical_id(raw_id, "secret id")
+                if secret_id in canonical:
+                    raise AssistantSecretValidationError("Assistant secret values are invalid")
+                canonical[secret_id] = _canonical_secret(raw_value)
+                total += 1
+                if total > MAX_VALUES_PER_TRANSACTION:
+                    raise AssistantSecretValidationError("Assistant secret values are invalid")
+            transaction[assistant] = canonical
+        return transaction
+
+    def put_for_assistants(
+        self,
+        team_id: object,
+        values_by_assistant: object,
+    ) -> dict[str, tuple[SecretMetadata, ...]]:
+        """Commit one bounded Team-wide secret transaction with a single atomic replace."""
+        team = _canonical_team_id(team_id)
+        transaction = self._canonical_transaction(values_by_assistant)
         with self._lock:
             state = self._read_state()
             key = self._key(allow_create=not _state_has_records(state))
-            records = self._record_set(state, team, assistant, create=True)
             now = _timestamp()
-            for secret_id, value in canonical.items():
-                previous = records.get(secret_id)
-                generation = int(previous.get("generation", 0)) + 1 if isinstance(previous, dict) else 1
-                nonce = os.urandom(12)
-                ciphertext = AESGCM(key).encrypt(
-                    nonce,
-                    value.encode("utf-8"),
-                    _aad(team, assistant, secret_id, generation),
-                )
-                records[secret_id] = {
-                    "generation": generation,
-                    "mask": mask_secret(value),
-                    "updated_at": now,
-                    "envelope": {
-                        "algorithm": "AES-256-GCM",
-                        "nonce": base64.b64encode(nonce).decode("ascii"),
-                        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
-                    },
-                }
+            record_sets: dict[str, dict[str, object]] = {}
+            for assistant, canonical in transaction.items():
+                records = self._record_set(state, team, assistant, create=True)
+                record_sets[assistant] = records
+                for secret_id, value in canonical.items():
+                    previous = records.get(secret_id)
+                    generation = int(previous.get("generation", 0)) + 1 if isinstance(previous, dict) else 1
+                    nonce = os.urandom(12)
+                    ciphertext = AESGCM(key).encrypt(
+                        nonce,
+                        value.encode("utf-8"),
+                        _aad(team, assistant, secret_id, generation),
+                    )
+                    records[secret_id] = {
+                        "generation": generation,
+                        "mask": mask_secret(value),
+                        "updated_at": now,
+                        "envelope": {
+                            "algorithm": "AES-256-GCM",
+                            "nonce": base64.b64encode(nonce).decode("ascii"),
+                            "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+                        },
+                    }
             self._write_state(state)
-            return tuple(
-                SecretMetadata(
-                    secret_id,
-                    True,
-                    mask_secret(canonical[secret_id]),
-                    int(records[secret_id]["generation"]),
+            return {
+                assistant: tuple(
+                    SecretMetadata(
+                        secret_id,
+                        True,
+                        mask_secret(transaction[assistant][secret_id]),
+                        int(record_sets[assistant][secret_id]["generation"]),
+                    )
+                    for secret_id in sorted(transaction[assistant])
                 )
-                for secret_id in sorted(canonical)
-            )
+                for assistant in sorted(transaction)
+            }
+
+    def put_many(self, team_id: object, assistant_id: object, values: object) -> tuple[SecretMetadata, ...]:
+        assistant = _canonical_id(assistant_id, "Assistant id")
+        return self.put_for_assistants(team_id, {assistant: values})[assistant]
 
     def resolve_many(self, team_id: object, assistant_id: object, secret_ids: object) -> dict[str, str]:
         team = _canonical_team_id(team_id)
