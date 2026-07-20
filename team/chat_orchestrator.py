@@ -39,9 +39,26 @@ class ChatOutcome:
     powers: tuple[InvokedPower, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ChatContinuation:
+    """In-memory, secret-free state needed to continue one LangGraph suspension."""
+
+    turn: brain_runtime_client.RuntimeTurn
+    seen_interrupts: tuple[str, ...]
+    invoked: tuple[InvokedPower, ...]
+    round_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSuspension:
+    continuation: ChatContinuation
+    requests: tuple[brain_runtime_client.PowerRequest, ...]
+
+
 PowerInvoker = Callable[[brain_runtime_client.PowerRequest], object]
 PowerValidator = Callable[[str, str, Mapping[str, Any]], Mapping[str, Any]]
 BatchHook = Callable[[tuple[brain_runtime_client.PowerRequest, ...]], None]
+BatchPause = Callable[[tuple[brain_runtime_client.PowerRequest, ...]], bool]
 CancellationCheck = Callable[[], bool]
 ContextCheck = Callable[[], None]
 
@@ -85,28 +102,25 @@ def _validate_batch(
     return tuple(validated)
 
 
-def run(
+def _drive(
     runtime: brain_runtime_client.BrainRuntimeClient,
     context: brain_runtime_client.RuntimeContext,
-    message: str,
+    continuation: ChatContinuation,
     validate_power: PowerValidator,
     invoke_power: PowerInvoker,
     *,
     prepare_batch: BatchHook = lambda _batch: None,
     batch_delivered: BatchHook = lambda _batch: None,
+    pause_before_batch: BatchPause = lambda _batch: False,
     cancelled: CancellationCheck = lambda: False,
     validate_context: ContextCheck = lambda: None,
-) -> ChatOutcome:
-    """Run a bounded turn; every model-requested Power returns through Controller validation."""
-    if cancelled():
-        raise ChatStoppedError("chat turn stopped")
-    validate_context()
-    turn = runtime.start(context, message)
-    invoked: list[InvokedPower] = []
-    seen_interrupts: set[str] = set()
+) -> ChatOutcome | ChatSuspension:
+    turn = continuation.turn
+    invoked = list(continuation.invoked)
+    seen_interrupts = set(continuation.seen_interrupts)
     declared = {(assistant.id, power.id): power for assistant in context.assistants for power in assistant.powers}
 
-    for _round in range(MAX_POWER_ROUNDS + 1):
+    for _round in range(continuation.round_index, MAX_POWER_ROUNDS + 1):
         if cancelled():
             raise ChatStoppedError("chat turn stopped")
         if turn.status == "completed":
@@ -120,6 +134,16 @@ def run(
         batch_interrupts = {request.interrupt_id for request in batch}
         if not seen_interrupts.isdisjoint(batch_interrupts):
             raise ChatOrchestrationError("Brain repeated a Power interrupt across rounds")
+        if pause_before_batch(batch):
+            return ChatSuspension(
+                continuation=ChatContinuation(
+                    turn=turn,
+                    seen_interrupts=tuple(sorted(seen_interrupts)),
+                    invoked=tuple(invoked),
+                    round_index=_round,
+                ),
+                requests=batch,
+            )
         seen_interrupts.update(batch_interrupts)
         prepare_batch(batch)
         results: dict[str, object] = {}
@@ -140,3 +164,92 @@ def run(
         turn = resumed
 
     raise ChatOrchestrationError("Brain did not complete the chat turn")
+
+
+def run_until_pause(
+    runtime: brain_runtime_client.BrainRuntimeClient,
+    context: brain_runtime_client.RuntimeContext,
+    message: str,
+    validate_power: PowerValidator,
+    invoke_power: PowerInvoker,
+    *,
+    prepare_batch: BatchHook = lambda _batch: None,
+    batch_delivered: BatchHook = lambda _batch: None,
+    pause_before_batch: BatchPause = lambda _batch: False,
+    cancelled: CancellationCheck = lambda: False,
+    validate_context: ContextCheck = lambda: None,
+) -> ChatOutcome | ChatSuspension:
+    """Start a turn and optionally pause before an all-or-nothing Power batch."""
+    if cancelled():
+        raise ChatStoppedError("chat turn stopped")
+    validate_context()
+    turn = runtime.start(context, message)
+    return _drive(
+        runtime,
+        context,
+        ChatContinuation(turn=turn, seen_interrupts=(), invoked=(), round_index=0),
+        validate_power,
+        invoke_power,
+        prepare_batch=prepare_batch,
+        batch_delivered=batch_delivered,
+        pause_before_batch=pause_before_batch,
+        cancelled=cancelled,
+        validate_context=validate_context,
+    )
+
+
+def continue_after_pause(
+    runtime: brain_runtime_client.BrainRuntimeClient,
+    context: brain_runtime_client.RuntimeContext,
+    continuation: ChatContinuation,
+    validate_power: PowerValidator,
+    invoke_power: PowerInvoker,
+    *,
+    prepare_batch: BatchHook = lambda _batch: None,
+    batch_delivered: BatchHook = lambda _batch: None,
+    pause_before_batch: BatchPause = lambda _batch: False,
+    cancelled: CancellationCheck = lambda: False,
+    validate_context: ContextCheck = lambda: None,
+) -> ChatOutcome | ChatSuspension:
+    """Continue an admitted in-memory suspension without re-running the user turn."""
+    return _drive(
+        runtime,
+        context,
+        continuation,
+        validate_power,
+        invoke_power,
+        prepare_batch=prepare_batch,
+        batch_delivered=batch_delivered,
+        pause_before_batch=pause_before_batch,
+        cancelled=cancelled,
+        validate_context=validate_context,
+    )
+
+
+def run(
+    runtime: brain_runtime_client.BrainRuntimeClient,
+    context: brain_runtime_client.RuntimeContext,
+    message: str,
+    validate_power: PowerValidator,
+    invoke_power: PowerInvoker,
+    *,
+    prepare_batch: BatchHook = lambda _batch: None,
+    batch_delivered: BatchHook = lambda _batch: None,
+    cancelled: CancellationCheck = lambda: False,
+    validate_context: ContextCheck = lambda: None,
+) -> ChatOutcome:
+    """Run a bounded turn; every model-requested Power returns through Controller validation."""
+    outcome = run_until_pause(
+        runtime,
+        context,
+        message,
+        validate_power,
+        invoke_power,
+        prepare_batch=prepare_batch,
+        batch_delivered=batch_delivered,
+        cancelled=cancelled,
+        validate_context=validate_context,
+    )
+    if isinstance(outcome, ChatSuspension):
+        raise ChatOrchestrationError("chat turn paused without a Controller continuation")
+    return outcome

@@ -116,6 +116,70 @@ class ChatOrchestratorTests(unittest.TestCase):
             (chat_orchestrator.InvokedPower(assistant_id="hello-pulse", power="hello"),),
         )
 
+    def test_pause_happens_after_full_validation_and_before_any_side_effect(self):
+        requests = (
+            suspended(interrupt_id="first").powers[0],
+            suspended(interrupt_id="second").powers[0],
+        )
+        runtime = FakeRuntime([suspension(*requests), completed("Finished")])
+        events = []
+
+        progress = chat_orchestrator.run_until_pause(
+            runtime,
+            context(),
+            "Use the Powers",
+            lambda assistant, power, payload: events.append(("validate", assistant, power)) or payload,
+            lambda request: events.append(("invoke", request.interrupt_id)) or {"ok": True},
+            prepare_batch=lambda batch: events.append(("prepare", len(batch))),
+            pause_before_batch=lambda batch: events.append(("pause", len(batch))) or True,
+        )
+
+        self.assertIsInstance(progress, chat_orchestrator.ChatSuspension)
+        self.assertEqual(events, [
+            ("validate", "hello-pulse", "hello"),
+            ("validate", "hello-pulse", "hello"),
+            ("pause", 2),
+        ])
+        self.assertEqual(runtime.resumes, [])
+
+        resumed = chat_orchestrator.continue_after_pause(
+            runtime,
+            context(),
+            progress.continuation,
+            accept_input,
+            lambda request: events.append(("invoke", request.interrupt_id)) or {"ok": True},
+            prepare_batch=lambda batch: events.append(("prepare", len(batch))),
+        )
+
+        self.assertIsInstance(resumed, chat_orchestrator.ChatOutcome)
+        self.assertEqual(resumed.reply, "Finished")
+        self.assertEqual(events[-3:], [("prepare", 2), ("invoke", "first"), ("invoke", "second")])
+        self.assertEqual(set(runtime.resumes[0]), {"first", "second"})
+
+    def test_paused_batch_revalidates_and_rejects_context_drift_before_invocation(self):
+        runtime = FakeRuntime([suspended(), completed()])
+        progress = chat_orchestrator.run_until_pause(
+            runtime,
+            context(),
+            "Use one Power",
+            accept_input,
+            lambda _request: self.fail("Power must not run before secrets are available"),
+            pause_before_batch=lambda _batch: True,
+        )
+        self.assertIsInstance(progress, chat_orchestrator.ChatSuspension)
+
+        with self.assertRaises(chat_orchestrator.ChatOrchestrationError):
+            chat_orchestrator.continue_after_pause(
+                runtime,
+                context(),
+                progress.continuation,
+                lambda _assistant, _power, _payload: (_ for _ in ()).throw(
+                    chat_orchestrator.ChatOrchestrationError("context changed")
+                ),
+                lambda _request: self.fail("drifted Power must not run"),
+            )
+        self.assertEqual(runtime.resumes, [])
+
     def test_multiple_power_rounds_remain_bounded_and_controller_brokered(self):
         runtime = FakeRuntime(
             [
