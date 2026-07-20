@@ -63,7 +63,7 @@ class MarketplaceImageTests(unittest.TestCase):
         spec = marketplace.APPS["shimpz-assistant"]
         self.assertEqual(
             spec.image,
-            "ghcr.io/roxygens/shimpz-space@sha256:9a8a6b6fe66b94f9d4e204899f20fd93b211c1adde438495079149c521d4aab9",
+            "ghcr.io/roxygens/shimpz-space@sha256:1fb163897668d639a685cfc0fef8e91009a9c6ac1387d6dbf3b8cac8c024f1ff",
         )
         self.assertTrue(marketplace.is_digest_image(spec.image))
         self.assertEqual((spec.port, spec.health_path), (8080, "/health"))
