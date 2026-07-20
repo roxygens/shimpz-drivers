@@ -30,14 +30,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import docker
-from docker.errors import APIError, DockerException, ImageNotFound, NotFound
-from docker.types import LogConfig, Ulimit
-
 import assistant_approval_challenges
 import assistant_approval_flow
 import assistant_approval_grants
 import assistant_chat
+import assistant_connection_challenges
+import assistant_connection_flow
 import assistant_contract
 import assistant_genesis
 import assistant_manifest
@@ -47,11 +45,15 @@ import assistant_secret_store
 import brain_runtime_client
 import brain_runtime_token_store
 import chat_orchestrator
+import docker
 import inference_config
 import local_audit
 import local_token_store
+import oauth_connection_store
 import power_journal
 import team_storage
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
+from docker.types import LogConfig, Ulimit
 from local_registry import (
     AssistantSpec,
     RegistryError,
@@ -515,6 +517,8 @@ class LocalController:
         power_state: power_journal.PowerJournal | None = None,
         assistant_secrets: assistant_secret_store.AssistantSecretStore | None = None,
         secret_challenges: assistant_secret_challenges.SecretChallengeStore | None = None,
+        assistant_connections: oauth_connection_store.OAuthConnectionStore | None = None,
+        connection_challenges: assistant_connection_challenges.ConnectionChallengeStore | None = None,
         approval_challenges: assistant_approval_challenges.ApprovalChallengeStore | None = None,
         approval_grants: assistant_approval_grants.ApprovalGrantStore | None = None,
     ) -> None:
@@ -529,6 +533,10 @@ class LocalController:
         )
         self.assistant_secrets = assistant_secrets or assistant_secret_store.AssistantSecretStore()
         self.secret_challenges = secret_challenges or assistant_secret_challenges.SecretChallengeStore()
+        self.assistant_connections = assistant_connections or oauth_connection_store.OAuthConnectionStore()
+        self.connection_challenges = (
+            connection_challenges or assistant_connection_challenges.ConnectionChallengeStore()
+        )
         self.approval_challenges = approval_challenges or assistant_approval_challenges.ApprovalChallengeStore()
         self.approval_grants = approval_grants or assistant_approval_grants.ApprovalGrantStore(
             LOCAL_APPROVAL_GRANTS_PATH
@@ -1426,6 +1434,35 @@ class LocalController:
             except assistant_secret_store.AssistantSecretError as exc:
                 self._raise_secret_problem(exc)
         raise AssertionError("unreachable")
+
+    @staticmethod
+    def _raise_connection_problem(exc: oauth_connection_store.OAuthConnectionStoreError) -> None:
+        raise ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Assistant connection state is unavailable",
+            code="assistant-connection-state-unavailable",
+        ) from exc
+
+    def list_assistant_connections(self, team_id: str) -> dict[str, object]:
+        team_id = validate_team_id(team_id)
+        with self._lock(team_id):
+            installed = self.list_assistants(team_id)["assistants"]
+            specs = [self._resolve(item["assistant"]) for item in installed]
+            try:
+                payload = assistant_connection_flow.inventory_payload(
+                    team_id,
+                    specs,
+                    self.assistant_connections,
+                )
+            except oauth_connection_store.OAuthConnectionStoreError as exc:
+                self._raise_connection_problem(exc)
+            except assistant_connection_flow.ConnectionFlowError as exc:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Assistant connection contract is unavailable",
+                    code="assistant-connection-contract-invalid",
+                ) from exc
+        return {"team_id": team_id, **payload}
 
     def replace_assistant_secrets(self, team_id: str, body: object) -> dict[str, object]:
         team_id = validate_team_id(team_id)
@@ -3591,6 +3628,23 @@ class Handler(BaseHTTPRequestHandler):
             )
         return None
 
+    def _assistant_connection_route(
+        self,
+        parts: list[str],
+    ) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
+        if len(parts) != 4 or parts[:2] != ["v1", "teams"] or parts[3] != "assistant-connections":
+            return None
+        team_id = validate_team_id(parts[2])
+        if self.command == "GET":
+            return (
+                HTTPStatus.OK,
+                self.server.controller.list_assistant_connections(team_id),
+                "assistant-connection-list",
+                team_id,
+                None,
+            )
+        return None
+
     def _team_route(self, parts: list[str]) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
         if len(parts) == 4 and parts[:2] == ["v1", "teams"] and parts[3] == "create":
             team_id = validate_team_id(parts[2])
@@ -3619,24 +3673,18 @@ class Handler(BaseHTTPRequestHandler):
         if self.command not in {"POST", "PUT"}:
             self._reject_body()
 
-        fixed_route = self._fixed_route(parts)
-        if fixed_route is not None:
-            return fixed_route
-        file_route = self._file_route(parts)
-        if file_route is not None:
-            return file_route
-        inference_route = self._inference_route(parts)
-        if inference_route is not None:
-            return inference_route
-        chat_route = self._chat_route(parts)
-        if chat_route is not None:
-            return chat_route
-        assistant_secret_route = self._assistant_secret_route(parts)
-        if assistant_secret_route is not None:
-            return assistant_secret_route
-        assistant_approval_route = self._assistant_approval_route(parts)
-        if assistant_approval_route is not None:
-            return assistant_approval_route
+        for resolve_route in (
+            self._fixed_route,
+            self._file_route,
+            self._inference_route,
+            self._chat_route,
+            self._assistant_secret_route,
+            self._assistant_approval_route,
+            self._assistant_connection_route,
+        ):
+            route = resolve_route(parts)
+            if route is not None:
+                return route
         team_route = self._team_route(parts)
         if team_route is not None:
             return team_route
