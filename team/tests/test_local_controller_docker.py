@@ -23,7 +23,7 @@ FIXTURE = TEAM / "tests" / "fixtures" / "shimpz-assistant"
 REGISTRY_IMAGE = "registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
 BUILDKIT_IMAGE = "moby/buildkit:v0.31.1@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a"
 APP_EGRESS_IMAGE = (
-    "ghcr.io/roxygens/shimpz-space@sha256:39c4b3aa5a3112b567935d06da35ac56d233d6706bce05ce818d8374ade750b0"
+    "ghcr.io/roxygens/shimpz-space@sha256:8e5e2d97a9332304db265a9b2ccf052d50cef74eb11553adc40ec7c85e69a13f"
 )
 MANAGED_LABEL = "com.shimpz.local.managed"
 PROFILE_LABEL = "com.shimpz.local.profile"
@@ -437,7 +437,7 @@ class DockerFlowTests(unittest.TestCase):
             self.assertEqual(catalog["assistants"][0]["id"], "shimpz-assistant")
             self.assertEqual(
                 catalog["assistants"][0]["powers"],
-                ["current-weather", "daily-forecast", "search-location"],
+                ["create-post", "delete-post", "identity-me", "public-user-lookup"],
             )
 
             status, created = self._api(
@@ -629,27 +629,34 @@ class DockerFlowTests(unittest.TestCase):
             self.assertEqual(assistant_help["assistant"], "shimpz-assistant")
             self.assertIn("# Shimpz Assistant", assistant_help["markdown"])
             self.assertRegex(assistant_help["trace_id"], r"^[0-9a-f]{32}$")
-            _, invoked = self._api(
+            secret_status, secret_inventory = self._api(
+                port,
+                token,
+                "GET",
+                "/v1/teams/demo_team/assistant-secrets",
+            )
+            self.assertEqual(secret_status, 200)
+            secret_items = secret_inventory["assistants"][0]["secrets"]
+            self.assertEqual(
+                {item["id"] for item in secret_items},
+                {
+                    "x-bearer-token",
+                    "x-api-key",
+                    "x-api-key-secret",
+                    "x-access-token",
+                    "x-access-token-secret",
+                },
+            )
+            self.assertTrue(all(item["configured"] is False and item["mask"] is None for item in secret_items))
+            secret_required, missing_secret = self._api(
                 port,
                 token,
                 "POST",
-                "/v1/teams/demo_team/assistants/shimpz-assistant/powers/search-location",
-                {"query": "Lisbon"},
+                "/v1/teams/demo_team/assistants/shimpz-assistant/powers/public-user-lookup",
+                {"username": "OpenAI"},
             )
-            self.assertEqual(
-                invoked["result"],
-                {
-                    "locations": [
-                        {
-                            "name": "Lisbon",
-                            "country": "Portugal",
-                            "latitude": 38.72,
-                            "longitude": -9.14,
-                            "timezone": "Europe/Lisbon",
-                        }
-                    ]
-                },
-            )
+            self.assertEqual(secret_required, 428)
+            self.assertEqual(missing_secret["code"], "assistant-secrets-required")
             unknown_power, _ = self._api(
                 port,
                 token,
@@ -674,7 +681,7 @@ class DockerFlowTests(unittest.TestCase):
             ).stdout.strip()
             self.assertEqual(
                 policy_contract,
-                '["api.open-meteo.com", "geocoding-api.open-meteo.com"] 0o640 10001 10017',
+                '["api.x.com"] 0o640 10001 10017',
             )
 
             _, removed = self._api(
@@ -791,7 +798,7 @@ class DockerFlowTests(unittest.TestCase):
                 "from pathlib import Path; print(Path('/var/log/shimpz-local/audit.jsonl').read_text())",
             ).stdout
             self.assertIn('"operation":"space-reset"', audit)
-            self.assertIn('"operation":"assistant-invoke"', audit)
+            self.assertIn('"detail":"assistant-secrets-required"', audit)
             self.assertNotIn("Captain", audit)
             self.assertNotIn(token, audit)
 

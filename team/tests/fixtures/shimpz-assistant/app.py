@@ -3,11 +3,73 @@
 from __future__ import annotations
 
 import json
+import re
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_BODY = 16 * 1024
 HELP_PATHS = {"/v1/help", *(f"/v1/help/{locale}" for locale in ("en", "pt", "es", "zh", "fr", "de", "ja", "ar"))}
+OAUTH_SECRETS = {
+    "x-api-key",
+    "x-api-key-secret",
+    "x-access-token",
+    "x-access-token-secret",
+}
+POWER_SECRETS = {
+    "public-user-lookup": {"x-bearer-token"},
+    "identity-me": OAUTH_SECRETS,
+    "create-post": OAUTH_SECRETS,
+    "delete-post": OAUTH_SECRETS,
+}
+USERNAME_RE = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
+POST_ID_RE = re.compile(r"[0-9]{1,19}\Z")
+
+
+def _power_input(payload: object, power: str) -> dict[str, object]:
+    if not isinstance(payload, dict) or set(payload) != {"input", "secrets"}:
+        raise ValueError
+    power_input = payload["input"]
+    secrets = payload["secrets"]
+    if not isinstance(power_input, dict) or not isinstance(secrets, dict):
+        raise ValueError
+    if set(secrets) != POWER_SECRETS[power]:
+        raise ValueError
+    for value in secrets.values():
+        if not isinstance(value, str) or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError
+        if not 1 <= len(value.encode("utf-8")) <= 2 * 1024:
+            raise ValueError
+    return power_input
+
+
+def _power_result(power: str, power_input: dict[str, object]) -> dict[str, object]:
+    if power == "public-user-lookup":
+        if set(power_input) != {"username"} or not isinstance(power_input["username"], str):
+            raise ValueError
+        username = power_input["username"]
+        if USERNAME_RE.fullmatch(username) is None:
+            raise ValueError
+        return {"id": "123456789", "name": "X fixture user", "username": username}
+    if power == "identity-me":
+        if power_input:
+            raise ValueError
+        return {
+            "id": "987654321",
+            "name": "Connected fixture account",
+            "username": "fixture_account",
+        }
+    if power == "create-post":
+        if set(power_input) != {"text"} or not isinstance(power_input["text"], str):
+            raise ValueError
+        text = power_input["text"]
+        if not 1 <= len(text) <= 280 or text != text.strip():
+            raise ValueError
+        return {"id": "246813579", "text": text}
+    if set(power_input) != {"id"} or not isinstance(power_input["id"], str):
+        raise ValueError
+    if POST_ID_RE.fullmatch(power_input["id"]) is None:
+        raise ValueError
+    return {"deleted": True}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -31,17 +93,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in HELP_PATHS:
             self._send(
                 HTTPStatus.OK,
-                {"markdown": "# Shimpz Assistant\n\nAsk me to find Lisbon or check its weather."},
+                {"markdown": "# Shimpz Assistant\n\nRead public X profiles or manage approved Posts."},
             )
             return
         self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self) -> None:
-        if self.path not in {
-            "/v1/powers/search-location",
-            "/v1/powers/current-weather",
-            "/v1/powers/daily-forecast",
-        }:
+        power = self.path.removeprefix("/v1/powers/")
+        if power not in POWER_SECRETS or self.path != f"/v1/powers/{power}":
             self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
         try:
@@ -49,54 +108,11 @@ class Handler(BaseHTTPRequestHandler):
             if not 2 <= length <= MAX_BODY or self.headers.get("Content-Type") != "application/json":
                 raise ValueError
             payload = json.loads(self.rfile.read(length))
-            if not isinstance(payload, dict):
-                raise ValueError
-        except ValueError, json.JSONDecodeError:
+            result = _power_result(power, _power_input(payload, power))
+        except ValueError, UnicodeError, json.JSONDecodeError:
             self._send(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "invalid input"})
             return
-        if self.path == "/v1/powers/search-location":
-            self._send(
-                HTTPStatus.OK,
-                {
-                    "locations": [
-                        {
-                            "name": "Lisbon",
-                            "country": "Portugal",
-                            "latitude": 38.72,
-                            "longitude": -9.14,
-                            "timezone": "Europe/Lisbon",
-                        }
-                    ]
-                },
-            )
-        elif self.path == "/v1/powers/current-weather":
-            self._send(
-                HTTPStatus.OK,
-                {
-                    "observed_at": "2026-07-18T10:00",
-                    "temperature_c": 22.5,
-                    "apparent_temperature_c": 22.0,
-                    "wind_speed_kmh": 11.2,
-                    "weather_code": 1,
-                    "timezone": "Europe/Lisbon",
-                },
-            )
-        else:
-            self._send(
-                HTTPStatus.OK,
-                {
-                    "timezone": "Europe/Lisbon",
-                    "days": [
-                        {
-                            "date": "2026-07-19",
-                            "temperature_min_c": 17.0,
-                            "temperature_max_c": 27.0,
-                            "precipitation_probability_max": 10,
-                            "weather_code": 1,
-                        }
-                    ],
-                },
-            )
+        self._send(HTTPStatus.OK, result)
 
 
 if __name__ == "__main__":

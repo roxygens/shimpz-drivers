@@ -53,7 +53,7 @@ All routes require the bearer token, including health and read routes.
 | `GET` | `/v1/teams/{team_id}/assistants` | none | `{assistants:[{assistant,status}]}` |
 | `POST` | `/v1/teams/{team_id}/assistants` | `{assistant:"shimpz-assistant"}` | idempotently installs the allowlisted digest |
 | `DELETE` | `/v1/teams/{team_id}/assistants/{assistant}` | none | idempotently uninstalls it |
-| `POST` | `/v1/teams/{team_id}/assistants/shimpz-assistant/powers/search-location` | `{query:"Lisbon"}` | invokes only the declared Power |
+| `POST` | `/v1/teams/{team_id}/assistants/shimpz-assistant/powers/public-user-lookup` | `{username:"XDevelopers"}` | invokes only the declared Power after its declared secret is configured |
 | `GET` | `/v1/teams/{team_id}/files` | none | lists opaque metadata and the 100 MiB logical quota |
 | `POST` | `/v1/teams/{team_id}/files` | `{filename,media_type?,content_b64}` | stores one opaque object, up to 25 MiB |
 | `DELETE` | `/v1/teams/{team_id}/files/{opaque_id}` | none | deletes one object from that Team only |

@@ -19,9 +19,10 @@ def main() -> int:
     if path not in {
         "/healthz",
         *HELP_PATHS,
-        "/v1/powers/search-location",
-        "/v1/powers/current-weather",
-        "/v1/powers/daily-forecast",
+        "/v1/powers/public-user-lookup",
+        "/v1/powers/identity-me",
+        "/v1/powers/create-post",
+        "/v1/powers/delete-post",
     }:
         return 2
     raw = sys.stdin.buffer.read(MAX_BODY + 1)
