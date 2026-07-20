@@ -2044,8 +2044,11 @@ def _resolve_power_secrets(
     power = contract.powers.get(power_id)
     if power is None:
         raise ApiError(HTTPStatus.BAD_REQUEST, "Assistant requested an undeclared Power")
+    secret_ids = tuple(getattr(power, "secrets", ()))
+    if not secret_ids:
+        return {}
     try:
-        return _assistant_secrets.resolve_many(team_id, assistant_id, power.secrets)
+        return _assistant_secrets.resolve_many(team_id, assistant_id, secret_ids)
     except assistant_secret_store.AssistantSecretError as exc:
         _raise_assistant_secret_error(exc)
     raise AssertionError("unreachable")
@@ -2580,6 +2583,9 @@ def _chat(
     # The slot comes first. A losing concurrent request must not run even the local credential probe,
     # much less provider status or a second provider CLI.
     with _exclusive_chat_turn(team_id, lease) as (token, container):
+        pending = _assistant_secret_challenges.current(team_id)
+        if pending is not None:
+            return assistant_secret_flow.challenge_payload(pending)
         return _chat_in_turn(team_id, message, file_ids, assistant_ids, token, container, lease.owner)
 
 
@@ -3294,10 +3300,19 @@ class Handler(BaseHTTPRequestHandler):
         terminal: dict[str, object]
         stream_error = None
         with _exclusive_chat_turn(team_id, lease) as (token, container):
+            pending = _assistant_secret_challenges.current(team_id)
+            if pending is not None:
+                self._send_json(
+                    HTTPStatus.PRECONDITION_REQUIRED,
+                    assistant_secret_flow.challenge_payload(pending),
+                    no_store=True,
+                )
+                return
             # The durable token is claimed before a 200 or any response byte reaches the client.
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/x-ndjson")
             self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
 
             def emit(obj: dict) -> None:

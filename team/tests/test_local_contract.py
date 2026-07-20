@@ -665,6 +665,38 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual([assistant.id for assistant in runtime.context.assistants], ["shimpz-assistant"])
         self.assertEqual(runtime.context.assistants[0].genesis, "Use only the declared X Powers.")
 
+    def test_local_chat_rechecks_pending_secrets_after_acquiring_its_slot(self) -> None:
+        class Runtime:
+            def start(self, _context, _message):
+                raise AssertionError("a pending continuation started another turn")
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime(), configure_secrets=False)
+            challenge = controller.secret_challenges.create(
+                "team_1",
+                (
+                    assistant_secret_challenges.SecretRequirement(
+                        "shimpz-assistant",
+                        "Shimpz Assistant",
+                        ("public-user-lookup",),
+                        (("x-bearer-token", "X Bearer Token", "Required."),),
+                    ),
+                ),
+                object(),
+            )
+            current = mock.Mock(side_effect=(None, challenge))
+            controller.secret_challenges.current = current
+
+            response = controller.chat(
+                "team_1",
+                {"message": "Hello", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                "openai",
+                "sk-test-0123456789",
+            )
+
+        self.assertEqual(response, controller._challenge_response(challenge))
+        self.assertEqual(current.call_count, 2)
+
     def test_chat_collects_a_multi_secret_batch_before_any_power_side_effect(self) -> None:
         requests = (
             brain_runtime_client.PowerRequest(

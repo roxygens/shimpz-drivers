@@ -1980,6 +1980,21 @@ class LocalController:
                 self._raise_secret_problem(exc)
         return pending
 
+    def _pending_chat_continuation(self, team_id: str) -> dict[str, object] | None:
+        existing_secret = self.secret_challenges.current(team_id)
+        existing_approval = self.approval_challenges.current(team_id)
+        if existing_secret is not None and existing_approval is not None:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Team chat continuation state is unavailable",
+                code="chat-state-unavailable",
+            )
+        if existing_secret is not None:
+            return self._challenge_response(existing_secret)
+        if existing_approval is not None:
+            return self._approval_response(existing_approval)
+        return None
+
     def chat(
         self,
         team_id: str,
@@ -2008,19 +2023,13 @@ class LocalController:
                 "message must be non-empty and within its size limit",
                 code="invalid-message",
             )
-        existing_secret = self.secret_challenges.current(team_id)
-        existing_approval = self.approval_challenges.current(team_id)
-        if existing_secret is not None and existing_approval is not None:
-            raise ApiProblem(
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                "Team chat continuation state is unavailable",
-                code="chat-state-unavailable",
-            )
-        if existing_secret is not None:
-            return self._challenge_response(existing_secret)
-        if existing_approval is not None:
-            return self._approval_response(existing_approval)
+        pending = self._pending_chat_continuation(team_id)
+        if pending is not None:
+            return pending
         with self._exclusive_chat_turn(team_id) as token:
+            pending = self._pending_chat_continuation(team_id)
+            if pending is not None:
+                return pending
             team_name, identity, outcome, secret_requirements, approval_requirements = self._run_chat_segment(
                 team_id,
                 file_ids,
@@ -2056,9 +2065,11 @@ class LocalController:
         if not isinstance(body, dict):
             raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid secret submission", code="invalid-body")
         challenge_id = body.get("challenge_id")
-        pending = self._store_chat_secrets(team_id, challenge_id, provider, body)
 
         with self._exclusive_chat_turn(team_id) as token:
+            # The active-turn token exists before the one-use secret challenge is consumed. Stop,
+            # uninstall, and rotation therefore cannot observe an unowned persisted continuation.
+            pending = self._store_chat_secrets(team_id, challenge_id, provider, body)
             team_name, identity, outcome, secret_requirements, approval_requirements = self._run_chat_segment(
                 team_id,
                 list(pending.file_ids),

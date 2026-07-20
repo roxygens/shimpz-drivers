@@ -384,6 +384,10 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             metadata=lambda _team_id, _assistant_id, secret_ids: tuple(
                 types.SimpleNamespace(id=secret_id, configured=True, generation=1) for secret_id in secret_ids
             ),
+            resolve_many=lambda _team_id, _assistant_id, secret_ids: dict.fromkeys(
+                secret_ids,
+                "configured-test-secret",
+            ),
         )
         return anchor, _patched(
             _active_team_assistants=lambda _team_id: (assistant,),
@@ -460,6 +464,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         encoded_event = chunked[:size]
         self.assertEqual(stream.status, HTTPStatus.OK)
         self.assertIn(("Content-Type", "application/x-ndjson"), stream.headers)
+        self.assertIn(("Cache-Control", "no-store"), stream.headers)
         self.assertEqual(chunked[size:], b"\r\n0\r\n\r\n")
         self.assertEqual(
             app.json.loads(encoded_event),

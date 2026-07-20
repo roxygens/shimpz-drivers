@@ -79,6 +79,9 @@ class _RouteHarness:
     ) -> None:
         self.sent.append((status, payload, no_store))
 
+    def _stream_chat(self, *args, **kwargs) -> None:
+        app.Handler._stream_chat(self, *args, **kwargs)
+
 
 class HostedAssistantSecretTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -388,6 +391,85 @@ class HostedAssistantSecretTests(unittest.TestCase):
         self.assertIsNone(self.challenge_store.current(TEAM_ID))
         self.assertTrue(pending.id)
         self.assertFalse(self.secret_store.metadata(TEAM_ID, ASSISTANT_ID, ("x-bearer-token",))[0].configured)
+
+    def test_chat_rechecks_a_pending_secret_challenge_after_acquiring_its_slot(self) -> None:
+        requirement = app.assistant_secret_challenges.SecretRequirement(
+            ASSISTANT_ID,
+            "Shimpz Assistant",
+            ("public-user-lookup",),
+            (("x-bearer-token", "X Bearer Token", "Required."),),
+        )
+        pending = app.assistant_secret_challenges.PendingSecretChallenge(
+            "f" * 32,
+            TEAM_ID,
+            1.0,
+            (requirement,),
+            object(),
+        )
+        current = mock.Mock(side_effect=(None, pending))
+
+        @contextlib.contextmanager
+        def exclusive(_team_id, _lease):
+            yield "turn-token", self.anchor
+
+        with _patched(
+            _assistant_secret_challenges=types.SimpleNamespace(current=current),
+            _exclusive_chat_turn=exclusive,
+            _chat_in_turn=lambda *_args: self.fail("a pending continuation started another turn"),
+        ):
+            result = app._chat(TEAM_ID, "hello", [], (ASSISTANT_ID,), types.SimpleNamespace(owner="account_1"))
+
+        self.assertEqual(result, app.assistant_secret_flow.challenge_payload(pending))
+        self.assertEqual(current.call_count, 2)
+
+    def test_stream_rechecks_pending_secrets_before_sending_any_stream_bytes(self) -> None:
+        requirement = app.assistant_secret_challenges.SecretRequirement(
+            ASSISTANT_ID,
+            "Shimpz Assistant",
+            ("public-user-lookup",),
+            (("x-bearer-token", "X Bearer Token", "Required."),),
+        )
+        pending = app.assistant_secret_challenges.PendingSecretChallenge(
+            "e" * 32,
+            TEAM_ID,
+            1.0,
+            (requirement,),
+            object(),
+        )
+        current = mock.Mock(side_effect=(None, pending))
+        handler = _RouteHarness({"message": "hello", "files": [], "assistant_ids": [ASSISTANT_ID]})
+
+        @contextlib.contextmanager
+        def exclusive(_team_id, _lease):
+            yield "turn-token", self.anchor
+
+        with (
+            _patched(
+                _assistant_secret_challenges=types.SimpleNamespace(current=current),
+                _exclusive_chat_turn=exclusive,
+            ),
+            mock.patch.object(app, "_enforce_rate"),
+        ):
+            app.Handler._route_chat(
+                handler,
+                "POST",
+                ["v1", "teams", TEAM_ID, "chat", "stream"],
+                TEAM_ID,
+                ("account", "account_1"),
+                types.SimpleNamespace(owner="account_1"),
+            )
+
+        self.assertEqual(
+            handler.sent,
+            [
+                (
+                    HTTPStatus.PRECONDITION_REQUIRED,
+                    app.assistant_secret_flow.challenge_payload(pending),
+                    True,
+                )
+            ],
+        )
+        self.assertEqual(current.call_count, 2)
 
 
 if __name__ == "__main__":
