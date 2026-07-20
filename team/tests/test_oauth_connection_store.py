@@ -313,6 +313,42 @@ class OAuthConnectionStoreTests(unittest.TestCase):
             self.assertFalse(store.delete_assistant("team_2", "second-assistant"))
             self.assertFalse(store.delete_all())
 
+    def test_revocation_transaction_keeps_authenticated_custody_until_callback_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            store.put("team_1", "shimpz-assistant", "x", "x", SCOPES, tokens(), ACCOUNT)
+            observed: list[tuple[str, str, str | None]] = []
+
+            def fail(provider: str, access: str, refresh: str | None) -> None:
+                observed.append((provider, access, refresh))
+                raise RuntimeError("synthetic upstream failure")
+
+            with self.assertRaisesRegex(RuntimeError, "upstream failure"):
+                store.revoke_then_delete("team_1", "shimpz-assistant", "x", fail)
+            self.assertEqual(observed, [("x", ACCESS, REFRESH)])
+            self.assertEqual(
+                store.metadata("team_1", "shimpz-assistant", DECLARATIONS)[0].status,
+                "connected",
+            )
+
+            self.assertTrue(
+                store.revoke_then_delete(
+                    "team_1",
+                    "shimpz-assistant",
+                    "x",
+                    lambda provider, access, refresh: observed.append((provider, access, refresh)),
+                )
+            )
+            self.assertEqual(observed, [("x", ACCESS, REFRESH), ("x", ACCESS, REFRESH)])
+            self.assertFalse(
+                store.revoke_then_delete(
+                    "team_1",
+                    "shimpz-assistant",
+                    "x",
+                    lambda *_tokens: self.fail("missing connection must not invoke revocation"),
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

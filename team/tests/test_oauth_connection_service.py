@@ -44,6 +44,16 @@ class SyntheticTransport:
         return self.response
 
 
+class SequenceTransport:
+    def __init__(self, responses: list[oauth_http_client.OAuthHTTPResponse]) -> None:
+        self.responses = responses
+        self.requests: list[dict[str, object]] = []
+
+    def request(self, **request) -> oauth_http_client.OAuthHTTPResponse:
+        self.requests.append(request)
+        return self.responses.pop(0)
+
+
 def requirement(
     assistant: str = "shimpz-assistant",
     *,
@@ -288,7 +298,7 @@ class OAuthConnectionServiceTests(unittest.TestCase):
             )
         self.assertNotIn(callback_secret, f"{callback.exception!r} {callback.exception}")
 
-    def test_all_configured_and_disconnect_are_local_only(self) -> None:
+    def test_disconnect_revokes_refresh_and_access_before_local_delete(self) -> None:
         state = self._state(self.service.authorization_url(pending(requirement()), SESSION))
         self._complete(state)
         requests = len(self.transport.requests)
@@ -296,10 +306,90 @@ class OAuthConnectionServiceTests(unittest.TestCase):
             self.service.authorization_url(pending(requirement()), SESSION)
         self.assertTrue(self.service.disconnect("team_1", "shimpz-assistant", "x"))
         self.assertFalse(self.service.disconnect("team_1", "shimpz-assistant", "x"))
-        self.assertEqual(len(self.transport.requests), requests)
+        self.assertEqual(len(self.transport.requests), requests + 2)
+        revoked = [
+            parse_qs(bytes(request["body"]).decode(), strict_parsing=True)["token"][0]
+            for request in self.transport.requests[-2:]
+        ]
+        self.assertEqual(revoked, [REFRESH, ACCESS])
+        self.assertTrue(
+            all(request["url"] == "https://api.x.com/2/oauth2/revoke" for request in self.transport.requests[-2:])
+        )
         self.assertEqual(
             self.store.metadata("team_1", "shimpz-assistant", {"x": DECLARATION})[0].status,
             "missing",
+        )
+
+    def test_disconnect_failure_retains_custody_and_is_safely_retryable(self) -> None:
+        self.store.put(
+            "team_1",
+            "shimpz-assistant",
+            "x",
+            "x",
+            SCOPES,
+            oauth_http_client.OAuthTokenSet(ACCESS, REFRESH, SCOPES, 3600),
+        )
+        private_provider_body = b'{"error":"private-provider-detail-123456789"}'
+        transport = SequenceTransport(
+            [
+                oauth_http_client.OAuthHTTPResponse(200, "application/json", b"{}"),
+                oauth_http_client.OAuthHTTPResponse(503, "application/json", private_provider_body),
+            ]
+        )
+        service = oauth_connection_service.OAuthConnectionService(
+            client_id=CLIENT_ID,
+            redirect_uri=oauth_http_client.LOCAL_REDIRECT_URI,
+            challenge=self.challenges,
+            store=self.store,
+            http=oauth_http_client.OAuthHTTPClient(transport),
+        )
+
+        with self.assertRaises(oauth_connection_service.OAuthConnectionServiceError) as failed:
+            service.disconnect("team_1", "shimpz-assistant", "x")
+        rendered = f"{failed.exception!r} {failed.exception}"
+        for private in (ACCESS, REFRESH, CLIENT_ID, "private-provider-detail"):
+            self.assertNotIn(private, rendered)
+        self.assertEqual(
+            self.store.metadata("team_1", "shimpz-assistant", {"x": DECLARATION})[0].status,
+            "connected",
+        )
+
+        transport.responses.extend(
+            [
+                oauth_http_client.OAuthHTTPResponse(200, "application/json", b"{}"),
+                oauth_http_client.OAuthHTTPResponse(200, "application/json", b"{}"),
+            ]
+        )
+        self.assertTrue(service.disconnect("team_1", "shimpz-assistant", "x"))
+        self.assertFalse(service.disconnect("team_1", "shimpz-assistant", "x"))
+        self.assertEqual(len(transport.requests), 4)
+        self.assertEqual(
+            self.store.metadata("team_1", "shimpz-assistant", {"x": DECLARATION})[0].status,
+            "missing",
+        )
+
+    def test_disconnect_without_client_configuration_retains_local_custody(self) -> None:
+        self.store.put(
+            "team_1",
+            "shimpz-assistant",
+            "x",
+            "x",
+            SCOPES,
+            oauth_http_client.OAuthTokenSet(ACCESS, REFRESH, SCOPES, 3600),
+        )
+        service = oauth_connection_service.OAuthConnectionService(
+            client_id=None,
+            redirect_uri=oauth_http_client.LOCAL_REDIRECT_URI,
+            challenge=self.challenges,
+            store=self.store,
+            http=self.http,
+        )
+        with self.assertRaises(oauth_connection_service.OAuthConnectionServiceError):
+            service.disconnect("team_1", "shimpz-assistant", "x")
+        self.assertEqual(self.transport.requests, [])
+        self.assertEqual(
+            self.store.metadata("team_1", "shimpz-assistant", {"x": DECLARATION})[0].status,
+            "connected",
         )
 
 

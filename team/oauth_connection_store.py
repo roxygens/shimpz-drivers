@@ -857,6 +857,41 @@ class OAuthConnectionStore:
                 self._write_state(state)
             return removed
 
+    def revoke_then_delete(
+        self,
+        team_id: object,
+        assistant_id: object,
+        connection_id: object,
+        revoke_callback: Callable[[str, str, str | None], None],
+    ) -> bool:
+        """Delete one grant only after its authenticated tokens are revoked upstream."""
+        team = _team_id(team_id)
+        assistant = _component_id(assistant_id, "Assistant id")
+        connection = _component_id(connection_id, "connection id")
+        if not callable(revoke_callback):
+            raise OAuthConnectionValidationError("OAuth revocation callback is invalid")
+        with self._lock:
+            state = self._read_state()
+            teams = state["teams"]
+            if not isinstance(teams, dict) or not isinstance(teams.get(team), dict):
+                return False
+            assistants = teams[team]
+            records = self._records(state, team, assistant, create=False)
+            raw_record = records.get(connection)
+            if raw_record is None:
+                return False
+            record = _validate_record(raw_record)
+            provider, _, _, _, _ = _record_metadata(record)
+            grant = self._resolve_record(team, assistant, connection, record)
+            revoke_callback(provider, grant.access_token, grant.refresh_token)
+            records.pop(connection)
+            if not records:
+                assistants.pop(assistant, None)
+            if not assistants:
+                teams.pop(team, None)
+            self._write_state(state)
+            return True
+
     def delete_assistant(self, team_id: object, assistant_id: object) -> bool:
         team = _team_id(team_id)
         assistant = _component_id(assistant_id, "Assistant id")

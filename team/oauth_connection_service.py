@@ -293,8 +293,28 @@ class OAuthConnectionService:
             raise OAuthConnectionServiceError("OAuth connection could not be completed") from None
 
     def disconnect(self, team_id: object, assistant_id: object, connection_id: object) -> bool:
-        """Delete local tokens; no network revoke or new decryption surface is introduced."""
+        """Revoke each upstream token before atomically deleting local custody."""
+
+        def revoke(provider: str, access_token: str, refresh_token: str | None) -> None:
+            client_id, _ = self._client_configuration()
+            tokens = tuple(dict.fromkeys(token for token in (refresh_token, access_token) if token))
+            for token in tokens:
+                self._http.revoke(
+                    provider_id=provider,
+                    client_id=client_id,
+                    token=token,
+                )
+
         try:
-            return self._store.delete_connection(team_id, assistant_id, connection_id)
-        except oauth_connection_store.OAuthConnectionStoreError:
+            return self._store.revoke_then_delete(
+                team_id,
+                assistant_id,
+                connection_id,
+                revoke,
+            )
+        except (
+            oauth_connection_store.OAuthConnectionStoreError,
+            oauth_http_client.OAuthHTTPError,
+            OAuthConnectionServiceError,
+        ):
             raise OAuthConnectionServiceError("OAuth connection could not be disconnected") from None
