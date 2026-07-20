@@ -524,6 +524,107 @@ class HostedAssistantSecretTests(unittest.TestCase):
         replace_secrets.assert_called_once_with(TEAM_ID, body, mock.ANY)
         self.assertEqual(handler.sent, [(HTTPStatus.OK, response, True)])
 
+    def test_idempotent_install_prunes_obsolete_secrets_after_admission(self) -> None:
+        declared = {"retained-token": app.marketplace.SecretSpec("Retained token", "Still declared.")}
+        contract = app.marketplace.AssistantContract("assistant-rpc", {}, declared)
+        spec = types.SimpleNamespace(
+            assistant=contract,
+            image="registry.example/shimpz-assistant@sha256:" + ("d" * 64),
+            port=8080,
+            health_path="/health",
+        )
+        container = types.SimpleNamespace(
+            id="e" * 64,
+            labels={
+                "team.app.driver": "1",
+                "team.id": TEAM_ID,
+                "team.app": ASSISTANT_ID,
+                "team.owner": "account_1",
+            },
+            attrs={"Config": {"Image": spec.image}},
+            status="running",
+            reload=lambda: None,
+        )
+        self.secret_store.put_many(
+            TEAM_ID,
+            ASSISTANT_ID,
+            {
+                "retained-token": "retained-secret-value",
+                "obsolete-token": "obsolete-secret-value",
+            },
+        )
+        self.challenge_store.create(
+            TEAM_ID,
+            (
+                app.assistant_secret_challenges.SecretRequirement(
+                    ASSISTANT_ID,
+                    "Shimpz Assistant",
+                    ("old-power",),
+                    (("obsolete-token", "Obsolete token", "Removed."),),
+                ),
+            ),
+            object(),
+        )
+        with _patched(
+            _lock_for=lambda _team_id: contextlib.nullcontext(),
+            _require_current_authorization=lambda *_args, **_kwargs: types.SimpleNamespace(
+                labels={"team.name": "Marketing"}
+            ),
+            _prepare_marketplace_image=lambda _spec: None,
+            _get_container=lambda _name: container,
+            _require_team_isolation=lambda _container: None,
+            _admit_app_contract=lambda *_args: (),
+            _validate_admitted_egress=lambda *_args: "admitted-token",
+            _validate_assistant_proxy_environment=lambda *_args: None,
+            _app_ready_now=lambda *_args: (True, "running"),
+            _assistant_secrets=self.secret_store,
+            _assistant_secret_challenges=self.challenge_store,
+        ):
+            result = app._install_app(
+                TEAM_ID,
+                ASSISTANT_ID,
+                spec,
+                "account_1",
+                types.SimpleNamespace(owner="account_1"),
+            )
+
+        metadata = {
+            item.id: item
+            for item in self.secret_store.metadata(
+                TEAM_ID,
+                ASSISTANT_ID,
+                ("retained-token", "obsolete-token"),
+            )
+        }
+        self.assertFalse(result["installed"])
+        self.assertTrue(metadata["retained-token"].configured)
+        self.assertFalse(metadata["obsolete-token"].configured)
+        self.assertIsNone(self.challenge_store.current(TEAM_ID))
+
+    def test_team_secret_teardown_cancels_continuations_and_deletes_all_records(self) -> None:
+        self.secret_store.put_many(TEAM_ID, ASSISTANT_ID, {"retained-token": "retained-secret-value"})
+        self.challenge_store.create(
+            TEAM_ID,
+            (
+                app.assistant_secret_challenges.SecretRequirement(
+                    ASSISTANT_ID,
+                    "Shimpz Assistant",
+                    ("read",),
+                    (("retained-token", "Retained token", "Required."),),
+                ),
+            ),
+            object(),
+        )
+        with _patched(
+            _assistant_secrets=self.secret_store,
+            _assistant_secret_challenges=self.challenge_store,
+        ):
+            complete = app._teardown_assistant_secrets(TEAM_ID)
+
+        self.assertTrue(complete)
+        self.assertIsNone(self.challenge_store.current(TEAM_ID))
+        self.assertFalse(self.secret_store.metadata(TEAM_ID, ASSISTANT_ID, ("retained-token",))[0].configured)
+
     def test_chat_rechecks_a_pending_secret_challenge_after_acquiring_its_slot(self) -> None:
         requirement = app.assistant_secret_challenges.SecretRequirement(
             ASSISTANT_ID,

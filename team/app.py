@@ -1350,6 +1350,23 @@ def _teardown_app(
     return _CleanupResult(True, True)
 
 
+def _retain_admitted_assistant_secrets(team_id: str, app_id: str, spec: marketplace.AppSpec) -> None:
+    """Prune credentials removed from the exact Assistant contract that just passed admission."""
+    if spec.assistant is None:
+        return
+    try:
+        pruned = _assistant_secrets.retain_declared(
+            team_id,
+            app_id,
+            tuple(sorted(spec.assistant.secrets)),
+        )
+    except assistant_secret_store.AssistantSecretError as exc:
+        _raise_assistant_secret_error(exc)
+    if pruned:
+        # A paused turn may still reference a secret removed by this admitted release.
+        _assistant_secret_challenges.cancel_team(team_id)
+
+
 @_serialize_against_team_chat
 def _install_app(
     team_id: str,
@@ -1400,6 +1417,7 @@ def _install_app(
                     HTTPStatus.CONFLICT,
                     f"installed app {app_id!r} is not ready ({status}); uninstall it before reinstalling",
                 )
+            _retain_admitted_assistant_secrets(team_id, app_id, spec)
             return {"team_id": team_id, "app": app_id, "status": status, "installed": False}
         if len(_team_app_containers(team_id)) >= MAX_APPS_PER_TEAM:
             raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, f"app limit reached for {team_id!r} ({MAX_APPS_PER_TEAM})")
@@ -1452,6 +1470,7 @@ def _install_app(
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         f"app {app_id!r} lost readiness before install commit ({committed_status}; rolled back)",
                     )
+                _retain_admitted_assistant_secrets(team_id, app_id, spec)
             except Exception as exc:
                 cleanup = _teardown_app(team_id, app_id, drop_db=spec.db)
                 if not cleanup.complete:
