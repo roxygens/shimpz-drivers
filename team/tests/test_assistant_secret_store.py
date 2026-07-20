@@ -221,6 +221,17 @@ class AssistantSecretStoreTests(unittest.TestCase):
             self.assertTrue(store.delete_team("team_1"))
             self.assertFalse(store.metadata("team_1", "second-assistant", ["x-token"])[0].configured)
 
+    def test_space_reset_purges_every_encrypted_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            store.put_many("team_1", "first-assistant", {"api-key": "secret-one-1234"})
+            store.put_many("team_2", "second-assistant", {"token": "secret-two-5678"})
+
+            self.assertTrue(store.delete_all())
+            self.assertFalse(store.delete_all())
+            self.assertFalse(store.metadata("team_1", "first-assistant", ["api-key"])[0].configured)
+            self.assertFalse(store.metadata("team_2", "second-assistant", ["token"])[0].configured)
+
 
 if __name__ == "__main__":
     unittest.main()

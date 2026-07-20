@@ -56,6 +56,18 @@ class SecretChallengeStoreTests(unittest.TestCase):
         self.assertFalse(store.cancel_team("team_1"))
         self.assertIsNotNone(store.create("team_2", (requirement(),), object()))
 
+    def test_space_reset_drops_every_pending_continuation(self) -> None:
+        store = assistant_secret_challenges.SecretChallengeStore(capacity=2)
+        first = store.create("team_1", (requirement(),), {"private": "one"})
+        second = store.create("team_2", (requirement(),), {"private": "two"})
+
+        self.assertEqual(store.cancel_all(), 2)
+        self.assertEqual(store.cancel_all(), 0)
+        with self.assertRaises(assistant_secret_challenges.SecretChallengeNotFoundError):
+            store.get("team_1", first.id)
+        with self.assertRaises(assistant_secret_challenges.SecretChallengeNotFoundError):
+            store.get("team_2", second.id)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -496,3 +496,12 @@ class AssistantSecretStore:
             if removed:
                 self._write_state(state)
             return removed
+
+    def delete_all(self) -> bool:
+        """Atomically remove every encrypted record during an owned Space reset."""
+        with self._lock:
+            state = self._read_state()
+            if not _state_has_records(state):
+                return False
+            self._write_state(_empty_state())
+            return True

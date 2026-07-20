@@ -144,3 +144,11 @@ class SecretChallengeStore:
         with self._lock:
             identifier = self._by_team.pop(team, None)
             return self._pending.pop(identifier, None) is not None if identifier is not None else False
+
+    def cancel_all(self) -> int:
+        """Drop every process-local continuation during a Space reset."""
+        with self._lock:
+            removed = len(self._pending)
+            self._pending.clear()
+            self._by_team.clear()
+            return removed
