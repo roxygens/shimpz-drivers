@@ -9,8 +9,8 @@ from pathlib import Path
 
 import assistant_approval_grants
 
-IMAGE_V1 = "ghcr.io/roxygens/shimpz-assistant@sha256:" + "a" * 64
-IMAGE_V2 = "ghcr.io/roxygens/shimpz-assistant@sha256:" + "b" * 64
+IMAGE_V1 = "ghcr.io/theshimpz/shimpz-assistant@sha256:" + "a" * 64
+IMAGE_V2 = "ghcr.io/theshimpz/shimpz-assistant@sha256:" + "b" * 64
 
 
 class ApprovalGrantStoreTests(unittest.TestCase):

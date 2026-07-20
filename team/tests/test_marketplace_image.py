@@ -63,7 +63,7 @@ class MarketplaceImageTests(unittest.TestCase):
         spec = marketplace.APPS["shimpz-assistant"]
         self.assertEqual(
             spec.image,
-            "ghcr.io/roxygens/shimpz-space@sha256:1fb163897668d639a685cfc0fef8e91009a9c6ac1387d6dbf3b8cac8c024f1ff",
+            "ghcr.io/theshimpz/shimpz-space@sha256:0bd6ecdf1075df37e0a1b19d58b7d0711beef9b7ccad088222e0c8951c4ad888",
         )
         self.assertTrue(marketplace.is_digest_image(spec.image))
         self.assertEqual((spec.port, spec.health_path), (8080, "/health"))
@@ -134,7 +134,7 @@ class MarketplaceImageTests(unittest.TestCase):
     def test_digest_or_assistant_label_mismatch_is_refused_without_a_pull(self) -> None:
         spec = marketplace.APPS["shimpz-assistant"]
         mismatches = (
-            _assistant_image(digest="ghcr.io/roxygens/shimpz-space@sha256:" + "c" * 64),
+            _assistant_image(digest="ghcr.io/theshimpz/shimpz-space@sha256:" + "c" * 64),
             _assistant_image(assistant_id="other-assistant"),
             _assistant_image(assistant_api="2"),
         )

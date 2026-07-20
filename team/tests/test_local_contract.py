@@ -44,8 +44,8 @@ TEST_SECRET_VALUES = {
 }
 TEST_ACCOUNT_ACCESS_TOKEN = "-".join(("oauth", "access", "test", "token", "123456789"))
 TEST_ACCOUNT_REFRESH_TOKEN = "-".join(("oauth", "refresh", "test", "token", "123456789"))
-CURRENT_ASSISTANT_IMAGE = "ghcr.io/roxygens/shimpz-space@sha256:" + "b" * 64
-OUTDATED_ASSISTANT_IMAGE = "ghcr.io/roxygens/shimpz-space@sha256:" + "a" * 64
+CURRENT_ASSISTANT_IMAGE = "ghcr.io/theshimpz/shimpz-space@sha256:" + "b" * 64
+OUTDATED_ASSISTANT_IMAGE = "ghcr.io/theshimpz/shimpz-space@sha256:" + "a" * 64
 
 
 class LocalContractTests(unittest.TestCase):
@@ -314,9 +314,9 @@ class LocalContractTests(unittest.TestCase):
             ("api.mux.com", "api.x.com"),
         )
         invalid = (
-            "ghcr.io/roxygens/shimpz-space:latest",
-            "ghcr.io/roxygens/shimpz-space@sha256:" + "0" * 64,
-            "https://ghcr.io/roxygens/hello@sha256:" + "a" * 64,
+            "ghcr.io/theshimpz/shimpz-space:latest",
+            "ghcr.io/theshimpz/shimpz-space@sha256:" + "0" * 64,
+            "https://ghcr.io/theshimpz/hello@sha256:" + "a" * 64,
         )
         for image in invalid:
             with self.subTest(image=image), self.assertRaises(local_registry.RegistryError):
@@ -2597,8 +2597,8 @@ class LocalContractTests(unittest.TestCase):
 
     def test_outdated_release_lineage_is_closed_before_lifecycle_actions(self) -> None:
         self.assertTrue(local_registry.is_digest_ref(OUTDATED_ASSISTANT_IMAGE))
-        self.assertFalse(local_registry.is_digest_ref("ghcr.io/roxygens/shimpz-space@sha256:" + "0" * 64))
-        self.assertFalse(local_registry.is_digest_ref("ghcr.io/roxygens/shimpz-space:latest"))
+        self.assertFalse(local_registry.is_digest_ref("ghcr.io/theshimpz/shimpz-space@sha256:" + "0" * 64))
+        self.assertFalse(local_registry.is_digest_ref("ghcr.io/theshimpz/shimpz-space:latest"))
 
         for drift in ("missing-label", "image-label-mismatch", "foreign-repository", "wrong-name"):
             with self.subTest(drift=drift):

@@ -79,7 +79,7 @@ automation binds the published first-party digest without changing runtime confi
 ```sh
 docker build \
   --file team/Dockerfile.local \
-  --build-arg SHIMPZ_ASSISTANT_IMAGE='ghcr.io/roxygens/shimpz-space@sha256:<digest>' \
+  --build-arg SHIMPZ_ASSISTANT_IMAGE='ghcr.io/theshimpz/shimpz-space@sha256:<digest>' \
   team
 ```
 

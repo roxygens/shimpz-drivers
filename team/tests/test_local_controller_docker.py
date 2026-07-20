@@ -23,7 +23,7 @@ FIXTURE = TEAM / "tests" / "fixtures" / "shimpz-assistant"
 REGISTRY_IMAGE = "registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
 BUILDKIT_IMAGE = "moby/buildkit:v0.31.1@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a"
 APP_EGRESS_IMAGE = (
-    "ghcr.io/roxygens/shimpz-space@sha256:8e5e2d97a9332304db265a9b2ccf052d50cef74eb11553adc40ec7c85e69a13f"
+    "ghcr.io/theshimpz/shimpz-space@sha256:8e5e2d97a9332304db265a9b2ccf052d50cef74eb11553adc40ec7c85e69a13f"
 )
 MANAGED_LABEL = "com.shimpz.local.managed"
 PROFILE_LABEL = "com.shimpz.local.profile"

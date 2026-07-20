@@ -46,7 +46,7 @@ COPY local_app.py local_audit.py local_registry.py local_token_store.py local_he
 
 # A normal source build remains possible, but cannot start until release automation supplies the
 # published Shimpz Assistant digest with `--build-arg SHIMPZ_ASSISTANT_IMAGE=repo@sha256:...`.
-ARG SHIMPZ_ASSISTANT_IMAGE=ghcr.io/roxygens/shimpz-space@sha256:0000000000000000000000000000000000000000000000000000000000000000
+ARG SHIMPZ_ASSISTANT_IMAGE=ghcr.io/theshimpz/shimpz-space@sha256:0000000000000000000000000000000000000000000000000000000000000000
 RUN mkdir -p /etc/shimpz && SHIMPZ_ASSISTANT_IMAGE="$SHIMPZ_ASSISTANT_IMAGE" /opt/venv/bin/python -c \
     'import json, os, pathlib; pathlib.Path("/etc/shimpz/local-assistants.json").write_text(json.dumps({"schema": 1, "shimpz_assistant_image": os.environ["SHIMPZ_ASSISTANT_IMAGE"]}, separators=(",", ":")) + "\n", encoding="utf-8")'
 
