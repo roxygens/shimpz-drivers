@@ -40,12 +40,16 @@ class RuntimeWiringTests(unittest.TestCase):
                 self.assertNotIn(legacy, source)
 
     def test_chat_uses_runtime_and_controller_owned_power_execution(self) -> None:
-        calls = _calls(_function("_chat_in_turn"))
-        self.assertIn("chat_orchestrator.run", calls)
+        calls = _calls(_function("_run_hosted_chat_segment"))
+        drive_calls = _calls(_function("_drive_hosted_chat"))
+        setup_calls = _calls(_function("_hosted_chat_setup"))
+        self.assertIn("chat_orchestrator.run_until_pause", drive_calls)
+        self.assertIn("chat_orchestrator.continue_after_pause", drive_calls)
         self.assertIn("_invoke_assistant_power", calls)
-        self.assertIn("_inference_store.load", calls)
-        self.assertNotIn("_run_brain_once", calls)
-        self.assertNotIn("_brain_exec", calls)
+        self.assertIn("_inference_store.load", setup_calls)
+        for legacy in ("_run_brain_once", "_brain_exec"):
+            self.assertNotIn(legacy, calls)
+            self.assertNotIn(legacy, drive_calls)
 
     def test_model_selection_does_not_replace_the_team(self) -> None:
         calls = _calls(_function("_create"))

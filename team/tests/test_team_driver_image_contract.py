@@ -14,6 +14,10 @@ class TeamDriverImageContractTests(unittest.TestCase):
             "chat_orchestrator.py",
             "inference_config.py",
             "power_journal.py",
+            "assistant_secret_challenges.py",
+            "assistant_secret_flow.py",
+            "assistant_secret_store.py",
+            "local_registry.py",
         ):
             with self.subTest(module=module):
                 self.assertIn(module, dockerfile)
@@ -30,6 +34,8 @@ class TeamDriverImageContractTests(unittest.TestCase):
         self.assertIn("chmod 0750 /run/shimpz-brain-runtime", dockerfile)
         self.assertIn("/var/lib/team-driver/inference", dockerfile)
         self.assertIn("/var/lib/team-driver/power-journal", dockerfile)
+        self.assertIn("/var/lib/team-driver/assistant-secrets/state", dockerfile)
+        self.assertIn("/var/lib/team-driver/assistant-secrets/key", dockerfile)
         self.assertIn(
             "/var/lib/team-driver/cleanup \\\n"
             "        /var/lib/team-driver/inference \\\n"

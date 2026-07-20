@@ -380,6 +380,11 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             labels={"team.name": "Marketing", "team.owner": "account_1"},
         )
         config = types.SimpleNamespace(provider="openai", model="gpt-test")
+        secret_store = types.SimpleNamespace(
+            metadata=lambda _team_id, _assistant_id, secret_ids: tuple(
+                types.SimpleNamespace(id=secret_id, configured=True, generation=1) for secret_id in secret_ids
+            ),
+        )
         return anchor, _patched(
             _active_team_assistants=lambda _team_id: (assistant,),
             _require_assistant_genesis=lambda _container: "Use only the declared X Powers.",
@@ -390,6 +395,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             _current_team_anchor=lambda *_args: anchor,
             _brain_runtime=runtime,
             _power_execution_journal=lambda: journal,
+            _assistant_secrets=secret_store,
             _invoke_assistant_power=rpc,
             _commit_chat_terminal=lambda _team_id, _token: True,
         )
@@ -556,7 +562,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             ),
             mock.patch.object(
                 app.chat_orchestrator,
-                "run",
+                "run_until_pause",
                 return_value=app.chat_orchestrator.ChatOutcome(reply="late reply", powers=()),
             ),
             self.assertRaises(app.ApiError) as caught,
@@ -646,7 +652,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                     _invoke_assistant_power=invoke,
                     _commit_chat_terminal=lambda _team_id, _token: True,
                 ),
-                mock.patch.object(app.chat_orchestrator, "run", side_effect=run),
+                mock.patch.object(app.chat_orchestrator, "run_until_pause", side_effect=run),
             ):
                 result = app._chat_in_turn(
                     "team_1",
@@ -830,7 +836,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             ),
             mock.patch.object(
                 app.chat_orchestrator,
-                "run",
+                "run_until_pause",
                 side_effect=app.chat_orchestrator.ApprovalRequiredError(request),
             ),
             self.assertRaises(app.ApiError) as caught,
