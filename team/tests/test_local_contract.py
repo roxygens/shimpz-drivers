@@ -296,8 +296,28 @@ class LocalContractTests(unittest.TestCase):
             "chmod 0750 /run/shimpz-brain-runtime",
             "power_journal.py",
             "/var/lib/shimpz-local/power-journal",
+            "assistant_secret_store.py",
+            "assistant_secret_challenges.py",
+            "assistant_secret_flow.py",
+            "/var/lib/shimpz-local/assistant-secrets/state",
+            "/var/lib/shimpz-local/assistant-secrets/key",
         ):
             self.assertIn(marker, dockerfile)
+        self.assertIn(
+            "chown shimpzlocal:shimpzlocal /var/log/shimpz-local /var/lib/shimpz-local/storage \\\n"
+            "        /var/lib/shimpz-local/inference /var/lib/shimpz-local/power-journal \\\n"
+            "        /var/lib/shimpz-local/assistant-secrets/state "
+            "/var/lib/shimpz-local/assistant-secrets/key &&",
+            dockerfile,
+        )
+        self.assertIn(
+            "chmod 0700 /var/log/shimpz-local /var/lib/shimpz-local/storage "
+            "/var/lib/shimpz-local/inference \\\n"
+            "        /var/lib/shimpz-local/power-journal "
+            "/var/lib/shimpz-local/assistant-secrets/state \\\n"
+            "        /var/lib/shimpz-local/assistant-secrets/key &&",
+            dockerfile,
+        )
         self.assertIn("SHIMPZ_LOCAL_POWER_JOURNAL_PATH", source)
 
     def test_local_controller_accepts_an_injected_power_journal(self) -> None:
