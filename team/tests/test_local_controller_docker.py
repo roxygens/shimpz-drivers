@@ -450,7 +450,16 @@ class DockerFlowTests(unittest.TestCase):
             self.assertEqual(catalog["assistants"][0]["id"], "shimpz-assistant")
             self.assertEqual(
                 catalog["assistants"][0]["powers"],
-                ["create-post", "delete-post", "identity-me", "public-user-lookup"],
+                [
+                    "cancel-direct-upload",
+                    "create-post",
+                    "create-test-direct-upload",
+                    "delete-post",
+                    "identity-me",
+                    "list-direct-uploads",
+                    "public-user-lookup",
+                    "verify-mux-webhook",
+                ],
             )
 
             status, created = self._api(
@@ -650,7 +659,14 @@ class DockerFlowTests(unittest.TestCase):
             )
             self.assertEqual(secret_status, 200)
             secret_items = secret_inventory["assistants"][0]["secrets"]
-            self.assertEqual(secret_items, [])
+            self.assertEqual(
+                [(item["id"], item["configured"], item["mask"]) for item in secret_items],
+                [
+                    ("mux-token-id", False, None),
+                    ("mux-token-secret", False, None),
+                    ("mux-webhook-signing-secret", False, None),
+                ],
+            )
             account_status, account_inventory = self._api(
                 port,
                 token,
@@ -713,7 +729,7 @@ class DockerFlowTests(unittest.TestCase):
             ).stdout.strip()
             self.assertEqual(
                 policy_contract,
-                '["api.x.com"] 0o640 10001 10017',
+                '["api.mux.com", "api.x.com"] 0o640 10001 10017',
             )
 
             _, removed = self._api(
