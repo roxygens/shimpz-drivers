@@ -20,6 +20,7 @@ sys.path.insert(0, str(TEAM))
 
 import assistant_approval_challenges
 import assistant_approval_grants
+import assistant_connection_challenges
 import assistant_secret_challenges
 import assistant_secret_store
 import brain_runtime_client
@@ -29,16 +30,20 @@ import local_audit
 import local_healthcheck
 import local_registry
 import local_token_store
+import oauth_connection_store
+import oauth_pkce_challenges
 
 LOOKUP_INPUT = {"username": "OpenAI"}
 LOOKUP_RESULT = {"id": "123456789", "name": "OpenAI", "username": "OpenAI"}
-ASSISTANT_SECRET_VALUES = {
-    "x-bearer-token": "bearer-test-credential-123456789",
-    "x-api-key": "api-key-test-credential-123456789",
-    "x-api-key-secret": "api-secret-test-credential-123456789",
-    "x-access-token": "access-token-test-credential-123456789",
-    "x-access-token-secret": "access-secret-test-credential-123456789",
+TEST_SECRET_VALUES = {
+    "service-token": "service-test-credential-123456789",
+    "client-key": "client-key-test-credential-123456789",
+    "client-secret": "client-secret-test-credential-123456789",
+    "session-token": "session-token-test-credential-123456789",
+    "session-secret": "session-secret-test-credential-123456789",
 }
+TEST_CONNECTION_ACCESS_TOKEN = "oauth-access-test-token-123456789"  # noqa: S105
+TEST_CONNECTION_REFRESH_TOKEN = "oauth-refresh-test-token-123456789"  # noqa: S105
 CURRENT_ASSISTANT_IMAGE = "ghcr.io/roxygens/shimpz-space@sha256:" + "b" * 64
 LEGACY_ASSISTANT_IMAGE = "ghcr.io/roxygens/shimpz-space@sha256:" + "a" * 64
 
@@ -55,23 +60,57 @@ class LocalContractTests(unittest.TestCase):
             Path("/var/lib/shimpz-local/power-journal/journal.sqlite3"),
         )
 
-    def _registry(self, image: str) -> dict[str, local_registry.AssistantSpec]:
+    def _registry(
+        self,
+        image: str,
+        *,
+        with_test_secrets: bool = False,
+    ) -> dict[str, local_registry.AssistantSpec]:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "registry.json"
             path.write_text(json.dumps({"schema": 1, "shimpz_assistant_image": image}), encoding="utf-8")
-            return local_registry.load_registry(path)
+            registry = local_registry.load_registry(path)
+        if not with_test_secrets:
+            return registry
+        spec = registry["shimpz-assistant"]
+        test_secrets = {
+            secret_id: local_registry.SecretSpec(
+                name=secret_id.replace("-", " ").title(),
+                summary="Test-only credential used to exercise the generic secret boundary.",
+            )
+            for secret_id in TEST_SECRET_VALUES
+        }
+        test_powers = {
+            power_id: replace(
+                power,
+                secrets=tuple(TEST_SECRET_VALUES),
+                connections=(),
+            )
+            for power_id, power in spec.powers.items()
+        }
+        return {
+            spec.assistant_id: replace(
+                spec,
+                powers=test_powers,
+                secrets=test_secrets,
+                connections={},
+            )
+        }
 
     def _chat_controller(
         self,
         directory: str,
         runtime,
         *,
-        configure_secrets: bool = True,
+        configure_secrets: bool | None = None,
     ) -> local_app.LocalController:
         image = "127.0.0.1:5000/shimpz/shimpz-assistant@sha256:" + "a" * 64
         controller = object.__new__(local_app.LocalController)
         controller.space_id = "local-space"
-        controller.registry = self._registry(image)
+        controller.registry = self._registry(
+            image,
+            with_test_secrets=configure_secrets is not None,
+        )
         controller.storage = SimpleNamespace(metadata=lambda _team_id, _files: [])
         controller.inference_store = inference_config.InferenceConfigStore(Path(directory) / "inference")
         controller.inference_store.save(
@@ -88,16 +127,37 @@ class LocalContractTests(unittest.TestCase):
             Path(directory) / "assistant-secrets" / "key" / "aes256.key",
         )
         controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
+        controller.assistant_connections = oauth_connection_store.OAuthConnectionStore(
+            Path(directory) / "assistant-connections" / "state" / "connections.json",
+            Path(directory) / "assistant-connections" / "key" / "aes256.key",
+        )
+        controller.connection_challenges = assistant_connection_challenges.ConnectionChallengeStore()
+        controller.oauth_pkce = oauth_pkce_challenges.OAuthPKCEChallengeStore()
         controller.approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
         controller.approval_grants = assistant_approval_grants.ApprovalGrantStore(
             Path(directory) / "assistant-approvals" / "grants.sqlite3"
         )
         self.addCleanup(controller.approval_grants.close)
-        if configure_secrets:
+        if configure_secrets is True:
             controller.assistant_secrets.put_many(
                 "team_1",
                 "shimpz-assistant",
-                ASSISTANT_SECRET_VALUES,
+                TEST_SECRET_VALUES,
+            )
+        if configure_secrets is None:
+            connection = controller.registry["shimpz-assistant"].connections["x"]
+            controller.assistant_connections.put(
+                "team_1",
+                "shimpz-assistant",
+                "x",
+                connection.provider,
+                connection.scopes,
+                SimpleNamespace(
+                    access_token=TEST_CONNECTION_ACCESS_TOKEN,
+                    refresh_token=TEST_CONNECTION_REFRESH_TOKEN,
+                    scopes=connection.scopes,
+                    expires_in=3600,
+                ),
             )
         controller._blocked_power_workloads = set()
         controller._locks = tuple(threading.RLock() for _ in range(64))
@@ -129,7 +189,7 @@ class LocalContractTests(unittest.TestCase):
                 {
                     "assistant_id": requirement["assistant_id"],
                     "secret_id": secret["id"],
-                    "value": ASSISTANT_SECRET_VALUES[secret["id"]],
+                    "value": TEST_SECRET_VALUES[secret["id"]],
                 }
                 for requirement in challenge["requirements"]
                 for secret in requirement["secrets"]
@@ -154,6 +214,12 @@ class LocalContractTests(unittest.TestCase):
             Path(secret_directory.name) / "key" / "aes256.key",
         )
         controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
+        controller.assistant_connections = oauth_connection_store.OAuthConnectionStore(
+            Path(secret_directory.name) / "assistant-connections" / "state" / "connections.json",
+            Path(secret_directory.name) / "assistant-connections" / "key" / "aes256.key",
+        )
+        controller.connection_challenges = assistant_connection_challenges.ConnectionChallengeStore()
+        controller.oauth_pkce = oauth_pkce_challenges.OAuthPKCEChallengeStore()
         controller.approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
         controller.approval_grants = assistant_approval_grants.ApprovalGrantStore(
             Path(secret_directory.name) / "assistant-approvals" / "grants.sqlite3"
@@ -165,6 +231,7 @@ class LocalContractTests(unittest.TestCase):
             image=CURRENT_ASSISTANT_IMAGE,
             allowed_hosts=(),
             secrets={},
+            connections={},
         )
         controller.registry = {spec.assistant_id: spec}
         network_name = controller._network_name("team_1")
@@ -607,7 +674,7 @@ class LocalContractTests(unittest.TestCase):
         body = json.dumps(
             {
                 "assistant_id": "shimpz-assistant",
-                "values": [{"secret_id": "x-api-key", "value": value}],
+                "values": [{"secret_id": "client-key", "value": value}],
             }
         ).encode()
         captured: dict[str, object] = {}
@@ -694,7 +761,7 @@ class LocalContractTests(unittest.TestCase):
                         "shimpz-assistant",
                         "Shimpz Assistant",
                         ("public-user-lookup",),
-                        (("x-bearer-token", "X Bearer Token", "Required."),),
+                        (("service-token", "Service Token", "Required."),),
                     ),
                 ),
                 object(),
@@ -760,7 +827,7 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(requirement["power_ids"], ["identity-me", "public-user-lookup"])
         self.assertEqual(
             {secret["id"] for secret in requirement["secrets"]},
-            set(ASSISTANT_SECRET_VALUES),
+            set(TEST_SECRET_VALUES),
         )
         self.assertNotIn(LOOKUP_INPUT["username"], repr(response))
         self.assertEqual(pending_batches, (0,))
@@ -782,11 +849,11 @@ class LocalContractTests(unittest.TestCase):
                 raise AssertionError("an oversized Power envelope must not reach resume")
 
         with tempfile.TemporaryDirectory() as directory:
-            controller = self._chat_controller(directory, Runtime())
+            controller = self._chat_controller(directory, Runtime(), configure_secrets=True)
             controller.assistant_secrets.put_many(
                 "team_1",
                 "shimpz-assistant",
-                {"x-bearer-token": "x" * assistant_secret_store.MAX_SECRET_BYTES},
+                {"service-token": "x" * assistant_secret_store.MAX_SECRET_BYTES},
             )
             controller.invoke = lambda *_args: self.fail("an oversized Power envelope executed")
 
@@ -907,7 +974,7 @@ class LocalContractTests(unittest.TestCase):
             configured_for_other_team = controller.assistant_secrets.metadata(
                 "team_2",
                 "shimpz-assistant",
-                tuple(ASSISTANT_SECRET_VALUES),
+                tuple(TEST_SECRET_VALUES),
             )
 
         self.assertEqual(response["reply"], "Connected.")
@@ -958,7 +1025,7 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(pending_batches, (0,))
 
     def test_secret_inventory_returns_only_team_scoped_masks_and_public_metadata(self) -> None:
-        raw_secret = ASSISTANT_SECRET_VALUES["x-bearer-token"]
+        raw_secret = TEST_SECRET_VALUES["service-token"]
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, object(), configure_secrets=False)
             controller.list_assistants = lambda _team_id: {
@@ -967,7 +1034,7 @@ class LocalContractTests(unittest.TestCase):
             controller.assistant_secrets.put_many(
                 "team_1",
                 "shimpz-assistant",
-                {"x-bearer-token": raw_secret},
+                {"service-token": raw_secret},
             )
 
             own_inventory = controller.list_assistant_secrets("team_1")
@@ -981,11 +1048,11 @@ class LocalContractTests(unittest.TestCase):
         own_secrets = {item["id"]: item for item in own_inventory["assistants"][0]["secrets"]}
         other_secrets = {item["id"]: item for item in other_inventory["assistants"][0]["secrets"]}
         self.assertEqual(
-            own_secrets["x-bearer-token"],
+            own_secrets["service-token"],
             {
-                "id": "x-bearer-token",
-                "name": "X Bearer Token",
-                "summary": "App-only token used exclusively for public X profile reads.",
+                "id": "service-token",
+                "name": "Service Token",
+                "summary": "Test-only credential used to exercise the generic secret boundary.",
                 "configured": True,
                 "mask": assistant_secret_store.mask_secret(raw_secret),
             },
@@ -994,27 +1061,27 @@ class LocalContractTests(unittest.TestCase):
 
     def test_secret_replacement_is_declared_atomic_and_returns_only_refreshed_masks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            controller = self._chat_controller(directory, object())
+            controller = self._chat_controller(directory, object(), configure_secrets=True)
             controller.list_assistants = lambda _team_id: {
                 "assistants": [{"assistant": "shimpz-assistant", "status": "running"}]
             }
             before = controller.assistant_secrets.resolve_many(
                 "team_1",
                 "shimpz-assistant",
-                ("x-api-key", "x-api-key-secret"),
+                ("client-key", "client-secret"),
             )
             replacement = "replacement-api-key-123456789"
             response = controller.replace_assistant_secrets(
                 "team_1",
                 {
                     "assistant_id": "shimpz-assistant",
-                    "values": [{"secret_id": "x-api-key", "value": replacement}],
+                    "values": [{"secret_id": "client-key", "value": replacement}],
                 },
             )
             after = controller.assistant_secrets.resolve_many(
                 "team_1",
                 "shimpz-assistant",
-                ("x-api-key", "x-api-key-secret"),
+                ("client-key", "client-secret"),
             )
 
             state_before_invalid = controller.assistant_secrets.state_path.read_bytes()
@@ -1022,13 +1089,13 @@ class LocalContractTests(unittest.TestCase):
                 {
                     "assistant_id": "shimpz-assistant",
                     "values": [
-                        {"secret_id": "x-api-key", "value": "must-not-commit"},
+                        {"secret_id": "client-key", "value": "must-not-commit"},
                         {"secret_id": "undeclared", "value": "invalid"},
                     ],
                 },
                 {
                     "assistant_id": "shimpz-assistant",
-                    "values": [{"secret_id": "x-api-key", "value": "line\nbreak"}],
+                    "values": [{"secret_id": "client-key", "value": "line\nbreak"}],
                 },
             ):
                 with self.subTest(invalid=invalid), self.assertRaises(local_app.ApiProblem) as rejected:
@@ -1036,11 +1103,11 @@ class LocalContractTests(unittest.TestCase):
                 self.assertEqual(rejected.exception.code, "invalid-assistant-secrets")
                 self.assertEqual(controller.assistant_secrets.state_path.read_bytes(), state_before_invalid)
 
-        self.assertEqual(before["x-api-key-secret"], after["x-api-key-secret"])
-        self.assertNotEqual(before["x-api-key"], after["x-api-key"])
-        self.assertEqual(after["x-api-key"], replacement)
+        self.assertEqual(before["client-secret"], after["client-secret"])
+        self.assertNotEqual(before["client-key"], after["client-key"])
+        self.assertEqual(after["client-key"], replacement)
         self.assertNotIn(replacement, repr(response))
-        secret = next(item for item in response["assistants"][0]["secrets"] if item["id"] == "x-api-key")
+        secret = next(item for item in response["assistants"][0]["secrets"] if item["id"] == "client-key")
         self.assertTrue(secret["configured"])
         self.assertEqual(secret["mask"], assistant_secret_store.mask_secret(replacement))
 
@@ -1056,14 +1123,14 @@ class LocalContractTests(unittest.TestCase):
                 return brain_runtime_client.RuntimeTurn(status="completed", reply="Done.", powers=())
 
         with tempfile.TemporaryDirectory() as directory:
-            controller = self._chat_controller(directory, Runtime())
+            controller = self._chat_controller(directory, Runtime(), configure_secrets=True)
             controller.list_assistants = lambda _team_id: {
                 "assistants": [{"assistant": "shimpz-assistant", "status": "running"}]
             }
             before = controller.assistant_secrets.resolve_many(
                 "team_1",
                 "shimpz-assistant",
-                ["x-api-key"],
+                ["client-key"],
             )
             results: list[dict[str, object]] = []
 
@@ -1085,7 +1152,7 @@ class LocalContractTests(unittest.TestCase):
                     "team_1",
                     {
                         "assistant_id": "shimpz-assistant",
-                        "values": [{"secret_id": "x-api-key", "value": "must-not-win-123"}],
+                        "values": [{"secret_id": "client-key", "value": "must-not-win-123"}],
                     },
                 )
             release.set()
@@ -1093,7 +1160,7 @@ class LocalContractTests(unittest.TestCase):
             after = controller.assistant_secrets.resolve_many(
                 "team_1",
                 "shimpz-assistant",
-                ["x-api-key"],
+                ["client-key"],
             )
 
         self.assertFalse(worker.is_alive())
@@ -1119,7 +1186,7 @@ class LocalContractTests(unittest.TestCase):
 
         replacements = {
             secret_id: f"rotated-{index}-credential"
-            for index, secret_id in enumerate(ASSISTANT_SECRET_VALUES)
+            for index, secret_id in enumerate(TEST_SECRET_VALUES)
         }
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, Runtime(), configure_secrets=False)
@@ -1187,7 +1254,12 @@ class LocalContractTests(unittest.TestCase):
                     {
                         "input": LOOKUP_INPUT,
                         "secrets": {},
-                        "connections": {},
+                        "connections": {
+                            "x": {
+                                "type": "oauth2-bearer",
+                                "access_token": TEST_CONNECTION_ACCESS_TOKEN,
+                            }
+                        },
                     },
                 )
             ],
@@ -1195,7 +1267,7 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(response["result"], LOOKUP_RESULT)
 
     def test_power_output_containing_a_secret_is_blocked_and_redacted(self) -> None:
-        raw_secret = ASSISTANT_SECRET_VALUES["x-bearer-token"]
+        raw_secret = TEST_CONNECTION_ACCESS_TOKEN
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, object())
             controller._rpc = lambda *_args: {
