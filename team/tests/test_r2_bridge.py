@@ -382,7 +382,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         config = types.SimpleNamespace(provider="openai", model="gpt-test")
         return anchor, _patched(
             _active_team_assistants=lambda _team_id: (assistant,),
-            _require_assistant_genesis=lambda _container: "Use only the declared weather Powers.",
+            _require_assistant_genesis=lambda _container: "Use only the declared X Powers.",
             _chat_file_metadata=lambda _team_id, _files: [],
             _inference_store=types.SimpleNamespace(load=lambda _team_id: config),
             _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
@@ -665,8 +665,8 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         request = app.brain_runtime_client.PowerRequest(
             "power-1",
             "shimpz-assistant",
-            "search-location",
-            {"query": "Lisbon"},
+            "public-user-lookup",
+            {"username": "XDevelopers"},
             "none",
         )
 
@@ -742,8 +742,8 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         normalized = app.brain_runtime_client.PowerRequest(
             "power-1",
             "shimpz-assistant",
-            "search-location",
-            {"query": "Lisbon", "limit": 5},
+            "public-user-lookup",
+            {"username": "XDevelopers"},
             "none",
         )
         thread_id = app._brain_thread_id("team_1", ANCHOR_ID)
@@ -754,8 +754,8 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 raw = app.brain_runtime_client.PowerRequest(
                     "power-1",
                     "shimpz-assistant",
-                    "search-location",
-                    {"query": "Lisbon"},
+                    "public-user-lookup",
+                    {"username": "XDevelopers"},
                     "none",
                 )
                 return app.brain_runtime_client.RuntimeTurn("power-required", "", (raw,))

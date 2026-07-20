@@ -94,8 +94,7 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
         health_path="/healthz",
         powers={power_id: PowerSpec(**contract) for power_id, contract in assistant_contract.power_contracts().items()},
         secrets={
-            secret_id: SecretSpec(**contract)
-            for secret_id, contract in assistant_contract.secret_contracts().items()
+            secret_id: SecretSpec(**contract) for secret_id, contract in assistant_contract.secret_contracts().items()
         },
         allowed_hosts=assistant_contract.ASSISTANT_ALLOWED_HOSTS,
     )

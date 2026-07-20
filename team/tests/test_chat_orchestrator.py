@@ -135,11 +135,14 @@ class ChatOrchestratorTests(unittest.TestCase):
         )
 
         self.assertIsInstance(progress, chat_orchestrator.ChatSuspension)
-        self.assertEqual(events, [
-            ("validate", "hello-pulse", "hello"),
-            ("validate", "hello-pulse", "hello"),
-            ("pause", 2),
-        ])
+        self.assertEqual(
+            events,
+            [
+                ("validate", "hello-pulse", "hello"),
+                ("validate", "hello-pulse", "hello"),
+                ("pause", 2),
+            ],
+        )
         self.assertEqual(runtime.resumes, [])
 
         resumed = chat_orchestrator.continue_after_pause(

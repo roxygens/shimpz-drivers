@@ -1350,11 +1350,7 @@ class LocalController:
         team_id = validate_team_id(team_id)
         self._network(team_id)
         challenge = self.secret_challenges.current(team_id)
-        return (
-            self._challenge_response(challenge)
-            if challenge is not None
-            else {"team_id": team_id, "status": "none"}
-        )
+        return self._challenge_response(challenge) if challenge is not None else {"team_id": team_id, "status": "none"}
 
     def _invoke_chat_power(
         self,
@@ -1680,9 +1676,7 @@ class LocalController:
             try:
                 claimed = self.secret_challenges.claim(team_id, challenge_id)
                 if claimed is not challenge:
-                    raise assistant_secret_challenges.SecretChallengeNotFoundError(
-                        "secret challenge is unavailable"
-                    )
+                    raise assistant_secret_challenges.SecretChallengeNotFoundError("secret challenge is unavailable")
                 for assistant_id, secrets_by_id in values.items():
                     self.assistant_secrets.put_many(team_id, assistant_id, secrets_by_id)
             except assistant_secret_challenges.SecretChallengeNotFoundError as exc:
