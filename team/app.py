@@ -37,6 +37,8 @@ from urllib.parse import parse_qs, urlparse
 
 import accounts_client
 import assistant_chat
+import assistant_connection_challenges
+import assistant_connection_flow
 import assistant_contract
 import assistant_genesis
 import assistant_manifest
@@ -57,6 +59,10 @@ import manifests
 import marketplace
 import marketplace_image
 import network_policy
+import oauth_connection_service
+import oauth_connection_store
+import oauth_http_client
+import oauth_pkce_challenges
 import pgdriver_client
 import power_journal
 import r2driver_client
@@ -130,6 +136,18 @@ ASSISTANT_SECRET_KEY_PATH = Path(
         "/var/lib/team-driver/assistant-secrets/key/aes256.key",
     )
 )
+ASSISTANT_CONNECTION_STATE_PATH = Path(
+    os.environ.get(
+        "SHIMPZ_TEAM_ASSISTANT_CONNECTION_STATE_PATH",
+        "/var/lib/team-driver/assistant-connections/state/connections.json",
+    )
+)
+ASSISTANT_CONNECTION_KEY_PATH = Path(
+    os.environ.get(
+        "SHIMPZ_TEAM_ASSISTANT_CONNECTION_KEY_PATH",
+        "/var/lib/team-driver/assistant-connections/key/aes256.key",
+    )
+)
 HEALTH_RETRIES = int(os.environ.get("SHIMPZ_HEALTH_RETRIES", "40"))
 HEALTH_DELAY_SECONDS = float(os.environ.get("SHIMPZ_HEALTH_DELAY_SECONDS", "1.5"))
 
@@ -165,6 +183,21 @@ _assistant_secrets = assistant_secret_store.AssistantSecretStore(
     ASSISTANT_SECRET_KEY_PATH,
 )
 _assistant_secret_challenges = assistant_secret_challenges.SecretChallengeStore()
+_assistant_connections = oauth_connection_store.OAuthConnectionStore(
+    ASSISTANT_CONNECTION_STATE_PATH,
+    ASSISTANT_CONNECTION_KEY_PATH,
+)
+_assistant_connection_challenges = assistant_connection_challenges.ConnectionChallengeStore()
+_oauth_pkce_challenges = oauth_pkce_challenges.OAuthPKCEChallengeStore()
+_oauth_http = oauth_http_client.OAuthHTTPClient()
+_x_oauth_client_id = os.environ.get("SHIMPZ_X_OAUTH_CLIENT_ID")
+_oauth_connections = oauth_connection_service.OAuthConnectionService(
+    client_id=_x_oauth_client_id,
+    redirect_uri=oauth_http_client.HOSTED_REDIRECT_URI,
+    challenge=_oauth_pkce_challenges,
+    store=_assistant_connections,
+    http=_oauth_http,
+)
 
 
 def _validated_team_name(value: object) -> str:
@@ -1367,6 +1400,27 @@ def _retain_admitted_assistant_secrets(team_id: str, app_id: str, spec: marketpl
         _assistant_secret_challenges.cancel_team(team_id)
 
 
+def _retain_admitted_assistant_connections(team_id: str, app_id: str, spec: marketplace.AppSpec) -> None:
+    """Prune OAuth grants removed from the exact Assistant contract admitted at install."""
+    if spec.assistant is None:
+        return
+    try:
+        pruned = _assistant_connections.retain_declared(
+            team_id,
+            app_id,
+            tuple(sorted(spec.assistant.connections)),
+        )
+    except oauth_connection_store.OAuthConnectionStoreError as exc:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant connection state is unavailable") from exc
+    if pruned:
+        _assistant_connection_challenges.cancel_team(team_id)
+
+
+def _retain_admitted_assistant_private_state(team_id: str, app_id: str, spec: marketplace.AppSpec) -> None:
+    _retain_admitted_assistant_secrets(team_id, app_id, spec)
+    _retain_admitted_assistant_connections(team_id, app_id, spec)
+
+
 @_serialize_against_team_chat
 def _install_app(
     team_id: str,
@@ -1417,7 +1471,7 @@ def _install_app(
                     HTTPStatus.CONFLICT,
                     f"installed app {app_id!r} is not ready ({status}); uninstall it before reinstalling",
                 )
-            _retain_admitted_assistant_secrets(team_id, app_id, spec)
+            _retain_admitted_assistant_private_state(team_id, app_id, spec)
             return {"team_id": team_id, "app": app_id, "status": status, "installed": False}
         if len(_team_app_containers(team_id)) >= MAX_APPS_PER_TEAM:
             raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, f"app limit reached for {team_id!r} ({MAX_APPS_PER_TEAM})")
@@ -1470,7 +1524,7 @@ def _install_app(
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         f"app {app_id!r} lost readiness before install commit ({committed_status}; rolled back)",
                     )
-                _retain_admitted_assistant_secrets(team_id, app_id, spec)
+                _retain_admitted_assistant_private_state(team_id, app_id, spec)
             except Exception as exc:
                 cleanup = _teardown_app(team_id, app_id, drop_db=spec.db)
                 if not cleanup.complete:
@@ -1496,6 +1550,7 @@ def _uninstall_app(team_id: str, app_id: str, lease: _AuthorizationLease) -> dic
         # Removal is a remediation operation and must remain available for a legacy blocked Team.
         _require_current_authorization(team_id, lease, require_isolation=False)
         _assistant_secret_challenges.cancel_team(team_id)
+        _assistant_connection_challenges.cancel_team(team_id)
         cleanup = _teardown_app(team_id, app_id)
         if not cleanup.complete:
             raise ApiError(
@@ -1506,6 +1561,10 @@ def _uninstall_app(team_id: str, app_id: str, lease: _AuthorizationLease) -> dic
             _assistant_secrets.delete_assistant(team_id, app_id)
         except assistant_secret_store.AssistantSecretError as exc:
             _raise_assistant_secret_error(exc)
+        try:
+            _assistant_connections.delete_assistant(team_id, app_id)
+        except oauth_connection_store.OAuthConnectionStoreError as exc:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant connection state is unavailable") from exc
         return {"team_id": team_id, "app": app_id, "uninstalled": True, "db_dropped": cleanup.db_dropped}
 
 
@@ -1547,17 +1606,20 @@ class _ActiveAssistant:
 
 @dataclass(frozen=True, slots=True)
 class _HostedAssistantSecretSpec:
-    """Small adapter shared with the local secret-flow contract."""
+    """Small adapter shared by the closed secret and connection contracts."""
 
     assistant_id: str
     name: str
     powers: dict[str, object]
     secrets: dict[str, marketplace.SecretSpec]
+    connections: dict[str, marketplace.ConnectionSpec]
 
 
 @dataclass(frozen=True, slots=True)
 class _HostedPowerSecretSpec:
     secrets: tuple[str, ...]
+    connections: tuple[str, ...]
+    summary: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1586,10 +1648,15 @@ def _hosted_secret_spec(active: _ActiveAssistant) -> _HostedAssistantSecretSpec:
         assistant_id=active.assistant_id,
         name=name,
         powers={
-            power_id: _HostedPowerSecretSpec(tuple(getattr(power, "secrets", ())))
+            power_id: _HostedPowerSecretSpec(
+                tuple(getattr(power, "secrets", ())),
+                tuple(getattr(power, "connections", ())),
+                str(getattr(power, "summary", "")),
+            )
             for power_id, power in active.contract.powers.items()
         },
         secrets=getattr(active.contract, "secrets", {}),
+        connections=getattr(active.contract, "connections", {}),
     )
 
 
@@ -1639,8 +1706,9 @@ def _power_operation(
     request: brain_runtime_client.PowerRequest,
     assistant_container_id: object,
     secret_generations: tuple[tuple[str, int], ...] = (),
+    connection_generations: tuple[tuple[str, int], ...] = (),
 ) -> power_journal.Operation:
-    """Commit to one normalized request and secret generation without persisting plaintext."""
+    """Commit to one normalized request and private-state generation without plaintext."""
     if not isinstance(assistant_container_id, str) or not assistant_container_id:
         raise power_journal.PowerJournalConflictError("Assistant generation is invalid")
     try:
@@ -1649,6 +1717,7 @@ def _power_operation(
                 "approval": request.approval,
                 "assistant_container_id": assistant_container_id,
                 "assistant_id": request.assistant_id,
+                "connection_generations": connection_generations,
                 "input": request.input,
                 "power": request.power,
                 "secret_generations": secret_generations,
@@ -1677,6 +1746,10 @@ class _HostedPowerBatch:
             [brain_runtime_client.PowerRequest],
             tuple[tuple[str, int], ...],
         ] = lambda _request: (),
+        connection_generations: Callable[
+            [brain_runtime_client.PowerRequest],
+            tuple[tuple[str, int], ...],
+        ] = lambda _request: (),
     ) -> None:
         self._generation = generation
         self._thread_id = thread_id
@@ -1684,6 +1757,7 @@ class _HostedPowerBatch:
         self._execute = execute
         self._preflight = preflight
         self._secret_generations = secret_generations
+        self._connection_generations = connection_generations
         self._journal: power_journal.PowerJournal | None = None
         self._batch: power_journal.Batch | None = None
         self._operations: dict[str, power_journal.Operation] = {}
@@ -1702,6 +1776,7 @@ class _HostedPowerBatch:
                     request,
                     active.container.id,
                     self._secret_generations(request),
+                    self._connection_generations(request),
                 )
             )
         journal = _power_execution_journal()
@@ -2094,6 +2169,65 @@ def _resolve_power_secrets(
     raise AssertionError("unreachable")
 
 
+def _power_connection_generations(
+    team_id: str,
+    active: _ActiveAssistant,
+    power_id: str,
+) -> tuple[tuple[str, int], ...]:
+    power = active.contract.powers.get(power_id)
+    if power is None:
+        raise power_journal.PowerJournalConflictError("Power connection contract is unavailable")
+    declarations = {
+        connection_id: active.contract.connections[connection_id]
+        for connection_id in getattr(power, "connections", ())
+        if connection_id in active.contract.connections
+    }
+    if len(declarations) != len(getattr(power, "connections", ())):
+        raise power_journal.PowerJournalConflictError("Power connection contract is unavailable")
+    try:
+        metadata = _assistant_connections.metadata(
+            team_id,
+            active.assistant_id,
+            declarations,
+        )
+    except oauth_connection_store.OAuthConnectionStoreError as exc:
+        raise power_journal.PowerJournalConflictError("Power connection state is unavailable") from exc
+    if any(item.status != "connected" or item.generation < 1 for item in metadata):
+        raise power_journal.PowerJournalConflictError("Power connection generation is unavailable")
+    return tuple((item.id, item.generation) for item in metadata)
+
+
+def _refresh_oauth_connection(provider: str, scopes: tuple[str, ...], refresh_token: str) -> object:
+    try:
+        return _oauth_http.refresh(
+            provider_id=provider,
+            client_id=_x_oauth_client_id,
+            refresh_token=refresh_token,
+            scopes=scopes,
+        )
+    except oauth_http_client.OAuthHTTPError as exc:
+        raise oauth_connection_store.OAuthConnectionReauthorizationError(
+            "OAuth connection requires reauthorization"
+        ) from exc
+
+
+def _resolve_power_connections(
+    team_id: str,
+    active: _ActiveAssistant,
+    power_id: str,
+) -> dict[str, dict[str, str]]:
+    try:
+        return assistant_connection_flow.resolve_power_connections(
+            team_id,
+            _hosted_secret_spec(active),
+            power_id,
+            _assistant_connections,
+            _refresh_oauth_connection,
+        )
+    except assistant_connection_flow.ConnectionFlowError as exc:
+        raise ApiError(HTTPStatus.PRECONDITION_REQUIRED, "Assistant connection is unavailable") from exc
+
+
 def _require_hosted_power_rpc_envelope(
     team_id: str,
     bindings: dict[str, _ActiveAssistant],
@@ -2108,8 +2242,13 @@ def _require_hosted_power_rpc_envelope(
         active.contract,
         request.power,
     )
+    connection_values = _resolve_power_connections(team_id, active, request.power)
     try:
-        assistant_secret_flow.require_power_rpc_envelope(request.input, secret_values)
+        assistant_secret_flow.require_power_rpc_envelope(
+            request.input,
+            secret_values,
+            connection_values,
+        )
     except assistant_secret_flow.SecretFlowError as exc:
         raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Assistant Power input is too large") from exc
 
@@ -2146,6 +2285,25 @@ def _assistant_secret_inventory(
         except assistant_secret_store.AssistantSecretError as exc:
             _raise_assistant_secret_error(exc)
     raise AssertionError("unreachable")
+
+
+def _assistant_connection_inventory(
+    team_id: str,
+    lease: _AuthorizationLease,
+) -> dict[str, object]:
+    with _lock_for(team_id):
+        _require_current_authorization(team_id, lease, require_isolation=False)
+        try:
+            payload = assistant_connection_flow.inventory_payload(
+                team_id,
+                _installed_assistant_secret_specs(team_id),
+                _assistant_connections,
+            )
+        except oauth_connection_store.OAuthConnectionStoreError as exc:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant connection state is unavailable") from exc
+        except assistant_connection_flow.ConnectionFlowError as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "Assistant connection contract is unavailable") from exc
+    return {"team_id": team_id, **payload}
 
 
 def _installed_assistant_secret_specs(team_id: str) -> tuple[_HostedAssistantSecretSpec, ...]:
@@ -2236,6 +2394,8 @@ def _invoke_assistant_power(
         raise ApiError(HTTPStatus.CONFLICT, "installed Assistant changed during the chat turn")
     power_spec = contract.powers[power]
     secret_values = _resolve_power_secrets(team_id, assistant_id, contract, power)
+    active = _ActiveAssistant(assistant_id, contract, container)
+    connection_values = _resolve_power_connections(team_id, active, power)
     audit.log(
         "assistant_power",
         team_id,
@@ -2252,7 +2412,11 @@ def _invoke_assistant_power(
             contract.rpc_command,
             power_spec.method,
             power_spec.path,
-            {"input": safe_input, "secrets": secret_values, "connections": {}},
+            {
+                "input": safe_input,
+                "secrets": secret_values,
+                "connections": connection_values,
+            },
         )
     except ApiError as exc:
         audit.log(
@@ -2264,7 +2428,14 @@ def _invoke_assistant_power(
             status=int(exc.status),
         )
         raise
-    if _contains_secret(raw_result, secret_values):
+    private_values = {
+        **secret_values,
+        **{
+            f"connection:{connection_id}": envelope["access_token"]
+            for connection_id, envelope in connection_values.items()
+        },
+    }
+    if _contains_secret(raw_result, private_values):
         audit.log(
             "assistant_power",
             team_id,
@@ -2539,6 +2710,11 @@ def _run_hosted_chat_segment(
         execute_power,
         lambda request: _require_hosted_power_rpc_envelope(team_id, bindings, request),
         lambda request: _power_secret_generations(
+            team_id,
+            bindings[request.assistant_id],
+            request.power,
+        ),
+        lambda request: _power_connection_generations(
             team_id,
             bindings[request.assistant_id],
             request.power,
@@ -2961,6 +3137,15 @@ def _teardown_assistant_secrets(team_id: str) -> bool:
     return True
 
 
+def _teardown_assistant_connections(team_id: str) -> bool:
+    _assistant_connection_challenges.cancel_team(team_id)
+    try:
+        _assistant_connections.delete_team(team_id)
+    except oauth_connection_store.OAuthConnectionStoreError:
+        return False
+    return True
+
+
 def _retire_teardown_r2(team_id: str) -> bool:
     """Cut off every new Team R2 operation before deleting any tenant artifact."""
     try:
@@ -3028,6 +3213,7 @@ def _teardown(team_id: str, *, owner: str, brain_id: str) -> _CleanupResult:
         or not _teardown_storage(team_id)
         or not _teardown_inference(team_id)
         or not _teardown_assistant_secrets(team_id)
+        or not _teardown_assistant_connections(team_id)
         or not _teardown_network_planes(team_id)
     ):
         return _CleanupResult(False, record.db_dropped)
