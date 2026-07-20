@@ -209,6 +209,7 @@ class DockerFlowTests(unittest.TestCase):
         storage_volume = f"shimpz-local-storage-{unique}"
         inference_volume = f"shimpz-local-inference-{unique}"
         power_journal_volume = f"shimpz-local-power-journal-{unique}"
+        approval_state_volume = f"shimpz-local-approval-state-{unique}"
         egress_policy_volume = f"shimpz-local-egress-policy-{unique}"
         egress_audit_volume = f"shimpz-local-egress-audit-{unique}"
         space_id = f"test-space-{unique}"
@@ -316,6 +317,7 @@ class DockerFlowTests(unittest.TestCase):
             self._run("volume", "create", storage_volume)
             self._run("volume", "create", inference_volume)
             self._run("volume", "create", power_journal_volume)
+            self._run("volume", "create", approval_state_volume)
             self._run("volume", "create", egress_policy_volume)
             self._run("volume", "create", egress_audit_volume)
             self._run("network", "create", outbound_network)
@@ -406,6 +408,8 @@ class DockerFlowTests(unittest.TestCase):
                 "--volume",
                 f"{power_journal_volume}:/var/lib/shimpz-local/power-journal",
                 "--volume",
+                f"{approval_state_volume}:/var/lib/shimpz-local/assistant-approvals",
+                "--volume",
                 f"{egress_policy_volume}:/var/lib/shimpz-local/app-egress",
                 "--env",
                 f"SHIMPZ_SPACE_ID={space_id}",
@@ -429,6 +433,15 @@ class DockerFlowTests(unittest.TestCase):
                 "print(oct(stat.S_IMODE(s.st_mode)),s.st_uid,s.st_gid,s.st_nlink)",
             ).stdout.strip()
             self.assertEqual(journal_mode, "0o600 10001 10001 1")
+            approval_mode = self._run(
+                "exec",
+                controller,
+                "/opt/venv/bin/python",
+                "-c",
+                "import os,stat; s=os.stat('/var/lib/shimpz-local/assistant-approvals/grants.sqlite3'); "
+                "print(oct(stat.S_IMODE(s.st_mode)),s.st_uid,s.st_gid,s.st_nlink)",
+            ).stdout.strip()
+            self.assertEqual(approval_mode, "0o600 10001 10001 1")
 
             unauthenticated, _ = self._api(port, None, "GET", "/v1/assistants")
             self.assertEqual(unauthenticated, 401)
@@ -862,6 +875,7 @@ class DockerFlowTests(unittest.TestCase):
                 storage_volume,
                 inference_volume,
                 power_journal_volume,
+                approval_state_volume,
                 egress_policy_volume,
                 egress_audit_volume,
             )
