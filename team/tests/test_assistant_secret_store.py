@@ -73,6 +73,23 @@ class AssistantSecretStoreTests(unittest.TestCase):
                 {"first-secret": "qrstuvwx", "second-secret": "ijklmnop"},
             )
 
+    def test_release_pruning_removes_obsolete_records_without_touching_declared_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            store.put_many(
+                "team_1",
+                "x-assistant",
+                {"kept-secret": "abcdefgh", "removed-secret": "ijklmnop"},
+            )
+
+            self.assertTrue(store.retain_declared("team_1", "x-assistant", ["kept-secret"]))
+            self.assertEqual(
+                store.resolve_many("team_1", "x-assistant", ["kept-secret"]),
+                {"kept-secret": "abcdefgh"},
+            )
+            self.assertFalse(store.metadata("team_1", "x-assistant", ["removed-secret"])[0].configured)
+            self.assertFalse(store.retain_declared("team_1", "x-assistant", ["kept-secret"]))
+
     def test_invalid_batch_does_not_change_existing_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -153,6 +153,7 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-assistant",
             image=CURRENT_ASSISTANT_IMAGE,
             allowed_hosts=(),
+            secrets={},
         )
         controller.registry = {spec.assistant_id: spec}
         network_name = controller._network_name("team_1")
@@ -567,6 +568,40 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(captured["api_key"], key)
         self.assertNotIn(key, json.dumps(response))
 
+    def test_assistant_secret_put_route_reaches_rotation_contract(self) -> None:
+        value = "replacement-secret-123"
+        body = json.dumps(
+            {
+                "assistant_id": "shimpz-assistant",
+                "values": [{"secret_id": "x-api-key", "value": value}],
+            }
+        ).encode()
+        captured: dict[str, object] = {}
+
+        class Controller:
+            @staticmethod
+            def replace_assistant_secrets(team_id, payload):
+                captured.update(team_id=team_id, payload=payload)
+                return {"team_id": team_id, "assistants": []}
+
+        handler = object.__new__(local_app.Handler)
+        handler.command = "PUT"
+        handler.server = SimpleNamespace(controller=Controller())
+        handler.headers = Message()
+        handler.headers["Content-Type"] = "application/json"
+        handler.headers["Content-Length"] = str(len(body))
+        handler.rfile = BytesIO(body)
+
+        status, response, operation, team_id, _assistant = handler._assistant_secret_route(
+            ["v1", "teams", "team_1", "assistant-secrets"]
+        )
+
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(operation, "assistant-secret-replace")
+        self.assertEqual(team_id, "team_1")
+        self.assertEqual(captured["payload"]["values"][0]["value"], value)
+        self.assertNotIn(value, json.dumps(response))
+
     def test_chat_sends_key_only_to_runtime_and_returns_no_secret(self) -> None:
         class Runtime:
             context = None
@@ -889,6 +924,121 @@ class LocalContractTests(unittest.TestCase):
         secret = next(item for item in response["assistants"][0]["secrets"] if item["id"] == "x-api-key")
         self.assertTrue(secret["configured"])
         self.assertEqual(secret["mask"], assistant_secret_store.mask_secret(replacement))
+
+    def test_secret_rotation_is_excluded_while_a_chat_turn_is_active(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        class Runtime:
+            def start(self, _context, _message):
+                started.set()
+                if not release.wait(timeout=2):
+                    raise AssertionError("test did not release chat")
+                return brain_runtime_client.RuntimeTurn(status="completed", reply="Done.", powers=())
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime())
+            controller.list_assistants = lambda _team_id: {
+                "assistants": [{"assistant": "shimpz-assistant", "status": "running"}]
+            }
+            before = controller.assistant_secrets.resolve_many(
+                "team_1",
+                "shimpz-assistant",
+                ["x-api-key"],
+            )
+            results: list[dict[str, object]] = []
+
+            def turn() -> None:
+                results.append(
+                    controller.chat(
+                        "team_1",
+                        {"message": "Wait", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                        "openai",
+                        "sk-test-0123456789",
+                    )
+                )
+
+            worker = threading.Thread(target=turn)
+            worker.start()
+            self.assertTrue(started.wait(timeout=2))
+            with self.assertRaises(local_app.ApiProblem) as blocked:
+                controller.replace_assistant_secrets(
+                    "team_1",
+                    {
+                        "assistant_id": "shimpz-assistant",
+                        "values": [{"secret_id": "x-api-key", "value": "must-not-win-123"}],
+                    },
+                )
+            release.set()
+            worker.join(timeout=2)
+            after = controller.assistant_secrets.resolve_many(
+                "team_1",
+                "shimpz-assistant",
+                ["x-api-key"],
+            )
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(blocked.exception.code, "chat-active")
+        self.assertEqual(before, after)
+        self.assertEqual(results[0]["reply"], "Done.")
+
+    def test_rotation_invalidates_a_stale_jit_challenge_before_it_can_overwrite_values(self) -> None:
+        request = brain_runtime_client.PowerRequest(
+            interrupt_id="identity",
+            assistant_id="shimpz-assistant",
+            power="identity-me",
+            input={},
+            approval="none",
+        )
+
+        class Runtime:
+            def start(self, _context, _message):
+                return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=(request,))
+
+            def resume(self, _context, _results):
+                raise AssertionError("stale JIT challenge must never resume")
+
+        replacements = {
+            secret_id: f"rotated-{index}-credential"
+            for index, secret_id in enumerate(ASSISTANT_SECRET_VALUES)
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime(), configure_secrets=False)
+            controller.list_assistants = lambda _team_id: {
+                "assistants": [{"assistant": "shimpz-assistant", "status": "running"}]
+            }
+            challenge = controller.chat(
+                "team_1",
+                {"message": "Who am I?", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                "openai",
+                "sk-test-0123456789",
+            )
+            stale = self._secret_submission(challenge)
+            controller.replace_assistant_secrets(
+                "team_1",
+                {
+                    "assistant_id": "shimpz-assistant",
+                    "values": [
+                        {"secret_id": secret_id, "value": value}
+                        for secret_id, value in replacements.items()
+                    ],
+                },
+            )
+            with self.assertRaises(local_app.ApiProblem) as rejected:
+                controller.submit_chat_secrets(
+                    "team_1",
+                    stale,
+                    "openai",
+                    "sk-test-0123456789",
+                )
+            stored = controller.assistant_secrets.resolve_many(
+                "team_1",
+                "shimpz-assistant",
+                tuple(replacements),
+            )
+
+        self.assertEqual(rejected.exception.code, "assistant-secret-challenge-expired")
+        self.assertEqual(stored, replacements)
 
     def test_power_rpc_receives_only_the_validated_input_and_declared_secrets(self) -> None:
         captured: list[object] = []
@@ -1766,6 +1916,28 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(result, {"assistant": "shimpz-assistant", "installed": False})
         self.assertEqual(events, ["reload", "trusted", "reload", ("remove", True), ("create", trusted_image)])
         self.assertEqual(container.attrs["Config"]["Image"], LEGACY_ASSISTANT_IMAGE)
+
+    def test_successful_assistant_update_prunes_secrets_removed_by_the_new_release(self) -> None:
+        controller, _container, _events = self._lifecycle_controller()
+        spec = controller.registry["shimpz-assistant"]
+        spec.secrets = {"kept-secret": SimpleNamespace()}
+        controller.assistant_secrets.put_many(
+            "team_1",
+            "shimpz-assistant",
+            {"kept-secret": "abcdefgh", "removed-secret": "ijklmnop"},
+        )
+        controller._trusted_image = lambda _spec: object()
+        controller._create_assistant_container = lambda *_args: None
+
+        controller.install_assistant("team_1", "shimpz-assistant")
+
+        self.assertEqual(
+            controller.assistant_secrets.resolve_many("team_1", "shimpz-assistant", ["kept-secret"]),
+            {"kept-secret": "abcdefgh"},
+        )
+        self.assertFalse(
+            controller.assistant_secrets.metadata("team_1", "shimpz-assistant", ["removed-secret"])[0].configured
+        )
 
     def test_new_assistant_is_admitted_before_egress_and_start(self) -> None:
         events: list[object] = []

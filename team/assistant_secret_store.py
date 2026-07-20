@@ -469,6 +469,30 @@ class AssistantSecretStore:
                 for secret_id in declared
             )
 
+    def retain_declared(self, team_id: object, assistant_id: object, declared_ids: object) -> bool:
+        """Atomically discard encrypted records removed from an Assistant's new release."""
+        team = _canonical_team_id(team_id)
+        assistant = _canonical_id(assistant_id, "Assistant id")
+        declared = set(_canonical_ids(declared_ids))
+        with self._lock:
+            state = self._read_state()
+            teams = state["teams"]
+            if not isinstance(teams, dict) or not isinstance(teams.get(team), dict):
+                return False
+            assistants = teams[team]
+            records = self._record_set(state, team, assistant, create=False)
+            obsolete = set(records) - declared
+            if not obsolete:
+                return False
+            for secret_id in obsolete:
+                records.pop(secret_id)
+            if not records:
+                assistants.pop(assistant, None)
+            if not assistants:
+                teams.pop(team, None)
+            self._write_state(state)
+            return True
+
     def delete_assistant(self, team_id: object, assistant_id: object) -> bool:
         team = _canonical_team_id(team_id)
         assistant = _canonical_id(assistant_id, "Assistant id")

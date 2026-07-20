@@ -1362,17 +1362,31 @@ class LocalController:
                 "Assistant secret replacement is invalid",
                 code="invalid-assistant-secrets",
             ) from exc
-        with self._lock(team_id):
-            network = self._network(team_id)
-            container = self._assistant_container(team_id, spec.assistant_id)
-            self._validate_container(container, team_id, spec, network.name)
-            try:
-                self.assistant_secrets.put_many(team_id, spec.assistant_id, replacements)
-                installed = self.list_assistants(team_id)["assistants"]
-                specs = [self._resolve(item["assistant"]) for item in installed]
-                return assistant_secret_flow.inventory_payload(team_id, specs, self.assistant_secrets)
-            except assistant_secret_store.AssistantSecretError as exc:
-                self._raise_secret_problem(exc)
+        chat_lock = self._chat_lock(team_id)
+        if not chat_lock.acquire(blocking=False):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant secrets cannot change during an active chat turn",
+                code="chat-active",
+            )
+        try:
+            with self._lock(team_id):
+                network = self._network(team_id)
+                container = self._assistant_container(team_id, spec.assistant_id)
+                self._validate_container(container, team_id, spec, network.name)
+                # A paused continuation is bound to the generations it observed. Cancelling both
+                # challenge kinds before the atomic write prevents stale JIT input from winning later.
+                self.secret_challenges.cancel_team(team_id)
+                self.approval_challenges.cancel_team(team_id)
+                try:
+                    self.assistant_secrets.put_many(team_id, spec.assistant_id, replacements)
+                    installed = self.list_assistants(team_id)["assistants"]
+                    specs = [self._resolve(item["assistant"]) for item in installed]
+                    return assistant_secret_flow.inventory_payload(team_id, specs, self.assistant_secrets)
+                except assistant_secret_store.AssistantSecretError as exc:
+                    self._raise_secret_problem(exc)
+        finally:
+            chat_lock.release()
         raise AssertionError("unreachable")
 
     @staticmethod
@@ -2613,6 +2627,10 @@ class LocalController:
                 code="docker-remove-failed",
             ) from exc
         self._create_assistant_container(team_id, spec, network, image)
+        try:
+            self.assistant_secrets.retain_declared(team_id, spec.assistant_id, tuple(spec.secrets))
+        except assistant_secret_store.AssistantSecretError as exc:
+            self._raise_secret_problem(exc)
 
     def install_assistant(self, team_id: str, assistant_id: str) -> dict[str, object]:
         team_id = validate_team_id(team_id)
@@ -3265,17 +3283,6 @@ class Handler(BaseHTTPRequestHandler):
                 team_id,
                 None,
             )
-        if self.command == "PUT":
-            return (
-                HTTPStatus.OK,
-                self.server.controller.replace_assistant_secrets(
-                    team_id,
-                    self._body(max_bytes=MAX_SECRET_BODY_BYTES),
-                ),
-                "assistant-secret-replace",
-                team_id,
-                None,
-            )
         return None
 
     def _chat_route(self, parts: list[str]) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
@@ -3365,6 +3372,17 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 self.server.controller.list_assistant_secrets(team_id),
                 "assistant-secret-list",
+                team_id,
+                None,
+            )
+        if self.command == "PUT":
+            return (
+                HTTPStatus.OK,
+                self.server.controller.replace_assistant_secrets(
+                    team_id,
+                    self._body(max_bytes=MAX_SECRET_BODY_BYTES),
+                ),
+                "assistant-secret-replace",
                 team_id,
                 None,
             )
