@@ -65,6 +65,8 @@ def requirements_for_batch(
                 power_id=request.power,
                 power_summary=power.summary,
                 input_json=input_json,
+                approval=request.approval,
+                assistant_image=active.spec.image,
             )
         )
     return tuple(requirements)
@@ -84,6 +86,7 @@ def challenge_payload(challenge: assistant_approval_challenges.PendingApprovalCh
                 "power_id": requirement.power_id,
                 "power_summary": requirement.power_summary,
                 "input": json.loads(requirement.input_json),
+                "approval": requirement.approval,
             }
             for requirement in challenge.requirements
         ],

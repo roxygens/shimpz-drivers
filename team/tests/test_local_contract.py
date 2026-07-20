@@ -19,6 +19,7 @@ TEAM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEAM))
 
 import assistant_approval_challenges
+import assistant_approval_grants
 import assistant_secret_challenges
 import assistant_secret_store
 import brain_runtime_client
@@ -88,6 +89,10 @@ class LocalContractTests(unittest.TestCase):
         )
         controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
         controller.approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
+        controller.approval_grants = assistant_approval_grants.ApprovalGrantStore(
+            Path(directory) / "assistant-approvals" / "grants.sqlite3"
+        )
+        self.addCleanup(controller.approval_grants.close)
         if configure_secrets:
             controller.assistant_secrets.put_many(
                 "team_1",
@@ -148,6 +153,10 @@ class LocalContractTests(unittest.TestCase):
         )
         controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
         controller.approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
+        controller.approval_grants = assistant_approval_grants.ApprovalGrantStore(
+            Path(secret_directory.name) / "assistant-approvals" / "grants.sqlite3"
+        )
+        self.addCleanup(controller.approval_grants.close)
         controller._admit_assistant_allowed_hosts = lambda _container, spec: tuple(sorted(spec.allowed_hosts))
         spec = SimpleNamespace(
             assistant_id="shimpz-assistant",
@@ -366,6 +375,7 @@ class LocalContractTests(unittest.TestCase):
     def test_local_controller_accepts_an_injected_power_journal(self) -> None:
         image = "127.0.0.1:5000/shimpz/shimpz-assistant@sha256:" + "a" * 64
         injected = SimpleNamespace()
+        approval_grants = SimpleNamespace()
         client = SimpleNamespace(
             info=lambda: {"SecurityOptions": ["name=seccomp"], "NCPU": 2},
         )
@@ -377,9 +387,11 @@ class LocalContractTests(unittest.TestCase):
             SimpleNamespace(),
             brain_runtime=SimpleNamespace(),
             power_state=injected,
+            approval_grants=approval_grants,
         )
 
         self.assertIs(controller.power_state, injected)
+        self.assertIs(controller.approval_grants, approval_grants)
         self.assertEqual(
             local_app.LOCAL_POWER_JOURNAL_PATH,
             Path("/var/lib/shimpz-local/power-journal/journal.sqlite3"),
@@ -1314,6 +1326,7 @@ class LocalContractTests(unittest.TestCase):
         controller.space_id = "local-space"
         controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
         controller.approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
+        controller.approval_grants = SimpleNamespace(revoke_team=lambda _team_id: 0)
         controller.assistant_secrets = SimpleNamespace(delete_team=lambda _team_id: False)
         controller._active_chat_guard = threading.Lock()
         controller._active_chat_tokens = {"team_1": "turn-token"}
@@ -1406,6 +1419,7 @@ class LocalContractTests(unittest.TestCase):
         controller.space_id = "local-space"
         controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
         controller.approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
+        controller.approval_grants = SimpleNamespace(revoke_team=lambda _team_id: 0)
         controller.assistant_secrets = SimpleNamespace(delete_team=lambda _team_id: False)
         controller._active_chat_guard = threading.Lock()
         controller._active_chat_tokens = {}
@@ -1456,6 +1470,7 @@ class LocalContractTests(unittest.TestCase):
         controller.space_id = "local-space"
         controller.secret_challenges = assistant_secret_challenges.SecretChallengeStore()
         controller.approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
+        controller.approval_grants = SimpleNamespace(revoke_team=lambda _team_id: 0)
         controller.assistant_secrets = SimpleNamespace(delete_team=lambda _team_id: False)
         controller._active_chat_guard = threading.Lock()
         controller._active_chat_tokens = {}
@@ -1738,6 +1753,74 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(runtime.resumes, [{"power-1": {"id": "123", "text": "Approved test Post"}}])
         self.assertEqual(replay.exception.code, "assistant-approval-challenge-expired")
 
+    def test_once_approval_is_remembered_for_one_team_assistant_power_release_and_can_be_revoked(self) -> None:
+        class Runtime:
+            def __init__(self) -> None:
+                self.turn = 0
+
+            def start(self, _context, _message):
+                self.turn += 1
+                request = brain_runtime_client.PowerRequest(
+                    interrupt_id=f"power-{self.turn}",
+                    assistant_id="shimpz-assistant",
+                    power="create-post",
+                    input={"text": f"Post {self.turn}"},
+                    approval="once",
+                )
+                return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=(request,))
+
+            def resume(self, _context, _results):
+                return brain_runtime_client.RuntimeTurn(status="completed", reply="Published.", powers=())
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime())
+            spec = controller.registry["shimpz-assistant"]
+            spec.powers["create-post"] = replace(spec.powers["create-post"], approval="once")
+            invoked: list[object] = []
+            controller.invoke = lambda _team, _assistant, power, payload: (
+                invoked.append((power, payload)) or {"result": {"id": f"post-{len(invoked)}"}}
+            )
+
+            first = controller.chat(
+                "team_1",
+                {"message": "First", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                "openai",
+                "sk-test-0123456789",
+            )
+            self.assertEqual(first["requirements"][0]["approval"], "once")
+            controller.submit_chat_approval(
+                "team_1",
+                {"challenge_id": first["challenge_id"], "approved": True},
+                "openai",
+                "sk-test-0123456789",
+            )
+            second = controller.chat(
+                "team_1",
+                {"message": "Second", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                "openai",
+                "sk-test-0123456789",
+            )
+            inventory = controller.list_assistant_approval_grants("team_1")
+            revoked = controller.revoke_assistant_approval_grants("team_1")
+            third = controller.chat(
+                "team_1",
+                {"message": "Third", "files": [], "assistant_ids": ["shimpz-assistant"]},
+                "openai",
+                "sk-test-0123456789",
+            )
+
+        self.assertEqual(second["reply"], "Published.")
+        self.assertEqual(len(invoked), 2)
+        self.assertEqual(
+            inventory,
+            {
+                "team_id": "team_1",
+                "grants": [{"assistant_id": "shimpz-assistant", "power_id": "create-post"}],
+            },
+        )
+        self.assertEqual(revoked, {"team_id": "team_1", "revoked": 1})
+        self.assertEqual(third["status"], "approval-required")
+
     def test_secret_continuation_can_pause_for_approval_before_any_power_runs(self) -> None:
         request = brain_runtime_client.PowerRequest(
             interrupt_id="create-1",
@@ -1926,6 +2009,16 @@ class LocalContractTests(unittest.TestCase):
             "shimpz-assistant",
             {"kept-secret": "abcdefgh", "removed-secret": "ijklmnop"},
         )
+        controller.approval_grants.grant_many(
+            (
+                assistant_approval_grants.Grant(
+                    "team_1",
+                    "shimpz-assistant",
+                    "create-post",
+                    CURRENT_ASSISTANT_IMAGE,
+                ),
+            )
+        )
         controller._trusted_image = lambda _spec: object()
         controller._create_assistant_container = lambda *_args: None
 
@@ -1937,6 +2030,35 @@ class LocalContractTests(unittest.TestCase):
         )
         self.assertFalse(
             controller.assistant_secrets.metadata("team_1", "shimpz-assistant", ["removed-secret"])[0].configured
+        )
+        self.assertEqual(controller.approval_grants.list_team("team_1"), ())
+
+    def test_unready_same_release_recovery_preserves_once_approval(self) -> None:
+        controller, container, _events = self._lifecycle_controller()
+        spec = controller.registry["shimpz-assistant"]
+        controller.approval_grants.grant_many(
+            (
+                assistant_approval_grants.Grant(
+                    "team_1",
+                    "shimpz-assistant",
+                    "create-post",
+                    CURRENT_ASSISTANT_IMAGE,
+                ),
+            )
+        )
+        controller._trusted_image = lambda _spec: object()
+        controller._validate_container = lambda *_args: None
+        controller._create_assistant_container = lambda *_args: None
+
+        controller._replace_unready_assistant("team_1", spec, SimpleNamespace(name="team-network"), container)
+
+        self.assertTrue(
+            controller.approval_grants.is_granted(
+                "team_1",
+                "shimpz-assistant",
+                "create-post",
+                CURRENT_ASSISTANT_IMAGE,
+            )
         )
 
     def test_new_assistant_is_admitted_before_egress_and_start(self) -> None:

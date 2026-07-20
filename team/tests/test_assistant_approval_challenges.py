@@ -15,6 +15,8 @@ def requirement(interrupt_id: str = "interrupt-1") -> assistant_approval_challen
         power_id="create-post",
         power_summary="Publish one approved Post.",
         input_json='{"text":"Approved Post"}',
+        approval="each-run",
+        assistant_image="ghcr.io/roxygens/shimpz-assistant@sha256:" + "a" * 64,
     )
 
 

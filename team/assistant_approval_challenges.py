@@ -31,6 +31,8 @@ class ApprovalRequirement:
     power_id: str
     power_summary: str
     input_json: str
+    approval: str
+    assistant_image: str
 
 
 @dataclass(frozen=True, slots=True)

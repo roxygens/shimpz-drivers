@@ -30,8 +30,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import docker
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
+from docker.types import LogConfig, Ulimit
+
 import assistant_approval_challenges
 import assistant_approval_flow
+import assistant_approval_grants
 import assistant_chat
 import assistant_contract
 import assistant_genesis
@@ -42,14 +47,11 @@ import assistant_secret_store
 import brain_runtime_client
 import brain_runtime_token_store
 import chat_orchestrator
-import docker
 import inference_config
 import local_audit
 import local_token_store
 import power_journal
 import team_storage
-from docker.errors import APIError, DockerException, ImageNotFound, NotFound
-from docker.types import LogConfig, Ulimit
 from local_registry import (
     AssistantSpec,
     RegistryError,
@@ -116,6 +118,12 @@ LOCAL_POWER_JOURNAL_PATH = Path(
     os.environ.get(
         "SHIMPZ_LOCAL_POWER_JOURNAL_PATH",
         "/var/lib/shimpz-local/power-journal/journal.sqlite3",
+    )
+)
+LOCAL_APPROVAL_GRANTS_PATH = Path(
+    os.environ.get(
+        "SHIMPZ_LOCAL_APPROVAL_GRANTS_PATH",
+        "/var/lib/shimpz-local/assistant-approvals/grants.sqlite3",
     )
 )
 _FILE_UPLOAD_SLOTS = threading.BoundedSemaphore(1)
@@ -483,6 +491,7 @@ class LocalController:
         assistant_secrets: assistant_secret_store.AssistantSecretStore | None = None,
         secret_challenges: assistant_secret_challenges.SecretChallengeStore | None = None,
         approval_challenges: assistant_approval_challenges.ApprovalChallengeStore | None = None,
+        approval_grants: assistant_approval_grants.ApprovalGrantStore | None = None,
     ) -> None:
         self.client = client
         self.space_id = validate_space_id(space_id)
@@ -496,6 +505,9 @@ class LocalController:
         self.assistant_secrets = assistant_secrets or assistant_secret_store.AssistantSecretStore()
         self.secret_challenges = secret_challenges or assistant_secret_challenges.SecretChallengeStore()
         self.approval_challenges = approval_challenges or assistant_approval_challenges.ApprovalChallengeStore()
+        self.approval_grants = approval_grants or assistant_approval_grants.ApprovalGrantStore(
+            LOCAL_APPROVAL_GRANTS_PATH
+        )
         self._assistant_genesis_cache = assistant_genesis.GenesisCache()
         self._assistant_allowed_hosts_cache = assistant_manifest.ManifestContractCache()
         self._blocked_power_workloads: set[str] = set()
@@ -1285,6 +1297,34 @@ class LocalController:
         except assistant_secret_store.AssistantSecretError as exc:
             self._raise_secret_problem(exc)
 
+    @staticmethod
+    def _raise_approval_grant_problem(exc: assistant_approval_grants.ApprovalGrantError) -> None:
+        raise ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Assistant approval state is unavailable",
+            code="assistant-approval-state-unavailable",
+        ) from exc
+
+    def _revoke_assistant_approval_grants(self, team_id: str, assistant_id: str) -> None:
+        try:
+            self.approval_grants.revoke_assistant(team_id, assistant_id)
+        except assistant_approval_grants.ApprovalGrantError as exc:
+            self._raise_approval_grant_problem(exc)
+
+    def _revoke_team_approval_grants(self, team_id: str) -> int:
+        try:
+            return self.approval_grants.revoke_team(team_id)
+        except assistant_approval_grants.ApprovalGrantError as exc:
+            self._raise_approval_grant_problem(exc)
+        raise AssertionError("unreachable")
+
+    def _revoke_all_approval_grants(self) -> int:
+        try:
+            return self.approval_grants.revoke_all()
+        except assistant_approval_grants.ApprovalGrantError as exc:
+            self._raise_approval_grant_problem(exc)
+        raise AssertionError("unreachable")
+
     def _power_secret_generations(
         self,
         team_id: str,
@@ -1413,6 +1453,38 @@ class LocalController:
         challenge = self.approval_challenges.current(team_id)
         return self._approval_response(challenge) if challenge is not None else {"team_id": team_id, "status": "none"}
 
+    def list_assistant_approval_grants(self, team_id: str) -> dict[str, object]:
+        team_id = validate_team_id(team_id)
+        self._network(team_id)
+        try:
+            grants = self.approval_grants.list_team(team_id)
+        except assistant_approval_grants.ApprovalGrantError as exc:
+            self._raise_approval_grant_problem(exc)
+        return {
+            "team_id": team_id,
+            "grants": [
+                {"assistant_id": item.assistant_id, "power_id": item.power_id}
+                for item in grants
+            ],
+        }
+
+    def revoke_assistant_approval_grants(self, team_id: str) -> dict[str, object]:
+        team_id = validate_team_id(team_id)
+        self._network(team_id)
+        chat_lock = self._chat_lock(team_id)
+        if not chat_lock.acquire(blocking=False):
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant approvals cannot change during an active chat turn",
+                code="chat-active",
+            )
+        try:
+            with self._lock(team_id):
+                revoked = self._revoke_team_approval_grants(team_id)
+        finally:
+            chat_lock.release()
+        return {"team_id": team_id, "revoked": revoked}
+
     def _invoke_chat_power(
         self,
         team_id: str,
@@ -1482,7 +1554,7 @@ class LocalController:
         durable_batch: _LocalPowerBatch,
         pause_for_secrets: Callable,
         pause_for_approval: Callable,
-        approved_interrupts: frozenset[str],
+        approval_granted: Callable,
         cancelled: Callable[[], bool],
         validate_context: Callable[[], None],
     ) -> chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension:
@@ -1498,7 +1570,7 @@ class LocalController:
                     batch_delivered=durable_batch.delivered,
                     pause_before_batch=pause_for_secrets,
                     pause_for_approval=pause_for_approval,
-                    approval_granted=lambda request: request.interrupt_id in approved_interrupts,
+                    approval_granted=approval_granted,
                     cancelled=cancelled,
                     validate_context=validate_context,
                 )
@@ -1512,7 +1584,7 @@ class LocalController:
                 batch_delivered=durable_batch.delivered,
                 pause_before_batch=pause_for_secrets,
                 pause_for_approval=pause_for_approval,
-                approval_granted=lambda request: request.interrupt_id in approved_interrupts,
+                approval_granted=approval_granted,
                 cancelled=cancelled,
                 validate_context=validate_context,
             )
@@ -1672,6 +1744,23 @@ class LocalController:
                 ) from exc
             return bool(approval_requirements)
 
+        def approval_granted(request: brain_runtime_client.PowerRequest) -> bool:
+            if request.approval == "none" or request.interrupt_id in approved_interrupts:
+                return True
+            if request.approval != "once":
+                return False
+            active = _required_active_assistant(bindings, request.assistant_id)
+            try:
+                return self.approval_grants.is_granted(
+                    team_id,
+                    request.assistant_id,
+                    request.power,
+                    active.spec.image,
+                )
+            except assistant_approval_grants.ApprovalGrantError as exc:
+                self._raise_approval_grant_problem(exc)
+            raise AssertionError("unreachable")
+
         def validate_context() -> None:
             current = self._chat_setup(team_id, file_ids, provider, assistant_ids)
             if self._chat_identity(*current) != identity:
@@ -1690,7 +1779,7 @@ class LocalController:
             durable_batch,
             pause_for_secrets,
             pause_for_approval,
-            approved_interrupts,
+            approval_granted,
             lambda: self._chat_cancelled(token),
             validate_context,
         )
@@ -1786,12 +1875,26 @@ class LocalController:
                     raise assistant_approval_challenges.ApprovalChallengeNotFoundError(
                         "approval challenge is unavailable"
                     )
+                remembered = tuple(
+                    assistant_approval_grants.Grant(
+                        team_id=team_id,
+                        assistant_id=requirement.assistant_id,
+                        power_id=requirement.power_id,
+                        image=requirement.assistant_image,
+                    )
+                    for requirement in challenge.requirements
+                    if requirement.approval == "once"
+                )
+                if remembered:
+                    self.approval_grants.grant_many(remembered)
             except assistant_approval_challenges.ApprovalChallengeNotFoundError as exc:
                 raise ApiProblem(
                     HTTPStatus.CONFLICT,
                     "Assistant approval expired; retry the message",
                     code="assistant-approval-challenge-expired",
                 ) from exc
+            except assistant_approval_grants.ApprovalGrantError as exc:
+                self._raise_approval_grant_problem(exc)
         return pending, approved_interrupts
 
     def _store_chat_secrets(
@@ -2616,6 +2719,7 @@ class LocalController:
     def _replace_outdated_assistant(self, team_id: str, spec: AssistantSpec, network, existing) -> None:
         image = self._trusted_image(spec)
         self._validate_container_isolation(existing, team_id, spec, network.name)
+        self._revoke_assistant_approval_grants(team_id, spec.assistant_id)
         try:
             self._assistant_genesis_cache.discard(existing.id)
             self._assistant_allowed_hosts_cache.discard(existing.id)
@@ -2667,6 +2771,7 @@ class LocalController:
                 return {"assistant": assistant_id, "installed": False}
 
             image = self._trusted_image(spec)
+            self._revoke_assistant_approval_grants(team_id, spec.assistant_id)
             self._create_assistant_container(team_id, spec, network, image)
             return {"assistant": assistant_id, "installed": True}
 
@@ -2677,6 +2782,7 @@ class LocalController:
         self.approval_challenges.cancel_team(team_id)
         with self._lock(team_id):
             network = self._network(team_id)
+            self._revoke_assistant_approval_grants(team_id, assistant_id)
             container = self._assistant_container(team_id, assistant_id, required=False)
             if container is None:
                 if spec.allowed_hosts:
@@ -2859,6 +2965,7 @@ class LocalController:
             )
         try:
             with self._lock(team_id):
+                self._revoke_team_approval_grants(team_id)
                 network = self._network(team_id, required=False)
                 try:
                     containers = self.client.containers.list(**self._assistant_filters(team_id))
@@ -3013,6 +3120,7 @@ class LocalController:
                     validate_team_id(team_id)
                     self._validate_network(network, team_id)
                 self._delete_all_secret_state()
+                self._revoke_all_approval_grants()
                 for container in containers:
                     container.remove(force=True)
                     self._blocked_power_workloads.discard(container.id)
@@ -3388,6 +3496,31 @@ class Handler(BaseHTTPRequestHandler):
             )
         return None
 
+    def _assistant_approval_route(
+        self,
+        parts: list[str],
+    ) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
+        if len(parts) != 4 or parts[:2] != ["v1", "teams"] or parts[3] != "assistant-approvals":
+            return None
+        team_id = validate_team_id(parts[2])
+        if self.command == "GET":
+            return (
+                HTTPStatus.OK,
+                self.server.controller.list_assistant_approval_grants(team_id),
+                "assistant-approval-list",
+                team_id,
+                None,
+            )
+        if self.command == "DELETE":
+            return (
+                HTTPStatus.OK,
+                self.server.controller.revoke_assistant_approval_grants(team_id),
+                "assistant-approval-revoke",
+                team_id,
+                None,
+            )
+        return None
+
     def _team_route(self, parts: list[str]) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
         if len(parts) == 4 and parts[:2] == ["v1", "teams"] and parts[3] == "create":
             team_id = validate_team_id(parts[2])
@@ -3431,6 +3564,9 @@ class Handler(BaseHTTPRequestHandler):
         assistant_secret_route = self._assistant_secret_route(parts)
         if assistant_secret_route is not None:
             return assistant_secret_route
+        assistant_approval_route = self._assistant_approval_route(parts)
+        if assistant_approval_route is not None:
+            return assistant_approval_route
         team_route = self._team_route(parts)
         if team_route is not None:
             return team_route
