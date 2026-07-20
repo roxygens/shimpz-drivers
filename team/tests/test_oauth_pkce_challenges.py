@@ -69,6 +69,10 @@ class OAuthPKCEChallengeTests(unittest.TestCase):
         self.assertEqual(expected, challenge.code_challenge)
         self.assertEqual(exchange.provider_id, "x")
         self.assertEqual(exchange.scopes, tuple(sorted(SCOPES)))
+        self.assertEqual(
+            (exchange.team_id, exchange.assistant_id, exchange.connection_id),
+            ("team_1", "shimpz-assistant", "x"),
+        )
         with self.assertRaises(oauth_pkce_challenges.OAuthChallengeNotFoundError):
             store.claim(
                 state=challenge.state,
@@ -77,6 +81,21 @@ class OAuthPKCEChallengeTests(unittest.TestCase):
                 assistant_id="shimpz-assistant",
                 connection_id="x",
             )
+
+    def test_callback_recovers_private_binding_only_for_the_starting_browser(self) -> None:
+        store = oauth_pkce_challenges.OAuthPKCEChallengeStore()
+        challenge = create(store)
+
+        with self.assertRaises(oauth_pkce_challenges.OAuthChallengeNotFoundError):
+            store.claim_callback(state=challenge.state, session_binding=SESSION_TWO)
+        exchange = store.claim_callback(state=challenge.state, session_binding=SESSION_ONE)
+        self.assertEqual(exchange.provider_id, "x")
+        self.assertEqual(exchange.team_id, "team_1")
+        self.assertEqual(exchange.assistant_id, "shimpz-assistant")
+        self.assertEqual(exchange.connection_id, "x")
+        self.assertNotIn(SESSION_ONE, repr(exchange))
+        with self.assertRaises(oauth_pkce_challenges.OAuthChallengeNotFoundError):
+            store.claim_callback(state=challenge.state, session_binding=SESSION_ONE)
 
     def test_expiry_and_binding_collision_fail_closed(self) -> None:
         store = oauth_pkce_challenges.OAuthPKCEChallengeStore(ttl_seconds=30)

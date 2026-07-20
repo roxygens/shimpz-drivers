@@ -54,6 +54,9 @@ class OAuthExchange:
     provider_id: str
     scopes: tuple[str, ...]
     code_verifier: str
+    team_id: str
+    assistant_id: str
+    connection_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +249,42 @@ class OAuthPKCEChallengeStore:
                 provider_id=challenge.public.provider_id,
                 scopes=challenge.public.scopes,
                 code_verifier=challenge.code_verifier,
+                team_id=challenge.team_id,
+                assistant_id=challenge.assistant_id,
+                connection_id=challenge.connection_id,
+            )
+
+    def claim_callback(
+        self,
+        *,
+        state: object,
+        session_binding: object,
+    ) -> OAuthExchange:
+        """Claim a callback using state plus its browser-only session binding.
+
+        The provider callback contains no Team or Assistant identifiers. Those
+        private bindings come only from the process-local challenge after the
+        short-lived OAuth cookie proves the same browser that started consent.
+        """
+        identifier = _state(state)
+        session_digest = _session_digest(session_binding)
+        now = time.monotonic()
+        with self._lock:
+            self._expire(now)
+            challenge = self._pending.get(identifier)
+            if challenge is None or not hmac.compare_digest(
+                challenge.session_digest,
+                session_digest,
+            ):
+                raise OAuthChallengeNotFoundError("OAuth challenge is unavailable")
+            self._remove(identifier)
+            return OAuthExchange(
+                provider_id=challenge.public.provider_id,
+                scopes=challenge.public.scopes,
+                code_verifier=challenge.code_verifier,
+                team_id=challenge.team_id,
+                assistant_id=challenge.assistant_id,
+                connection_id=challenge.connection_id,
             )
 
     def cancel_session(self, session_binding: object) -> int:
