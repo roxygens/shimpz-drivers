@@ -9,18 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_BODY = 16 * 1024
 HELP_PATHS = {"/v1/help", *(f"/v1/help/{locale}" for locale in ("en", "pt", "es", "zh", "fr", "de", "ja", "ar"))}
-OAUTH_SECRETS = {
-    "x-api-key",
-    "x-api-key-secret",
-    "x-access-token",
-    "x-access-token-secret",
-}
-POWER_SECRETS = {
-    "public-user-lookup": {"x-bearer-token"},
-    "identity-me": OAUTH_SECRETS,
-    "create-post": OAUTH_SECRETS,
-    "delete-post": OAUTH_SECRETS,
-}
+POWERS = {"public-user-lookup", "identity-me", "create-post", "delete-post"}
 USERNAME_RE = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
 POST_ID_RE = re.compile(r"[0-9]{1,19}\Z")
 
@@ -31,15 +20,22 @@ def _power_input(payload: object, power: str) -> dict[str, object]:
     power_input = payload["input"]
     secrets = payload["secrets"]
     connections = payload["connections"]
-    if not isinstance(power_input, dict) or not isinstance(secrets, dict) or connections != {}:
+    if not isinstance(power_input, dict) or secrets != {} or not isinstance(connections, dict):
         raise ValueError
-    if set(secrets) != POWER_SECRETS[power]:
+    if set(connections) != {"x"}:
         raise ValueError
-    for value in secrets.values():
-        if not isinstance(value, str) or any(ord(character) < 32 or ord(character) == 127 for character in value):
-            raise ValueError
-        if not 1 <= len(value.encode("utf-8")) <= 2 * 1024:
-            raise ValueError
+    connection = connections["x"]
+    if not isinstance(connection, dict) or set(connection) != {"type", "access_token"}:
+        raise ValueError
+    token = connection["access_token"]
+    if connection["type"] != "oauth2-bearer" or not isinstance(token, str):
+        raise ValueError
+    try:
+        encoded_token = token.encode("ascii")
+    except UnicodeError as exc:
+        raise ValueError from exc
+    if not 16 <= len(encoded_token) <= 16 * 1024 or any(byte <= 32 or byte >= 127 for byte in encoded_token):
+        raise ValueError
     return power_input
 
 
@@ -101,7 +97,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         power = self.path.removeprefix("/v1/powers/")
-        if power not in POWER_SECRETS or self.path != f"/v1/powers/{power}":
+        if power not in POWERS or self.path != f"/v1/powers/{power}":
             self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
         try:

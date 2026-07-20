@@ -650,26 +650,45 @@ class DockerFlowTests(unittest.TestCase):
             )
             self.assertEqual(secret_status, 200)
             secret_items = secret_inventory["assistants"][0]["secrets"]
+            self.assertEqual(secret_items, [])
+            connection_status, connection_inventory = self._api(
+                port,
+                token,
+                "GET",
+                "/v1/teams/demo_team/assistant-connections",
+            )
+            self.assertEqual(connection_status, 200)
+            self.assertEqual(len(connection_inventory["connections"]), 1)
+            connection = connection_inventory["connections"][0]
             self.assertEqual(
-                {item["id"] for item in secret_items},
                 {
-                    "x-bearer-token",
-                    "x-api-key",
-                    "x-api-key-secret",
-                    "x-access-token",
-                    "x-access-token-secret",
+                    "assistant_id": connection["assistant_id"],
+                    "id": connection["id"],
+                    "provider": connection["provider"],
+                    "scopes": connection["scopes"],
+                    "status": connection["status"],
+                    "account": connection["account"],
+                    "expires_at": connection["expires_at"],
+                },
+                {
+                    "assistant_id": "shimpz-assistant",
+                    "id": "x",
+                    "provider": "x",
+                    "scopes": ["offline.access", "tweet.read", "tweet.write", "users.read"],
+                    "status": "missing",
+                    "account": None,
+                    "expires_at": None,
                 },
             )
-            self.assertTrue(all(item["configured"] is False and item["mask"] is None for item in secret_items))
-            secret_required, missing_secret = self._api(
+            connection_required, missing_connection = self._api(
                 port,
                 token,
                 "POST",
                 "/v1/teams/demo_team/assistants/shimpz-assistant/powers/public-user-lookup",
                 {"username": "OpenAI"},
             )
-            self.assertEqual(secret_required, 428)
-            self.assertEqual(missing_secret["code"], "assistant-secrets-required")
+            self.assertEqual(connection_required, 409)
+            self.assertEqual(missing_connection["code"], "assistant-connection-unavailable")
             unknown_power, _ = self._api(
                 port,
                 token,
@@ -811,7 +830,7 @@ class DockerFlowTests(unittest.TestCase):
                 "from pathlib import Path; print(Path('/var/log/shimpz-local/audit.jsonl').read_text())",
             ).stdout
             self.assertIn('"operation":"space-reset"', audit)
-            self.assertIn('"detail":"assistant-secrets-required"', audit)
+            self.assertIn('"detail":"assistant-connection-unavailable"', audit)
             self.assertNotIn("Captain", audit)
             self.assertNotIn(token, audit)
 

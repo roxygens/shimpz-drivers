@@ -4,8 +4,13 @@ import io
 import json
 import tarfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
+import assistant_contract
 import assistant_manifest
+
+FIXTURE_MANIFEST = Path(__file__).resolve().parent / "fixtures" / "shimpz-assistant" / "shimpz.assistant.toml"
 
 
 def manifest(
@@ -92,6 +97,26 @@ class Container:
 
 
 class AssistantManifestTests(unittest.TestCase):
+    def test_docker_lifecycle_fixture_matches_the_reviewed_x_oauth_contract(self):
+        declared = assistant_manifest.parse_manifest_contract(FIXTURE_MANIFEST.read_bytes())
+        reviewed = assistant_manifest.reviewed_manifest_contract(
+            allowed_hosts=assistant_contract.ASSISTANT_ALLOWED_HOSTS,
+            secrets={
+                secret_id: SimpleNamespace(**metadata)
+                for secret_id, metadata in assistant_contract.secret_contracts().items()
+            },
+            powers={
+                power_id: SimpleNamespace(**metadata)
+                for power_id, metadata in assistant_contract.power_contracts().items()
+            },
+            connections={
+                connection_id: SimpleNamespace(**metadata)
+                for connection_id, metadata in assistant_contract.connection_contracts().items()
+            },
+        )
+
+        self.assertEqual(declared, reviewed)
+
     def test_manifest_limit_matches_the_public_sdk_contract(self):
         self.assertEqual(assistant_manifest.MAX_MANIFEST_BYTES, 256 * 1024)
         self.assertEqual(assistant_manifest.MAX_SECRET_ID_LENGTH, 64)

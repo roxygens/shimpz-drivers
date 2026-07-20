@@ -6,57 +6,26 @@ allowed_hosts = [
     "api.x.com",
 ]
 
-[secrets.x-bearer-token]
-name = "X Bearer Token"
-summary = "App-only token used exclusively for public X profile reads."
-
-[secrets.x-api-key]
-name = "X API Key"
-summary = "OAuth 1.0a consumer key identifying the connected X application."
-
-[secrets.x-api-key-secret]
-name = "X API Key Secret"
-summary = "OAuth 1.0a consumer secret used to sign account requests."
-
-[secrets.x-access-token]
-name = "X Access Token"
-summary = "OAuth 1.0a token identifying the connected X account."
-
-[secrets.x-access-token-secret]
-name = "X Access Token Secret"
-summary = "OAuth 1.0a token secret used to sign account requests."
+[connections.x]
+provider = "x"
+scopes = ["tweet.read", "users.read", "tweet.write", "offline.access"]
 
 [powers.public-user-lookup]
 summary = "Read one public X profile by username."
 approval = "never"
-secrets = ["x-bearer-token"]
+connections = ["x"]
 
 [powers.identity-me]
 summary = "Read the identity of the connected X account."
 approval = "never"
-secrets = [
-    "x-api-key",
-    "x-api-key-secret",
-    "x-access-token",
-    "x-access-token-secret",
-]
+connections = ["x"]
 
 [powers.create-post]
 summary = "Publish one Post from the connected X account after explicit approval."
 approval = "always"
-secrets = [
-    "x-api-key",
-    "x-api-key-secret",
-    "x-access-token",
-    "x-access-token-secret",
-]
+connections = ["x"]
 
 [powers.delete-post]
 summary = "Delete one Post owned by the connected X account after explicit approval."
 approval = "always"
-secrets = [
-    "x-api-key",
-    "x-api-key-secret",
-    "x-access-token",
-    "x-access-token-secret",
-]
+connections = ["x"]
