@@ -137,6 +137,30 @@ class AssistantSecretStoreTests(unittest.TestCase):
             with self.assertRaises(assistant_secret_store.AssistantSecretError):
                 store.resolve_many("team_1", "x-assistant", ["x-token"])
 
+    def test_envelopes_are_cryptographically_bound_to_their_team(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            store.put_many("team_1", "x-assistant", {"x-token": "team-one-secret"})
+            store.put_many("team_2", "x-assistant", {"x-token": "team-two-secret"})
+            self.assertEqual(
+                store.resolve_many("team_1", "x-assistant", ["x-token"]),
+                {"x-token": "team-one-secret"},
+            )
+            self.assertEqual(
+                store.resolve_many("team_2", "x-assistant", ["x-token"]),
+                {"x-token": "team-two-secret"},
+            )
+
+            state_path = root / "state" / "secrets.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["teams"]["team_2"]["x-assistant"]["x-token"] = state["teams"]["team_1"]["x-assistant"]["x-token"]
+            state_path.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
+            state_path.chmod(0o600)
+
+            with self.assertRaises(assistant_secret_store.AssistantSecretError):
+                store.resolve_many("team_2", "x-assistant", ["x-token"])
+
     def test_permissions_symlinks_and_invalid_values_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
