@@ -179,6 +179,18 @@ class _PendingLocalChat:
     identity: tuple[object, ...]
 
 
+@dataclass(slots=True)
+class _LocalChatRequirements:
+    """Mutable gate results collected while one Brain segment is evaluated."""
+
+    connections: tuple[assistant_connection_challenges.ConnectionRequirement, ...] = ()
+    secrets: tuple[assistant_secret_challenges.SecretRequirement, ...] = ()
+    approvals: tuple[assistant_approval_challenges.ApprovalRequirement, ...] = ()
+
+    def suspension_gate_count(self) -> int:
+        return sum(bool(item) for item in (self.connections, self.secrets, self.approvals))
+
+
 def _required_active_assistant(
     bindings: dict[str, _ActiveAssistant],
     assistant_id: str,
@@ -553,9 +565,7 @@ class LocalController:
         self.assistant_secrets = assistant_secrets or assistant_secret_store.AssistantSecretStore()
         self.secret_challenges = secret_challenges or assistant_secret_challenges.SecretChallengeStore()
         self.assistant_connections = assistant_connections or oauth_connection_store.OAuthConnectionStore()
-        self.connection_challenges = (
-            connection_challenges or assistant_connection_challenges.ConnectionChallengeStore()
-        )
+        self.connection_challenges = connection_challenges or assistant_connection_challenges.ConnectionChallengeStore()
         self.oauth_pkce = oauth_pkce or oauth_pkce_challenges.OAuthPKCEChallengeStore()
         self.oauth_http = oauth_http or oauth_http_client.OAuthHTTPClient()
         self.x_oauth_client_id = (
@@ -1646,10 +1656,7 @@ class LocalController:
             self._raise_approval_grant_problem(exc)
         return {
             "team_id": team_id,
-            "grants": [
-                {"assistant_id": item.assistant_id, "power_id": item.power_id}
-                for item in grants
-            ],
+            "grants": [{"assistant_id": item.assistant_id, "power_id": item.power_id} for item in grants],
         }
 
     def revoke_assistant_approval_grants(self, team_id: str) -> dict[str, object]:
@@ -1799,6 +1806,120 @@ class LocalController:
                 code="brain-runtime-failed",
             ) from exc
 
+    @staticmethod
+    def _validate_chat_power(
+        bindings: dict[str, _ActiveAssistant],
+        assistant_id: str,
+        power: str,
+        payload: object,
+    ) -> object:
+        _required_active_assistant(bindings, assistant_id)
+        try:
+            return validate_power_input(assistant_id, power, payload)
+        except ValueError as exc:
+            raise ApiProblem(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                str(exc),
+                code="invalid-power-input",
+            ) from exc
+
+    def _require_chat_private_inputs(
+        self,
+        team_id: str,
+        bindings: dict[str, _ActiveAssistant],
+        requests: tuple[brain_runtime_client.PowerRequest, ...],
+        requirements: _LocalChatRequirements,
+    ) -> bool:
+        try:
+            requirements.connections = assistant_connection_flow.requirements_for_batch(
+                team_id,
+                bindings,
+                requests,
+                self.assistant_connections,
+            )
+        except (
+            assistant_connection_flow.ConnectionFlowError,
+            oauth_connection_store.OAuthConnectionStoreError,
+        ) as exc:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant connection contract is unavailable",
+                code="assistant-connection-contract-invalid",
+            ) from exc
+        if requirements.connections:
+            return True
+        try:
+            requirements.secrets = assistant_secret_flow.requirements_for_batch(
+                team_id,
+                bindings,
+                requests,
+                self.assistant_secrets,
+            )
+        except assistant_secret_store.AssistantSecretError as exc:
+            self._raise_secret_problem(exc)
+        except assistant_secret_flow.SecretFlowError as exc:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant secret contract is unavailable",
+                code="assistant-secret-contract-invalid",
+            ) from exc
+        return bool(requirements.secrets)
+
+    @staticmethod
+    def _require_chat_approval(
+        bindings: dict[str, _ActiveAssistant],
+        requests: tuple[brain_runtime_client.PowerRequest, ...],
+        requirements: _LocalChatRequirements,
+    ) -> bool:
+        try:
+            requirements.approvals = assistant_approval_flow.requirements_for_batch(bindings, requests)
+        except assistant_approval_flow.ApprovalFlowError as exc:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant approval contract is unavailable",
+                code="assistant-approval-contract-invalid",
+            ) from exc
+        return bool(requirements.approvals)
+
+    def _chat_approval_granted(
+        self,
+        team_id: str,
+        bindings: dict[str, _ActiveAssistant],
+        approved_interrupts: frozenset[str],
+        request: brain_runtime_client.PowerRequest,
+    ) -> bool:
+        if request.approval == "none" or request.interrupt_id in approved_interrupts:
+            return True
+        if request.approval != "once":
+            return False
+        active = _required_active_assistant(bindings, request.assistant_id)
+        try:
+            return self.approval_grants.is_granted(
+                team_id,
+                request.assistant_id,
+                request.power,
+                active.spec.image,
+            )
+        except assistant_approval_grants.ApprovalGrantError as exc:
+            self._raise_approval_grant_problem(exc)
+        raise AssertionError("unreachable")
+
+    def _validate_chat_context(
+        self,
+        team_id: str,
+        file_ids: list[str],
+        provider: str,
+        assistant_ids: tuple[str, ...],
+        identity: tuple[object, ...],
+    ) -> None:
+        current = self._chat_setup(team_id, file_ids, provider, assistant_ids)
+        if self._chat_identity(*current) != identity:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Team capabilities changed; retry",
+                code="team-context-changed",
+            )
+
     def _run_chat_segment(
         self,
         team_id: str,
@@ -1861,17 +1982,6 @@ class LocalController:
         )
         bindings = {active.spec.assistant_id: active for active in assistants}
 
-        def validate_power(assistant_id: str, power: str, payload) -> object:
-            _required_active_assistant(bindings, assistant_id)
-            try:
-                return validate_power_input(assistant_id, power, payload)
-            except ValueError as exc:
-                raise ApiProblem(
-                    HTTPStatus.UNPROCESSABLE_ENTITY,
-                    str(exc),
-                    code="invalid-power-input",
-                ) from exc
-
         def execute_power(request: brain_runtime_client.PowerRequest) -> object:
             active = _required_active_assistant(bindings, request.assistant_id)
             return self._invoke_chat_power(
@@ -1901,103 +2011,24 @@ class LocalController:
                 request.power,
             ),
         )
-        connection_requirements: tuple[assistant_connection_challenges.ConnectionRequirement, ...] = ()
-        secret_requirements: tuple[assistant_secret_challenges.SecretRequirement, ...] = ()
-        approval_requirements: tuple[assistant_approval_challenges.ApprovalRequirement, ...] = ()
-
-        def pause_for_private_inputs(requests: tuple[brain_runtime_client.PowerRequest, ...]) -> bool:
-            nonlocal connection_requirements, secret_requirements
-            try:
-                connection_requirements = assistant_connection_flow.requirements_for_batch(
-                    team_id,
-                    bindings,
-                    requests,
-                    self.assistant_connections,
-                )
-            except (
-                assistant_connection_flow.ConnectionFlowError,
-                oauth_connection_store.OAuthConnectionStoreError,
-            ) as exc:
-                raise ApiProblem(
-                    HTTPStatus.CONFLICT,
-                    "Assistant connection contract is unavailable",
-                    code="assistant-connection-contract-invalid",
-                ) from exc
-            if connection_requirements:
-                return True
-            try:
-                secret_requirements = assistant_secret_flow.requirements_for_batch(
-                    team_id,
-                    bindings,
-                    requests,
-                    self.assistant_secrets,
-                )
-            except assistant_secret_store.AssistantSecretError as exc:
-                self._raise_secret_problem(exc)
-            except assistant_secret_flow.SecretFlowError as exc:
-                raise ApiProblem(
-                    HTTPStatus.CONFLICT,
-                    "Assistant secret contract is unavailable",
-                    code="assistant-secret-contract-invalid",
-                ) from exc
-            return bool(secret_requirements)
-
-        def pause_for_approval(requests: tuple[brain_runtime_client.PowerRequest, ...]) -> bool:
-            nonlocal approval_requirements
-            try:
-                approval_requirements = assistant_approval_flow.requirements_for_batch(bindings, requests)
-            except assistant_approval_flow.ApprovalFlowError as exc:
-                raise ApiProblem(
-                    HTTPStatus.CONFLICT,
-                    "Assistant approval contract is unavailable",
-                    code="assistant-approval-contract-invalid",
-                ) from exc
-            return bool(approval_requirements)
-
-        def approval_granted(request: brain_runtime_client.PowerRequest) -> bool:
-            if request.approval == "none" or request.interrupt_id in approved_interrupts:
-                return True
-            if request.approval != "once":
-                return False
-            active = _required_active_assistant(bindings, request.assistant_id)
-            try:
-                return self.approval_grants.is_granted(
-                    team_id,
-                    request.assistant_id,
-                    request.power,
-                    active.spec.image,
-                )
-            except assistant_approval_grants.ApprovalGrantError as exc:
-                self._raise_approval_grant_problem(exc)
-            raise AssertionError("unreachable")
-
-        def validate_context() -> None:
-            current = self._chat_setup(team_id, file_ids, provider, assistant_ids)
-            if self._chat_identity(*current) != identity:
-                raise ApiProblem(
-                    HTTPStatus.CONFLICT,
-                    "Team capabilities changed; retry",
-                    code="team-context-changed",
-                )
+        requirements = _LocalChatRequirements()
 
         outcome = self._drive_local_chat(
             context,
             message,
             files,
             continuation,
-            validate_power,
+            lambda assistant_id, power, payload: self._validate_chat_power(bindings, assistant_id, power, payload),
             durable_batch,
-            pause_for_private_inputs,
-            pause_for_approval,
-            approval_granted,
+            lambda requests: self._require_chat_private_inputs(team_id, bindings, requests, requirements),
+            lambda requests: self._require_chat_approval(bindings, requests, requirements),
+            lambda request: self._chat_approval_granted(team_id, bindings, approved_interrupts, request),
             lambda: self._chat_cancelled(token),
-            validate_context,
+            lambda: self._validate_chat_context(team_id, file_ids, provider, assistant_ids, identity),
         )
-        if isinstance(outcome, chat_orchestrator.ChatSuspension):
-            gates = sum(bool(item) for item in (connection_requirements, secret_requirements, approval_requirements))
-            if gates != 1:
-                raise ApiProblem(HTTPStatus.INTERNAL_SERVER_ERROR, "invalid chat suspension", code="internal-error")
-        return team_name, identity, outcome, connection_requirements, secret_requirements, approval_requirements
+        if isinstance(outcome, chat_orchestrator.ChatSuspension) and requirements.suspension_gate_count() != 1:
+            raise ApiProblem(HTTPStatus.INTERNAL_SERVER_ERROR, "invalid chat suspension", code="internal-error")
+        return team_name, identity, outcome, requirements.connections, requirements.secrets, requirements.approvals
 
     def _pause_chat(
         self,
