@@ -34,6 +34,9 @@ import assistant_chat
 import assistant_contract
 import assistant_genesis
 import assistant_manifest
+import assistant_secret_challenges
+import assistant_secret_flow
+import assistant_secret_store
 import brain_runtime_client
 import brain_runtime_token_store
 import chat_orchestrator
@@ -74,6 +77,7 @@ MAX_ASSISTANT_ID_LENGTH = 48
 MAX_SPACE_ID_LENGTH = 48
 MAX_BODY_BYTES = 16 * 1024
 MAX_CHAT_BODY_BYTES = 24 * 1024
+MAX_SECRET_BODY_BYTES = 512 * 1024
 MAX_RESPONSE_BYTES = assistant_contract.MAX_HELP_BYTES * 6 + 1024
 MAX_API_RESPONSE_BYTES = 128 * 1024
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -117,6 +121,19 @@ _EGRESS_TOKEN = re.compile(r"[0-9a-f]{32}")
 _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON number")
+
+
 class ApiProblem(RuntimeError):
     def __init__(self, status: HTTPStatus, message: str, *, code: str) -> None:
         super().__init__(message)
@@ -136,6 +153,17 @@ class _ActiveAssistant:
     container: object | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingLocalChat:
+    """Secret-free, process-local state for one paused Team turn."""
+
+    continuation: chat_orchestrator.ChatContinuation
+    assistant_ids: tuple[str, ...]
+    file_ids: tuple[str, ...]
+    provider: str
+    identity: tuple[object, ...]
+
+
 def _required_active_assistant(
     bindings: dict[str, _ActiveAssistant],
     assistant_id: str,
@@ -153,6 +181,7 @@ def _required_active_assistant(
 def _power_operation(
     request: brain_runtime_client.PowerRequest,
     active: _ActiveAssistant,
+    secret_generations: tuple[tuple[str, int], ...],
 ) -> power_journal.Operation:
     """Commit to a normalized request and immutable Assistant runtime, never raw journal input."""
     if not active.container_id or not active.spec.image:
@@ -166,6 +195,7 @@ def _power_operation(
                 "assistant_image": active.spec.image,
                 "input": request.input,
                 "power": request.power,
+                "secret_generations": secret_generations,
             },
             allow_nan=False,
             ensure_ascii=False,
@@ -187,12 +217,14 @@ class _LocalPowerBatch:
         thread_id: str,
         bindings: dict[str, _ActiveAssistant],
         execute: Callable[[brain_runtime_client.PowerRequest], object],
+        secret_generations: Callable[[brain_runtime_client.PowerRequest], tuple[tuple[str, int], ...]],
     ) -> None:
         self._journal = journal
         self._generation = generation
         self._thread_id = thread_id
         self._bindings = bindings
         self._execute = execute
+        self._secret_generations = secret_generations
         self._batch: power_journal.Batch | None = None
         self._operations: dict[str, power_journal.Operation] = {}
 
@@ -204,7 +236,7 @@ class _LocalPowerBatch:
             active = self._bindings.get(request.assistant_id)
             if active is None:
                 raise power_journal.PowerJournalConflictError("Power Assistant is unavailable")
-            operations.append(_power_operation(request, active))
+            operations.append(_power_operation(request, active, self._secret_generations(request)))
         self._batch = self._journal.prepare_batch(self._generation, self._thread_id, operations)
         self._operations = {operation.interrupt_id: operation for operation in operations}
 
@@ -446,6 +478,8 @@ class LocalController:
         inference_store: inference_config.InferenceConfigStore | None = None,
         brain_runtime: brain_runtime_client.BrainRuntimeClient | None = None,
         power_state: power_journal.PowerJournal | None = None,
+        assistant_secrets: assistant_secret_store.AssistantSecretStore | None = None,
+        secret_challenges: assistant_secret_challenges.SecretChallengeStore | None = None,
     ) -> None:
         self.client = client
         self.space_id = validate_space_id(space_id)
@@ -456,6 +490,8 @@ class LocalController:
         self.power_state = (
             power_state if power_state is not None else power_journal.PowerJournal(LOCAL_POWER_JOURNAL_PATH)
         )
+        self.assistant_secrets = assistant_secrets or assistant_secret_store.AssistantSecretStore()
+        self.secret_challenges = secret_challenges or assistant_secret_challenges.SecretChallengeStore()
         self._assistant_genesis_cache = assistant_genesis.GenesisCache()
         self._assistant_allowed_hosts_cache = assistant_manifest.ManifestContractCache()
         self._blocked_power_workloads: set[str] = set()
@@ -1207,6 +1243,119 @@ class LocalController:
         active.sort(key=lambda item: item.spec.assistant_id)
         return tuple(active)
 
+    @staticmethod
+    def _raise_secret_problem(exc: assistant_secret_store.AssistantSecretError) -> None:
+        if isinstance(exc, assistant_secret_store.AssistantSecretMissingError):
+            raise ApiProblem(
+                HTTPStatus.PRECONDITION_REQUIRED,
+                "Assistant secrets are required",
+                code="assistant-secrets-required",
+            ) from exc
+        if isinstance(exc, assistant_secret_store.AssistantSecretValidationError):
+            raise ApiProblem(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "Assistant secret values are invalid",
+                code="invalid-assistant-secrets",
+            ) from exc
+        raise ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Assistant secret state is unavailable",
+            code="assistant-secret-state-unavailable",
+        ) from exc
+
+    def _delete_assistant_secret_state(self, team_id: str, assistant_id: str) -> None:
+        try:
+            self.assistant_secrets.delete_assistant(team_id, assistant_id)
+        except assistant_secret_store.AssistantSecretError as exc:
+            self._raise_secret_problem(exc)
+
+    def _delete_team_secret_state(self, team_id: str) -> None:
+        try:
+            self.assistant_secrets.delete_team(team_id)
+        except assistant_secret_store.AssistantSecretError as exc:
+            self._raise_secret_problem(exc)
+
+    def _delete_all_secret_state(self) -> None:
+        try:
+            self.assistant_secrets.delete_all()
+        except assistant_secret_store.AssistantSecretError as exc:
+            self._raise_secret_problem(exc)
+
+    def _power_secret_generations(
+        self,
+        team_id: str,
+        active: _ActiveAssistant,
+        power_id: str,
+    ) -> tuple[tuple[str, int], ...]:
+        power = active.spec.powers.get(power_id)
+        if power is None:
+            raise power_journal.PowerJournalConflictError("Power secret contract is unavailable")
+        try:
+            metadata = self.assistant_secrets.metadata(
+                team_id,
+                active.spec.assistant_id,
+                power.secrets,
+            )
+        except assistant_secret_store.AssistantSecretError as exc:
+            raise power_journal.PowerJournalConflictError("Power secret state is unavailable") from exc
+        if any(not item.configured or item.generation is None for item in metadata):
+            raise power_journal.PowerJournalConflictError("Power secret generation is unavailable")
+        return tuple((item.id, int(item.generation)) for item in metadata)
+
+    def _resolve_power_secrets(self, team_id: str, spec: AssistantSpec, power_id: str) -> dict[str, str]:
+        power = spec.powers.get(power_id)
+        if power is None:
+            raise ApiProblem(HTTPStatus.NOT_FOUND, "Power is not declared", code="power-not-declared")
+        try:
+            return self.assistant_secrets.resolve_many(team_id, spec.assistant_id, power.secrets)
+        except assistant_secret_store.AssistantSecretError as exc:
+            self._raise_secret_problem(exc)
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def _contains_secret(value: object, secrets_by_id: dict[str, str]) -> bool:
+        secret_values = tuple(secret for secret in secrets_by_id.values() if secret)
+
+        def visit(item: object, depth: int = 0) -> bool:
+            if depth > 32:
+                return True
+            if isinstance(item, str):
+                return any(secret in item for secret in secret_values)
+            if isinstance(item, list | tuple):
+                return any(visit(child, depth + 1) for child in item)
+            if isinstance(item, dict):
+                return any(visit(key, depth + 1) or visit(child, depth + 1) for key, child in item.items())
+            return False
+
+        return bool(secret_values) and visit(value)
+
+    def list_assistant_secrets(self, team_id: str) -> dict[str, object]:
+        team_id = validate_team_id(team_id)
+        with self._lock(team_id):
+            installed = self.list_assistants(team_id)["assistants"]
+            specs = [self._resolve(item["assistant"]) for item in installed]
+            try:
+                return assistant_secret_flow.inventory_payload(team_id, specs, self.assistant_secrets)
+            except assistant_secret_store.AssistantSecretError as exc:
+                self._raise_secret_problem(exc)
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def _challenge_response(
+        challenge: assistant_secret_challenges.PendingSecretChallenge,
+    ) -> dict[str, object]:
+        return assistant_secret_flow.challenge_payload(challenge)
+
+    def pending_chat_secrets(self, team_id: str) -> dict[str, object]:
+        team_id = validate_team_id(team_id)
+        self._network(team_id)
+        challenge = self.secret_challenges.current(team_id)
+        return (
+            self._challenge_response(challenge)
+            if challenge is not None
+            else {"team_id": team_id, "status": "none"}
+        )
+
     def _invoke_chat_power(
         self,
         team_id: str,
@@ -1250,6 +1399,302 @@ class LocalController:
                 raise chat_orchestrator.ChatStoppedError("chat turn stopped")
         return invocation["result"]
 
+    @staticmethod
+    def _chat_identity(
+        team_name: str,
+        network_id: str,
+        assistants: tuple[_ActiveAssistant, ...],
+        files: list[dict[str, object]],
+        config: inference_config.InferenceConfig,
+    ) -> tuple[object, ...]:
+        return (
+            team_name,
+            network_id,
+            tuple((item.spec.assistant_id, item.spec.image, item.container_id) for item in assistants),
+            files,
+            config,
+        )
+
+    def _drive_local_chat(
+        self,
+        context: brain_runtime_client.RuntimeContext,
+        message: str | None,
+        files: list[dict[str, object]],
+        continuation: chat_orchestrator.ChatContinuation | None,
+        validate_power: Callable,
+        durable_batch: _LocalPowerBatch,
+        pause_for_secrets: Callable,
+        cancelled: Callable[[], bool],
+        validate_context: Callable[[], None],
+    ) -> chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension:
+        try:
+            if continuation is None:
+                return chat_orchestrator.run_until_pause(
+                    self.brain_runtime,
+                    context,
+                    assistant_chat.build_prompt(message, files),
+                    validate_power,
+                    durable_batch.invoke,
+                    prepare_batch=durable_batch.prepare,
+                    batch_delivered=durable_batch.delivered,
+                    pause_before_batch=pause_for_secrets,
+                    cancelled=cancelled,
+                    validate_context=validate_context,
+                )
+            return chat_orchestrator.continue_after_pause(
+                self.brain_runtime,
+                context,
+                continuation,
+                validate_power,
+                durable_batch.invoke,
+                prepare_batch=durable_batch.prepare,
+                batch_delivered=durable_batch.delivered,
+                pause_before_batch=pause_for_secrets,
+                cancelled=cancelled,
+                validate_context=validate_context,
+            )
+        except power_journal.PowerJournalError as exc:
+            raise ApiProblem(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                "Team Power execution state is unavailable",
+                code="power-state-unavailable",
+            ) from exc
+        except chat_orchestrator.ChatStoppedError as exc:
+            raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped") from exc
+        except chat_orchestrator.ApprovalRequiredError as exc:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant Power requires approval",
+                code="power-approval-required",
+            ) from exc
+        except chat_orchestrator.ChatOrchestrationError as exc:
+            raise ApiProblem(
+                HTTPStatus.BAD_GATEWAY,
+                "Brain could not complete the Team turn",
+                code="brain-runtime-failed",
+            ) from exc
+        except brain_runtime_client.BrainRuntimeError as exc:
+            raise ApiProblem(
+                HTTPStatus.BAD_GATEWAY,
+                "Brain runtime is unavailable",
+                code="brain-runtime-failed",
+            ) from exc
+
+    def _run_chat_segment(
+        self,
+        team_id: str,
+        file_ids: list[str],
+        assistant_ids: tuple[str, ...],
+        provider: str,
+        api_key: str,
+        token: str,
+        *,
+        message: str | None = None,
+        continuation: chat_orchestrator.ChatContinuation | None = None,
+        expected_identity: tuple[object, ...] | None = None,
+    ) -> tuple[
+        str,
+        tuple[object, ...],
+        chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension,
+        tuple[assistant_secret_challenges.SecretRequirement, ...],
+    ]:
+        if (message is None) == (continuation is None):
+            raise ApiProblem(HTTPStatus.INTERNAL_SERVER_ERROR, "invalid chat continuation", code="internal-error")
+        team_name, network_id, assistants, files, config = self._chat_setup(
+            team_id,
+            file_ids,
+            provider,
+            assistant_ids,
+        )
+        identity = self._chat_identity(team_name, network_id, assistants, files, config)
+        if expected_identity is not None and identity != expected_identity:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Team capabilities changed; retry",
+                code="team-context-changed",
+            )
+        genesis_by_id = {active.spec.assistant_id: self._active_assistant_genesis(active) for active in assistants}
+        context = brain_runtime_client.RuntimeContext(
+            thread_id=_brain_thread_id(self.space_id, team_id, network_id),
+            team_name=team_name,
+            assistants=tuple(
+                brain_runtime_client.RuntimeAssistant(
+                    id=active.spec.assistant_id,
+                    genesis=genesis_by_id[active.spec.assistant_id],
+                    powers=tuple(
+                        brain_runtime_client.RuntimePower(
+                            id=power_id,
+                            summary=power.summary,
+                            input_schema=power.input_schema,
+                            approval=power.approval,
+                        )
+                        for power_id, power in sorted(active.spec.powers.items())
+                    ),
+                )
+                for active in assistants
+            ),
+            provider=config.provider,
+            model=config.model,
+            api_key=api_key,
+        )
+        bindings = {active.spec.assistant_id: active for active in assistants}
+
+        def validate_power(assistant_id: str, power: str, payload) -> object:
+            _required_active_assistant(bindings, assistant_id)
+            try:
+                return validate_power_input(assistant_id, power, payload)
+            except ValueError as exc:
+                raise ApiProblem(
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    str(exc),
+                    code="invalid-power-input",
+                ) from exc
+
+        def execute_power(request: brain_runtime_client.PowerRequest) -> object:
+            active = _required_active_assistant(bindings, request.assistant_id)
+            return self._invoke_chat_power(
+                team_id,
+                token,
+                request.assistant_id,
+                active.container_id,
+                request.power,
+                request.input,
+            )
+
+        durable_batch = _LocalPowerBatch(
+            self.power_state,
+            network_id,
+            context.thread_id,
+            bindings,
+            execute_power,
+            lambda request: self._power_secret_generations(
+                team_id,
+                _required_active_assistant(bindings, request.assistant_id),
+                request.power,
+            ),
+        )
+        missing_requirements: tuple[assistant_secret_challenges.SecretRequirement, ...] = ()
+
+        def pause_for_secrets(requests: tuple[brain_runtime_client.PowerRequest, ...]) -> bool:
+            nonlocal missing_requirements
+            try:
+                missing_requirements = assistant_secret_flow.requirements_for_batch(
+                    team_id,
+                    bindings,
+                    requests,
+                    self.assistant_secrets,
+                )
+            except assistant_secret_store.AssistantSecretError as exc:
+                self._raise_secret_problem(exc)
+            except assistant_secret_flow.SecretFlowError as exc:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Assistant secret contract is unavailable",
+                    code="assistant-secret-contract-invalid",
+                ) from exc
+            return bool(missing_requirements)
+
+        def validate_context() -> None:
+            current = self._chat_setup(team_id, file_ids, provider, assistant_ids)
+            if self._chat_identity(*current) != identity:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Team capabilities changed; retry",
+                    code="team-context-changed",
+                )
+
+        outcome = self._drive_local_chat(
+            context,
+            message,
+            files,
+            continuation,
+            validate_power,
+            durable_batch,
+            pause_for_secrets,
+            lambda: self._chat_cancelled(token),
+            validate_context,
+        )
+        if isinstance(outcome, chat_orchestrator.ChatSuspension) and not missing_requirements:
+            raise ApiProblem(HTTPStatus.INTERNAL_SERVER_ERROR, "invalid chat suspension", code="internal-error")
+        return team_name, identity, outcome, missing_requirements
+
+    def _pause_chat(
+        self,
+        team_id: str,
+        token: str,
+        outcome: chat_orchestrator.ChatSuspension,
+        requirements: tuple[assistant_secret_challenges.SecretRequirement, ...],
+        payload: _PendingLocalChat,
+    ) -> dict[str, object]:
+        try:
+            challenge = self.secret_challenges.create(team_id, requirements, payload)
+        except assistant_secret_challenges.SecretChallengeError as exc:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant secret request is already pending",
+                code="assistant-secret-challenge-conflict",
+            ) from exc
+        if outcome.continuation != payload.continuation or not self._commit_chat_terminal(team_id, token):
+            self.secret_challenges.cancel_team(team_id)
+            raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
+        return self._challenge_response(challenge)
+
+    def _store_chat_secrets(
+        self,
+        team_id: str,
+        challenge_id: object,
+        provider: str,
+        body: dict[str, object],
+    ) -> _PendingLocalChat:
+        try:
+            challenge = self.secret_challenges.get(team_id, challenge_id)
+            values = assistant_secret_flow.submission_values(challenge, body)
+        except assistant_secret_challenges.SecretChallengeNotFoundError as exc:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant secret request expired; retry the message",
+                code="assistant-secret-challenge-expired",
+            ) from exc
+        except (assistant_secret_challenges.SecretChallengeError, assistant_secret_flow.SecretFlowError) as exc:
+            raise ApiProblem(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "Assistant secret submission is invalid",
+                code="invalid-assistant-secrets",
+            ) from exc
+        pending = challenge.payload
+        if not isinstance(pending, _PendingLocalChat) or pending.provider != provider:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Team capabilities changed; retry",
+                code="team-context-changed",
+            )
+        with self._lock(team_id):
+            current = self._chat_setup(team_id, list(pending.file_ids), provider, pending.assistant_ids)
+            if self._chat_identity(*current) != pending.identity:
+                self.secret_challenges.cancel_team(team_id)
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Team capabilities changed; retry",
+                    code="team-context-changed",
+                )
+            try:
+                claimed = self.secret_challenges.claim(team_id, challenge_id)
+                if claimed is not challenge:
+                    raise assistant_secret_challenges.SecretChallengeNotFoundError(
+                        "secret challenge is unavailable"
+                    )
+                for assistant_id, secrets_by_id in values.items():
+                    self.assistant_secrets.put_many(team_id, assistant_id, secrets_by_id)
+            except assistant_secret_challenges.SecretChallengeNotFoundError as exc:
+                raise ApiProblem(
+                    HTTPStatus.CONFLICT,
+                    "Assistant secret request expired; retry the message",
+                    code="assistant-secret-challenge-expired",
+                ) from exc
+            except assistant_secret_store.AssistantSecretError as exc:
+                self._raise_secret_problem(exc)
+        return pending
+
     def chat(
         self,
         team_id: str,
@@ -1278,149 +1723,73 @@ class LocalController:
                 "message must be non-empty and within its size limit",
                 code="invalid-message",
             )
+        existing = self.secret_challenges.current(team_id)
+        if existing is not None:
+            return self._challenge_response(existing)
         with self._exclusive_chat_turn(team_id) as token:
-            team_name, network_id, assistants, files, config = self._chat_setup(
+            team_name, identity, outcome, requirements = self._run_chat_segment(
                 team_id,
                 file_ids,
-                provider,
                 assistant_ids,
+                provider,
+                api_key,
+                token,
+                message=message,
             )
-            genesis_by_id = {active.spec.assistant_id: self._active_assistant_genesis(active) for active in assistants}
-            context = brain_runtime_client.RuntimeContext(
-                thread_id=_brain_thread_id(self.space_id, team_id, network_id),
-                team_name=team_name,
-                assistants=tuple(
-                    brain_runtime_client.RuntimeAssistant(
-                        id=active.spec.assistant_id,
-                        genesis=genesis_by_id[active.spec.assistant_id],
-                        powers=tuple(
-                            brain_runtime_client.RuntimePower(
-                                id=power_id,
-                                summary=power.summary,
-                                input_schema=power.input_schema,
-                                approval=power.approval,
-                            )
-                            for power_id, power in sorted(active.spec.powers.items())
-                        ),
-                    )
-                    for active in assistants
-                ),
-                provider=config.provider,
-                model=config.model,
-                api_key=api_key,
-            )
-            prompt = assistant_chat.build_prompt(message, files)
-            bindings = {active.spec.assistant_id: active for active in assistants}
-
-            def validate_power(assistant_id: str, power: str, payload) -> object:
-                _required_active_assistant(bindings, assistant_id)
-                try:
-                    return validate_power_input(assistant_id, power, payload)
-                except ValueError as exc:
-                    raise ApiProblem(
-                        HTTPStatus.UNPROCESSABLE_ENTITY,
-                        str(exc),
-                        code="invalid-power-input",
-                    ) from exc
-
-            def execute_power(request: brain_runtime_client.PowerRequest) -> object:
-                active = _required_active_assistant(bindings, request.assistant_id)
-                return self._invoke_chat_power(
-                    team_id,
-                    token,
-                    request.assistant_id,
-                    active.container_id,
-                    request.power,
-                    request.input,
+            if isinstance(outcome, chat_orchestrator.ChatSuspension):
+                pending = _PendingLocalChat(
+                    continuation=outcome.continuation,
+                    assistant_ids=assistant_ids,
+                    file_ids=tuple(file_ids),
+                    provider=provider,
+                    identity=identity,
                 )
-
-            durable_batch = _LocalPowerBatch(
-                self.power_state,
-                network_id,
-                context.thread_id,
-                bindings,
-                execute_power,
-            )
-
-            initial_identity = (
-                team_name,
-                network_id,
-                tuple((item.spec.assistant_id, item.spec.image, item.container_id) for item in assistants),
-                files,
-                config,
-            )
-
-            def validate_context() -> None:
-                current_team, current_network, current_assistants, current_files, current_config = self._chat_setup(
-                    team_id,
-                    file_ids,
-                    provider,
-                    assistant_ids,
-                )
-                current_identity = (
-                    current_team,
-                    current_network,
-                    tuple((item.spec.assistant_id, item.spec.image, item.container_id) for item in current_assistants),
-                    current_files,
-                    current_config,
-                )
-                if current_identity != initial_identity:
-                    raise ApiProblem(
-                        HTTPStatus.CONFLICT,
-                        "Team capabilities changed; retry",
-                        code="team-context-changed",
-                    )
-
-            try:
-                outcome = chat_orchestrator.run(
-                    self.brain_runtime,
-                    context,
-                    prompt,
-                    validate_power,
-                    durable_batch.invoke,
-                    prepare_batch=durable_batch.prepare,
-                    batch_delivered=durable_batch.delivered,
-                    cancelled=lambda: self._chat_cancelled(token),
-                    validate_context=validate_context,
-                )
-            except power_journal.PowerJournalError as exc:
-                raise ApiProblem(
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                    "Team Power execution state is unavailable",
-                    code="power-state-unavailable",
-                ) from exc
-            except chat_orchestrator.ChatStoppedError as exc:
-                raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped") from exc
-            except chat_orchestrator.ApprovalRequiredError as exc:
-                raise ApiProblem(
-                    HTTPStatus.CONFLICT,
-                    "Assistant Power requires approval",
-                    code="power-approval-required",
-                ) from exc
-            except chat_orchestrator.ChatOrchestrationError as exc:
-                raise ApiProblem(
-                    HTTPStatus.BAD_GATEWAY,
-                    "Brain could not complete the Team turn",
-                    code="brain-runtime-failed",
-                ) from exc
-            except brain_runtime_client.BrainRuntimeError as exc:
-                raise ApiProblem(
-                    HTTPStatus.BAD_GATEWAY,
-                    "Brain runtime is unavailable",
-                    code="brain-runtime-failed",
-                ) from exc
-
+                return self._pause_chat(team_id, token, outcome, requirements, pending)
             if not self._commit_chat_terminal(team_id, token):
                 raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
-            return {
-                "team_id": team_id,
-                "team_name": team_name,
-                "reply": outcome.reply,
-            }
+            return {"team_id": team_id, "team_name": team_name, "reply": outcome.reply}
+
+    def submit_chat_secrets(
+        self,
+        team_id: str,
+        body: object,
+        provider: str,
+        api_key: str,
+    ) -> dict[str, object]:
+        team_id = validate_team_id(team_id)
+        if not isinstance(body, dict):
+            raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid secret submission", code="invalid-body")
+        challenge_id = body.get("challenge_id")
+        pending = self._store_chat_secrets(team_id, challenge_id, provider, body)
+
+        with self._exclusive_chat_turn(team_id) as token:
+            team_name, identity, outcome, requirements = self._run_chat_segment(
+                team_id,
+                list(pending.file_ids),
+                pending.assistant_ids,
+                provider,
+                api_key,
+                token,
+                continuation=pending.continuation,
+                expected_identity=pending.identity,
+            )
+            if isinstance(outcome, chat_orchestrator.ChatSuspension):
+                next_pending = _PendingLocalChat(
+                    continuation=outcome.continuation,
+                    assistant_ids=pending.assistant_ids,
+                    file_ids=pending.file_ids,
+                    provider=provider,
+                    identity=identity,
+                )
+                return self._pause_chat(team_id, token, outcome, requirements, next_pending)
+            if not self._commit_chat_terminal(team_id, token):
+                raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
+            return {"team_id": team_id, "team_name": team_name, "reply": outcome.reply}
 
     def stop_chat(self, team_id: str) -> dict[str, object]:
         team_id = validate_team_id(team_id)
         self._network(team_id)
+        challenge_cancelled = self.secret_challenges.cancel_team(team_id)
         power_stopped = False
         with self._active_chat_guard:
             token = self._active_chat_tokens.get(team_id)
@@ -1430,7 +1799,7 @@ class LocalController:
             if token is not None and active is not None and active[0] == token:
                 self._fail_stop_power(active[1])
                 power_stopped = True
-        accepted = token is not None
+        accepted = token is not None or challenge_cancelled
         return {
             "team_id": team_id,
             "requested": accepted,
@@ -2094,12 +2463,14 @@ class LocalController:
     def uninstall_assistant(self, team_id: str, assistant_id: str) -> dict[str, object]:
         team_id = validate_team_id(team_id)
         spec = self._resolve(assistant_id)
+        self.secret_challenges.cancel_team(team_id)
         with self._lock(team_id):
             network = self._network(team_id)
             container = self._assistant_container(team_id, assistant_id, required=False)
             if container is None:
                 if spec.allowed_hosts:
                     self._release_assistant_egress(team_id, assistant_id, network)
+                self._delete_assistant_secret_state(team_id, assistant_id)
                 return {"assistant": assistant_id, "uninstalled": False}
             self._validate_removable_container(container, team_id, spec, network.name)
             try:
@@ -2115,6 +2486,7 @@ class LocalController:
             self._assistant_allowed_hosts_cache.discard(container.id)
             if spec.allowed_hosts:
                 self._release_assistant_egress(team_id, assistant_id, network)
+            self._delete_assistant_secret_state(team_id, assistant_id)
             return {"assistant": assistant_id, "uninstalled": True}
 
     def assistant_help(self, team_id: str, assistant_id: str, locale: str = "en") -> dict[str, str]:
@@ -2189,6 +2561,7 @@ class LocalController:
                     "Team capabilities changed; retry",
                     code="team-context-changed",
                 )
+            secret_values = self._resolve_power_secrets(team_id, spec, power)
             local_audit.record(
                 "assistant-power",
                 result="ok",
@@ -2197,7 +2570,13 @@ class LocalController:
                 detail=f"started:{power}",
             )
             try:
-                raw_result = self._rpc(container, spec, power_spec.method, power_spec.path, safe_payload)
+                raw_result = self._rpc(
+                    container,
+                    spec,
+                    power_spec.method,
+                    power_spec.path,
+                    {"input": safe_payload, "secrets": secret_values},
+                )
             except ApiProblem:
                 local_audit.record(
                     "assistant-power",
@@ -2207,6 +2586,19 @@ class LocalController:
                     detail=f"failed:{power}",
                 )
                 raise
+        if self._contains_secret(raw_result, secret_values):
+            local_audit.record(
+                "assistant-power",
+                result="error",
+                team_id=team_id,
+                assistant=assistant_id,
+                detail=f"secret-exposure:{power}",
+            )
+            raise ApiProblem(
+                HTTPStatus.BAD_GATEWAY,
+                "the Assistant returned an unsafe result",
+                code="assistant-secret-exposure",
+            )
         try:
             result = validate_power_output(assistant_id, power, raw_result)
         except ValueError as exc:
@@ -2243,6 +2635,7 @@ class LocalController:
 
     def destroy_team(self, team_id: str) -> dict[str, object]:
         team_id = validate_team_id(team_id)
+        self.secret_challenges.cancel_team(team_id)
         self._cancel_chat_for_destroy(team_id)
 
         chat_lock = self._chat_lock(team_id)
@@ -2312,6 +2705,7 @@ class LocalController:
                         self.inference_store.delete(team_id)
                     except inference_config.InferenceConfigError as exc:
                         self._raise_inference_problem(exc)
+                    self._delete_team_secret_state(team_id)
                     return {
                         "team_id": team_id,
                         "destroyed": False,
@@ -2335,6 +2729,7 @@ class LocalController:
                         "Docker could not destroy the Team",
                         code="docker-remove-failed",
                     ) from exc
+                self._delete_team_secret_state(team_id)
                 return {
                     "team_id": team_id,
                     "destroyed": True,
@@ -2368,6 +2763,7 @@ class LocalController:
 
     def reset_space(self) -> dict[str, object]:
         """Remove every exactly owned workload/network without accepting resource ids."""
+        self.secret_challenges.cancel_all()
         with ExitStack() as locks:
             for lock in self._locks:
                 locks.enter_context(lock)
@@ -2403,6 +2799,7 @@ class LocalController:
                         )
                     validate_team_id(team_id)
                     self._validate_network(network, team_id)
+                self._delete_all_secret_state()
                 for container in containers:
                     container.remove(force=True)
                     self._blocked_power_workloads.discard(container.id)
@@ -2520,7 +2917,11 @@ class Handler(BaseHTTPRequestHandler):
             raw_body = self.rfile.read(length)
             if len(raw_body) != length:
                 raise ValueError("short request body")
-            body = json.loads(raw_body)
+            body = json.loads(
+                raw_body,
+                object_pairs_hook=_unique_object,
+                parse_constant=_reject_json_constant,
+            )
         except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
             raise ApiProblem(HTTPStatus.BAD_REQUEST, "invalid JSON body", code="invalid-json") from exc
         if not isinstance(body, dict):
@@ -2678,10 +3079,30 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and self.command == "POST":
             provider, api_key = self._model_credential_headers()
             body = self._body(max_bytes=MAX_CHAT_BODY_BYTES)
+            payload = self.server.controller.chat(team_id, body, provider, api_key)
+            return (
+                HTTPStatus.PRECONDITION_REQUIRED if payload.get("status") == "secrets-required" else HTTPStatus.OK,
+                payload,
+                "chat",
+                team_id,
+                None,
+            )
+        if len(parts) == 5 and parts[4] == "secrets" and self.command == "GET":
             return (
                 HTTPStatus.OK,
-                self.server.controller.chat(team_id, body, provider, api_key),
-                "chat",
+                self.server.controller.pending_chat_secrets(team_id),
+                "chat-secret-pending",
+                team_id,
+                None,
+            )
+        if len(parts) == 5 and parts[4] == "secrets" and self.command == "POST":
+            provider, api_key = self._model_credential_headers()
+            body = self._body(max_bytes=MAX_SECRET_BODY_BYTES)
+            payload = self.server.controller.submit_chat_secrets(team_id, body, provider, api_key)
+            return (
+                HTTPStatus.PRECONDITION_REQUIRED if payload.get("status") == "secrets-required" else HTTPStatus.OK,
+                payload,
+                "chat-secret-submit",
                 team_id,
                 None,
             )
@@ -2696,6 +3117,23 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 self.server.controller.stop_chat(team_id),
                 "chat-stop",
+                team_id,
+                None,
+            )
+        return None
+
+    def _assistant_secret_route(
+        self,
+        parts: list[str],
+    ) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
+        if len(parts) != 4 or parts[:2] != ["v1", "teams"] or parts[3] != "assistant-secrets":
+            return None
+        team_id = validate_team_id(parts[2])
+        if self.command == "GET":
+            return (
+                HTTPStatus.OK,
+                self.server.controller.list_assistant_secrets(team_id),
+                "assistant-secret-list",
                 team_id,
                 None,
             )
@@ -2741,6 +3179,9 @@ class Handler(BaseHTTPRequestHandler):
         chat_route = self._chat_route(parts)
         if chat_route is not None:
             return chat_route
+        assistant_secret_route = self._assistant_secret_route(parts)
+        if assistant_secret_route is not None:
+            return assistant_secret_route
         team_route = self._team_route(parts)
         if team_route is not None:
             return team_route

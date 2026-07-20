@@ -83,6 +83,7 @@ def challenge_payload(
     return {
         "team_id": challenge.team_id,
         "status": "secrets-required",
+        "turn_id": challenge.id,
         "challenge_id": challenge.id,
         "requirements": [
             {
