@@ -402,6 +402,25 @@ def parse_allowed_hosts(raw: bytes) -> tuple[str, ...]:
     return parse_manifest_contract(raw).allowed_hosts
 
 
+def parse_declared_allowed_hosts(raw: bytes) -> tuple[str, ...]:
+    """Read only legacy network intent while reconciling a trusted older artifact."""
+    if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_MANIFEST_BYTES:
+        raise ManifestError("Assistant manifest has an invalid size")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ManifestError("Assistant manifest is not UTF-8") from exc
+    if any(not character.isprintable() and character not in {"\n", "\r", "\t"} for character in text):
+        raise ManifestError("Assistant manifest contains invalid text")
+    try:
+        manifest = tomllib.loads(text)
+    except (RecursionError, tomllib.TOMLDecodeError) as exc:
+        raise ManifestError("Assistant manifest is invalid TOML") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 2 or "allowed_hosts" not in manifest:
+        raise ManifestError("Assistant manifest does not declare its network contract")
+    return canonical_allowed_hosts(manifest["allowed_hosts"])
+
+
 def _bounded_archive(chunks: Iterable[bytes]) -> bytes:
     archive = bytearray()
     try:
@@ -422,8 +441,8 @@ def _bounded_archive(chunks: Iterable[bytes]) -> bytes:
     return bytes(archive)
 
 
-def read_container_manifest_contract(container) -> ManifestContract:
-    """Read the fixed regular manifest contract from a digest-bound root."""
+def _read_container_manifest_bytes(container) -> bytes:
+    """Read the fixed regular manifest file from a digest-bound root."""
     try:
         chunks, metadata = container.get_archive(MANIFEST_PATH)
     except Exception as exc:
@@ -466,12 +485,22 @@ def read_container_manifest_contract(container) -> ManifestContract:
         raise ManifestError("Assistant manifest archive is invalid") from exc
     if len(raw) != size:
         raise ManifestError("Assistant manifest archive is invalid")
-    return parse_manifest_contract(raw)
+    return raw
+
+
+def read_container_manifest_contract(container) -> ManifestContract:
+    """Read the fixed regular manifest contract from a digest-bound root."""
+    return parse_manifest_contract(_read_container_manifest_bytes(container))
 
 
 def read_container_allowed_hosts(container) -> tuple[str, ...]:
     """Compatibility projection of a container's admitted complete manifest contract."""
     return read_container_manifest_contract(container).allowed_hosts
+
+
+def read_container_declared_allowed_hosts(container) -> tuple[str, ...]:
+    """Read legacy network intent only for fail-closed replacement of an older artifact."""
+    return parse_declared_allowed_hosts(_read_container_manifest_bytes(container))
 
 
 class ManifestContractCache:

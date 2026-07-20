@@ -183,6 +183,22 @@ class AssistantManifestTests(unittest.TestCase):
             with self.subTest(content=content), self.assertRaises(assistant_manifest.ManifestError):
                 assistant_manifest.parse_manifest_contract(content)
 
+    def test_reconciliation_reads_only_legacy_network_intent(self):
+        legacy = b"""schema_version = 2
+name = "Legacy Assistant"
+allowed_hosts = ["legacy-api.shimpz.com"]
+[connections.legacy]
+provider = "legacy"
+scopes = ["read"]
+"""
+
+        self.assertEqual(
+            assistant_manifest.read_container_declared_allowed_hosts(Container("legacy", legacy)),
+            ("legacy-api.shimpz.com",),
+        )
+        with self.assertRaises(assistant_manifest.ManifestError):
+            assistant_manifest.read_container_manifest_contract(Container("legacy-strict", legacy))
+
     def test_unsafe_hosts_fail_closed(self):
         unsafe = (
             "*.example.com",
