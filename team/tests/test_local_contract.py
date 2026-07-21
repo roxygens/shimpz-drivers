@@ -50,6 +50,20 @@ UV_IMAGE = "ghcr.io/astral-sh/uv:0.11.25@sha256:1e3808aa9023d0980e7c15b1fa7c1ac1
 
 
 class LocalContractTests(unittest.TestCase):
+    def test_build_context_excludes_local_dependencies_caches_and_secrets(self) -> None:
+        dockerignore = (TEAM / ".dockerignore").read_text(encoding="utf-8").splitlines()
+
+        self.assertLessEqual(
+            {
+                ".env",
+                ".env.*",
+                ".venv",
+                "**/__pycache__",
+                "**/*.pyc",
+            },
+            set(dockerignore),
+        )
+
     def test_local_state_defaults_match_the_installer_mount_contract(self) -> None:
         self.assertEqual(local_token_store.TOKEN_PATH, Path("/run/shimpz-local/token"))
         self.assertEqual(local_healthcheck.TOKEN_PATH, local_token_store.TOKEN_PATH)
