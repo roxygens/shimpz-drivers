@@ -3984,7 +3984,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, _list(owner=account_id if kind == "account" else None))
             return
 
-        if method == "POST" and path == "/v1/oauth/x/callback":
+        if method == "POST" and path == "/v1/oauth/cloudflare/callback":
             result = _complete_oauth_account(self._read_body(), principal)
             audit.log(
                 "assistant_account_complete",
