@@ -23,10 +23,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+import oauth_providers
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-import oauth_providers
 
 STATE_PATH = Path("/var/lib/shimpz-local/assistant-accounts/state/accounts.json")
 KEY_PATH = Path("/var/lib/shimpz-local/assistant-accounts/key/aes256.key")
