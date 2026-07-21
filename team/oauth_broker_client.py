@@ -19,6 +19,8 @@ import oauth_http_client
 import oauth_providers
 
 BROKER_ORIGIN = "https://shimpz.com"
+DEFAULT_CALLBACK_MODE = "loopback"
+CALLBACK_MODES = frozenset({DEFAULT_CALLBACK_MODE, "canary"})
 MAX_RESPONSE_BYTES = 32 * 1024
 MAX_TOKEN_BYTES = 16 * 1024
 HTTP_TIMEOUT_SECONDS = 10
@@ -101,6 +103,12 @@ def _binding(value: object, label: str = "binding") -> str:
     return value
 
 
+def _callback_mode(value: object) -> str:
+    if not isinstance(value, str) or value not in CALLBACK_MODES:
+        raise OAuthBrokerClientError("OAuth callback mode is invalid")
+    return value
+
+
 def _private_text(
     value: object,
     label: str,
@@ -156,8 +164,14 @@ def _object(response: BrokerHTTPResponse) -> dict[str, object]:
 
 
 class OAuthBrokerClient:
-    def __init__(self, transport: BrokerTransport | None = None) -> None:
+    def __init__(
+        self,
+        transport: BrokerTransport | None = None,
+        *,
+        callback_mode: str = DEFAULT_CALLBACK_MODE,
+    ) -> None:
         self._transport = transport or FixedBrokerTransport()
+        self._callback_mode = _callback_mode(callback_mode)
 
     def __repr__(self) -> str:
         return "<OAuthBrokerClient shimpz.com>"
@@ -176,6 +190,7 @@ class OAuthBrokerClient:
                 "state": _binding(state, "state"),
                 "code_challenge": _binding(code_challenge, "challenge"),
                 "scope": " ".join(canonical_scopes),
+                "callback": self._callback_mode,
             }
         )
         return f"{BROKER_ORIGIN}/api/oauth/cloudflare/start?{query}"

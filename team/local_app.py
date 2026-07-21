@@ -602,7 +602,9 @@ class LocalController:
         self.assistant_accounts = assistant_accounts or oauth_account_store.OAuthAccountStore()
         self.account_challenges = account_challenges or assistant_account_challenges.AccountChallengeStore()
         self.oauth_pkce = oauth_pkce or oauth_pkce_challenges.OAuthPKCEChallengeStore()
-        self.oauth_broker = oauth_broker or oauth_broker_client.OAuthBrokerClient()
+        self.oauth_broker = oauth_broker or oauth_broker_client.OAuthBrokerClient(
+            callback_mode=os.environ.get("SHIMPZ_OAUTH_CALLBACK_MODE", "loopback")
+        )
         self.oauth_service = oauth_service or oauth_account_service.BrokeredOAuthAccountService(
             challenge=self.oauth_pkce,
             store=self.assistant_accounts,

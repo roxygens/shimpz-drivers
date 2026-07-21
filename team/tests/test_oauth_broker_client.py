@@ -62,10 +62,23 @@ class OAuthBrokerClientTests(unittest.TestCase):
                 "state": [STATE],
                 "code_challenge": [CHALLENGE],
                 "scope": [" ".join(SCOPES)],
+                "callback": ["loopback"],
             },
         )
         self.assertNotIn("client", url)
         self.assertEqual(self.transport.requests, [])
+
+    def test_canary_callback_mode_is_named_and_closed(self) -> None:
+        client = oauth_broker_client.OAuthBrokerClient(self.transport, callback_mode="canary")
+        url = client.authorization_url(
+            provider_id="cloudflare",
+            state=STATE,
+            code_challenge=CHALLENGE,
+            scopes=SCOPES,
+        )
+        self.assertEqual(parse_qs(urlsplit(url).query)["callback"], ["canary"])
+        with self.assertRaises(oauth_broker_client.OAuthBrokerClientError):
+            oauth_broker_client.OAuthBrokerClient(self.transport, callback_mode="https://evil.example")
 
     def test_claim_refresh_and_revoke_use_only_fixed_broker_operations(self) -> None:
         claimed = self.client.claim(
