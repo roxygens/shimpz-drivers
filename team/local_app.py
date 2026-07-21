@@ -585,7 +585,8 @@ class LocalController:
         oauth_pkce: oauth_pkce_challenges.OAuthPKCEChallengeStore | None = None,
         oauth_http: oauth_http_client.OAuthHTTPClient | None = None,
         oauth_service: oauth_account_service.OAuthAccountService | None = None,
-        x_oauth_client_id: object = None,
+        cloudflare_oauth_client_id: object = None,
+        cloudflare_oauth_client_secret: object = None,
         approval_challenges: assistant_approval_challenges.ApprovalChallengeStore | None = None,
         approval_grants: assistant_approval_grants.ApprovalGrantStore | None = None,
     ) -> None:
@@ -604,11 +605,19 @@ class LocalController:
         self.account_challenges = account_challenges or assistant_account_challenges.AccountChallengeStore()
         self.oauth_pkce = oauth_pkce or oauth_pkce_challenges.OAuthPKCEChallengeStore()
         self.oauth_http = oauth_http or oauth_http_client.OAuthHTTPClient()
-        self.x_oauth_client_id = (
-            os.environ.get("SHIMPZ_X_OAUTH_CLIENT_ID") if x_oauth_client_id is None else x_oauth_client_id
+        self.cloudflare_oauth_client_id = (
+            os.environ.get("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_ID")
+            if cloudflare_oauth_client_id is None
+            else cloudflare_oauth_client_id
+        )
+        self.cloudflare_oauth_client_secret = (
+            os.environ.get("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_SECRET")
+            if cloudflare_oauth_client_secret is None
+            else cloudflare_oauth_client_secret
         )
         self.oauth_service = oauth_service or oauth_account_service.OAuthAccountService(
-            client_id=self.x_oauth_client_id,
+            client_id=self.cloudflare_oauth_client_id,
+            client_secret=self.cloudflare_oauth_client_secret,
             redirect_uri=oauth_http_client.LOCAL_REDIRECT_URI,
             challenge=self.oauth_pkce,
             store=self.assistant_accounts,
@@ -1573,7 +1582,8 @@ class LocalController:
     ) -> object:
         return self.oauth_http.refresh(
             provider_id=provider,
-            client_id=self.x_oauth_client_id,
+            client_id=self.cloudflare_oauth_client_id,
+            client_secret=self.cloudflare_oauth_client_secret,
             refresh_token=refresh_token,
             scopes=scopes,
         )

@@ -190,9 +190,11 @@ _assistant_accounts = oauth_account_store.OAuthAccountStore(
 _assistant_account_challenges = assistant_account_challenges.AccountChallengeStore()
 _oauth_pkce_challenges = oauth_pkce_challenges.OAuthPKCEChallengeStore()
 _oauth_http = oauth_http_client.OAuthHTTPClient()
-_x_oauth_client_id = os.environ.get("SHIMPZ_X_OAUTH_CLIENT_ID")
+_cloudflare_oauth_client_id = os.environ.get("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_ID")
+_cloudflare_oauth_client_secret = os.environ.get("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_SECRET")
 _oauth_accounts = oauth_account_service.OAuthAccountService(
-    client_id=_x_oauth_client_id,
+    client_id=_cloudflare_oauth_client_id,
+    client_secret=_cloudflare_oauth_client_secret,
     redirect_uri=oauth_http_client.HOSTED_REDIRECT_URI,
     challenge=_oauth_pkce_challenges,
     store=_assistant_accounts,
@@ -2201,7 +2203,8 @@ def _refresh_oauth_account(provider: str, scopes: tuple[str, ...], refresh_token
     try:
         return _oauth_http.refresh(
             provider_id=provider,
-            client_id=_x_oauth_client_id,
+            client_id=_cloudflare_oauth_client_id,
+            client_secret=_cloudflare_oauth_client_secret,
             refresh_token=refresh_token,
             scopes=scopes,
         )

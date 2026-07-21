@@ -19,6 +19,7 @@ import oauth_pkce_challenges
 import oauth_providers
 
 _CLIENT_ID = re.compile(r"[A-Za-z0-9._~-]{8,256}\Z")
+_CLIENT_SECRET = re.compile(r"[!-~]{16,1024}\Z")
 _COMPONENT_ID = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
 _TEAM_ID = re.compile(r"[a-z0-9_]{1,40}\Z")
 _PENDING_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -144,6 +145,7 @@ class OAuthAccountService:
         self,
         *,
         client_id: object,
+        client_secret: object,
         redirect_uri: object,
         challenge: oauth_pkce_challenges.OAuthPKCEChallengeStore,
         store: oauth_account_store.OAuthAccountStore,
@@ -156,9 +158,10 @@ class OAuthAccountService:
             or redirect_uri not in _REDIRECT_URIS
         ):
             raise OAuthAccountServiceError("OAuth account service configuration is invalid")
-        # A self-hosted Admin may boot before its public X client id is configured.
+        # An Admin may boot before its Cloudflare OAuth client is configured.
         # Validation is deliberately lazy so only starting/completing OAuth fails.
         self._client_id = client_id
+        self._client_secret = client_secret
         self._redirect_uri = str(redirect_uri)
         self._challenge = challenge
         self._store = store
@@ -167,10 +170,15 @@ class OAuthAccountService:
     def __repr__(self) -> str:
         return "<OAuthAccountService configured>"
 
-    def _client_configuration(self) -> tuple[str, str]:
-        if not isinstance(self._client_id, str) or _CLIENT_ID.fullmatch(self._client_id) is None:
+    def _client_configuration(self) -> tuple[str, str, str]:
+        if (
+            not isinstance(self._client_id, str)
+            or _CLIENT_ID.fullmatch(self._client_id) is None
+            or not isinstance(self._client_secret, str)
+            or _CLIENT_SECRET.fullmatch(self._client_secret) is None
+        ):
             raise OAuthAccountServiceError("OAuth account client is not configured")
-        return self._client_id, self._redirect_uri
+        return self._client_id, self._client_secret, self._redirect_uri
 
     def authorization_url(
         self,
@@ -178,7 +186,7 @@ class OAuthAccountService:
         session_binding: object,
     ) -> str:
         """Create one trusted URL for the first deterministic missing account."""
-        client_id, redirect_uri = self._client_configuration()
+        client_id, _client_secret, redirect_uri = self._client_configuration()
         try:
             candidates = _candidates(pending)
             metadata_by_binding: dict[
@@ -243,7 +251,7 @@ class OAuthAccountService:
         current_declaration_callback: Callable[[str, str, str], object],
     ) -> OAuthAccountCompletion:
         """Claim once, revalidate the installed declaration, exchange, and seal tokens."""
-        client_id, redirect_uri = self._client_configuration()
+        client_id, client_secret, redirect_uri = self._client_configuration()
         if not callable(current_declaration_callback):
             raise OAuthAccountServiceError("OAuth declaration resolver is unavailable")
         try:
@@ -265,6 +273,7 @@ class OAuthAccountService:
             token_set = self._http.exchange_code(
                 provider_id=provider,
                 client_id=client_id,
+                client_secret=client_secret,
                 redirect_uri=redirect_uri,
                 code=code,
                 code_verifier=exchange.code_verifier,
@@ -300,12 +309,13 @@ class OAuthAccountService:
         """Revoke each upstream token before atomically deleting local custody."""
 
         def revoke(provider: str, access_token: str, refresh_token: str | None) -> None:
-            client_id, _ = self._client_configuration()
+            client_id, client_secret, _ = self._client_configuration()
             tokens = tuple(dict.fromkeys(token for token in (refresh_token, access_token) if token))
             for token in tokens:
                 self._http.revoke(
                     provider_id=provider,
                     client_id=client_id,
+                    client_secret=client_secret,
                     token=token,
                 )
 

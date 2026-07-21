@@ -12,12 +12,13 @@ import oauth_account_store
 import oauth_http_client
 import oauth_pkce_challenges
 
-CLIENT_ID = "public-client-123456789"
+CLIENT_ID = "cloudflare-client-123456789"
+CLIENT_SECRET = "cloudflare-secret-private-123456789"
 CODE = "authorization-code-private-123456789"
 SESSION = "browser-session-private-123456789"
 OTHER_SESSION = "other-browser-session-123456789"
-SCOPES = ("offline.access", "tweet.read", "tweet.write", "users.read")
-DECLARATION = {"provider": "x", "scopes": SCOPES}
+SCOPES = ("dns.read", "offline_access", "zone.read")
+DECLARATION = {"provider": "cloudflare", "scopes": SCOPES}
 ACCESS = "access-token-private-123456789"
 REFRESH = "refresh-token-private-987654321"
 
@@ -55,16 +56,16 @@ class SequenceTransport:
 
 
 def requirement(
-    assistant: str = "shimpz-assistant",
+    assistant: str = "shimpz-cloudflare",
     *,
-    provider: str = "x",
+    provider: str = "cloudflare",
     scopes: tuple[str, ...] = SCOPES,
 ) -> assistant_account_challenges.AccountRequirement:
     return assistant_account_challenges.AccountRequirement(
         assistant_id=assistant,
         assistant_name=assistant,
-        power_ids=("identity-me",),
-        accounts=(("x", provider, scopes),),
+        power_ids=("list-zones",),
+        accounts=(("cloudflare", provider, scopes),),
     )
 
 
@@ -93,6 +94,7 @@ class OAuthAccountServiceTests(unittest.TestCase):
         self.http = oauth_http_client.OAuthHTTPClient(self.transport)
         self.service = oauth_account_service.OAuthAccountService(
             client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
             redirect_uri=oauth_http_client.LOCAL_REDIRECT_URI,
             challenge=self.challenges,
             store=self.store,
@@ -118,8 +120,8 @@ class OAuthAccountServiceTests(unittest.TestCase):
         self.store.put(
             "team_1",
             "a-assistant",
-            "x",
-            "x",
+            "cloudflare",
+            "cloudflare",
             SCOPES,
             oauth_http_client.OAuthTokenSet(ACCESS, REFRESH, SCOPES, 3600),
         )
@@ -128,7 +130,7 @@ class OAuthAccountServiceTests(unittest.TestCase):
         url = self.service.authorization_url(flow, SESSION)
         parsed = urlsplit(url)
         query = parse_qs(parsed.query, strict_parsing=True)
-        self.assertEqual((parsed.scheme, parsed.netloc, parsed.path), ("https", "x.com", "/i/oauth2/authorize"))
+        self.assertEqual((parsed.scheme, parsed.netloc, parsed.path), ("https", "dash.cloudflare.com", "/oauth2/auth"))
         self.assertEqual(query["redirect_uri"], [oauth_http_client.LOCAL_REDIRECT_URI])
         self.assertEqual(query["client_id"], [CLIENT_ID])
         self.assertEqual(query["code_challenge_method"], ["S256"])
@@ -137,13 +139,13 @@ class OAuthAccountServiceTests(unittest.TestCase):
         completed = self._complete(query["state"][0])
         self.assertEqual(
             (completed.team_id, completed.assistant_id, completed.account_id),
-            ("team_1", "z-assistant", "x"),
+            ("team_1", "z-assistant", "cloudflare"),
         )
-        self.assertEqual(completed.provider, "x")
+        self.assertEqual(completed.provider, "cloudflare")
         self.assertEqual(completed.generation, 1)
-        for private in (CODE, ACCESS, REFRESH, CLIENT_ID, query["state"][0], "verifier"):
+        for private in (CODE, ACCESS, REFRESH, CLIENT_ID, CLIENT_SECRET, query["state"][0], "verifier"):
             self.assertNotIn(private, repr(completed))
-        metadata = self.store.metadata("team_1", "z-assistant", {"x": DECLARATION})[0]
+        metadata = self.store.metadata("team_1", "z-assistant", {"cloudflare": DECLARATION})[0]
         self.assertEqual(metadata.status, "connected")
         self.assertIsNone(metadata.account)
 
@@ -154,7 +156,7 @@ class OAuthAccountServiceTests(unittest.TestCase):
         self.assertEqual(self.transport.requests, [])
 
         completed = self._complete(state)
-        self.assertEqual(completed.account_id, "x")
+        self.assertEqual(completed.account_id, "cloudflare")
         self.assertEqual(len(self.transport.requests), 1)
         with self.assertRaises(oauth_account_service.OAuthAccountServiceError):
             self._complete(state)
@@ -163,7 +165,7 @@ class OAuthAccountServiceTests(unittest.TestCase):
     def test_install_or_scope_drift_consumes_state_before_any_exchange(self) -> None:
         drifted = (
             None,
-            {"provider": "x", "scopes": ("tweet.read", "users.read")},
+            {"provider": "cloudflare", "scopes": ("dns.read",)},
         )
         for current in drifted:
             with self.subTest(current=current):
@@ -182,7 +184,7 @@ class OAuthAccountServiceTests(unittest.TestCase):
     def test_provider_scope_and_configuration_injection_fail_closed(self) -> None:
         for malicious in (
             requirement(provider="https://evil.example/token"),
-            requirement(scopes=("tweet.read", "https://evil.example")),
+            requirement(scopes=("dns.read", "https://evil.example")),
         ):
             with (
                 self.subTest(malicious=malicious),
@@ -204,6 +206,7 @@ class OAuthAccountServiceTests(unittest.TestCase):
 
         lazy = oauth_account_service.OAuthAccountService(
             client_id=None,
+            client_secret=None,
             redirect_uri=oauth_http_client.LOCAL_REDIRECT_URI,
             challenge=self.challenges,
             store=self.store,
@@ -218,6 +221,7 @@ class OAuthAccountServiceTests(unittest.TestCase):
         with self.assertRaises(oauth_account_service.OAuthAccountServiceError):
             oauth_account_service.OAuthAccountService(
                 client_id=CLIENT_ID,
+                client_secret=CLIENT_SECRET,
                 redirect_uri="https://evil.example/callback",
                 challenge=self.challenges,
                 store=self.store,
@@ -234,22 +238,23 @@ class OAuthAccountServiceTests(unittest.TestCase):
         )
         store.put(
             "team_1",
-            "shimpz-assistant",
-            "x",
-            "x",
+            "shimpz-cloudflare",
+            "cloudflare",
+            "cloudflare",
             SCOPES,
             oauth_http_client.OAuthTokenSet(ACCESS, REFRESH, SCOPES, 30),
         )
         now[0] = 1_031
         service = oauth_account_service.OAuthAccountService(
             client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
             redirect_uri=oauth_http_client.LOCAL_REDIRECT_URI,
             challenge=oauth_pkce_challenges.OAuthPKCEChallengeStore(),
             store=store,
             http=self.http,
         )
         url = service.authorization_url(pending(requirement()), SESSION)
-        self.assertEqual(urlsplit(url).hostname, "x.com")
+        self.assertEqual(urlsplit(url).hostname, "dash.cloudflare.com")
 
     def test_provider_response_and_callback_errors_never_reflect_private_values(self) -> None:
         leaked = "provider-private-response-123456789"
@@ -270,6 +275,7 @@ class OAuthAccountServiceTests(unittest.TestCase):
         )
         service = oauth_account_service.OAuthAccountService(
             client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
             redirect_uri=oauth_http_client.LOCAL_REDIRECT_URI,
             challenge=self.challenges,
             store=self.store,
@@ -284,7 +290,7 @@ class OAuthAccountServiceTests(unittest.TestCase):
                 lambda _team, _assistant, _account: DECLARATION,
             )
         rendered = f"{captured.exception!r} {captured.exception}"
-        for private in (leaked, ACCESS, REFRESH, CODE, CLIENT_ID, state, "verifier"):
+        for private in (leaked, ACCESS, REFRESH, CODE, CLIENT_ID, CLIENT_SECRET, state, "verifier"):
             self.assertNotIn(private, rendered)
 
         next_state = self._state(service.authorization_url(pending(requirement()), SESSION))
@@ -306,8 +312,8 @@ class OAuthAccountServiceTests(unittest.TestCase):
         requests = len(self.transport.requests)
         with self.assertRaises(oauth_account_service.OAuthAccountUnavailableError):
             self.service.authorization_url(pending(requirement()), SESSION)
-        self.assertTrue(self.service.disconnect("team_1", "shimpz-assistant", "x"))
-        self.assertFalse(self.service.disconnect("team_1", "shimpz-assistant", "x"))
+        self.assertTrue(self.service.disconnect("team_1", "shimpz-cloudflare", "cloudflare"))
+        self.assertFalse(self.service.disconnect("team_1", "shimpz-cloudflare", "cloudflare"))
         self.assertEqual(len(self.transport.requests), requests + 2)
         revoked = [
             parse_qs(bytes(request["body"]).decode(), strict_parsing=True)["token"][0]
@@ -315,19 +321,19 @@ class OAuthAccountServiceTests(unittest.TestCase):
         ]
         self.assertEqual(revoked, [REFRESH, ACCESS])
         self.assertTrue(
-            all(request["url"] == "https://api.x.com/2/oauth2/revoke" for request in self.transport.requests[-2:])
+            all(request["url"] == "https://dash.cloudflare.com/oauth2/revoke" for request in self.transport.requests[-2:])
         )
         self.assertEqual(
-            self.store.metadata("team_1", "shimpz-assistant", {"x": DECLARATION})[0].status,
+            self.store.metadata("team_1", "shimpz-cloudflare", {"cloudflare": DECLARATION})[0].status,
             "missing",
         )
 
     def test_disconnect_failure_retains_custody_and_is_safely_retryable(self) -> None:
         self.store.put(
             "team_1",
-            "shimpz-assistant",
-            "x",
-            "x",
+            "shimpz-cloudflare",
+            "cloudflare",
+            "cloudflare",
             SCOPES,
             oauth_http_client.OAuthTokenSet(ACCESS, REFRESH, SCOPES, 3600),
         )
@@ -340,6 +346,7 @@ class OAuthAccountServiceTests(unittest.TestCase):
         )
         service = oauth_account_service.OAuthAccountService(
             client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
             redirect_uri=oauth_http_client.LOCAL_REDIRECT_URI,
             challenge=self.challenges,
             store=self.store,
@@ -347,12 +354,12 @@ class OAuthAccountServiceTests(unittest.TestCase):
         )
 
         with self.assertRaises(oauth_account_service.OAuthAccountServiceError) as failed:
-            service.disconnect("team_1", "shimpz-assistant", "x")
+            service.disconnect("team_1", "shimpz-cloudflare", "cloudflare")
         rendered = f"{failed.exception!r} {failed.exception}"
-        for private in (ACCESS, REFRESH, CLIENT_ID, "private-provider-detail"):
+        for private in (ACCESS, REFRESH, CLIENT_ID, CLIENT_SECRET, "private-provider-detail"):
             self.assertNotIn(private, rendered)
         self.assertEqual(
-            self.store.metadata("team_1", "shimpz-assistant", {"x": DECLARATION})[0].status,
+            self.store.metadata("team_1", "shimpz-cloudflare", {"cloudflare": DECLARATION})[0].status,
             "connected",
         )
 
@@ -362,35 +369,36 @@ class OAuthAccountServiceTests(unittest.TestCase):
                 oauth_http_client.OAuthHTTPResponse(200, "application/json", b"{}"),
             ]
         )
-        self.assertTrue(service.disconnect("team_1", "shimpz-assistant", "x"))
-        self.assertFalse(service.disconnect("team_1", "shimpz-assistant", "x"))
+        self.assertTrue(service.disconnect("team_1", "shimpz-cloudflare", "cloudflare"))
+        self.assertFalse(service.disconnect("team_1", "shimpz-cloudflare", "cloudflare"))
         self.assertEqual(len(transport.requests), 4)
         self.assertEqual(
-            self.store.metadata("team_1", "shimpz-assistant", {"x": DECLARATION})[0].status,
+            self.store.metadata("team_1", "shimpz-cloudflare", {"cloudflare": DECLARATION})[0].status,
             "missing",
         )
 
     def test_disconnect_without_client_configuration_retains_local_custody(self) -> None:
         self.store.put(
             "team_1",
-            "shimpz-assistant",
-            "x",
-            "x",
+            "shimpz-cloudflare",
+            "cloudflare",
+            "cloudflare",
             SCOPES,
             oauth_http_client.OAuthTokenSet(ACCESS, REFRESH, SCOPES, 3600),
         )
         service = oauth_account_service.OAuthAccountService(
             client_id=None,
+            client_secret=None,
             redirect_uri=oauth_http_client.LOCAL_REDIRECT_URI,
             challenge=self.challenges,
             store=self.store,
             http=self.http,
         )
         with self.assertRaises(oauth_account_service.OAuthAccountServiceError):
-            service.disconnect("team_1", "shimpz-assistant", "x")
+            service.disconnect("team_1", "shimpz-cloudflare", "cloudflare")
         self.assertEqual(self.transport.requests, [])
         self.assertEqual(
-            self.store.metadata("team_1", "shimpz-assistant", {"x": DECLARATION})[0].status,
+            self.store.metadata("team_1", "shimpz-cloudflare", {"cloudflare": DECLARATION})[0].status,
             "connected",
         )
 
