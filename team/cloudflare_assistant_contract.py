@@ -10,7 +10,7 @@ ASSISTANT_NAME = "Shimpz Cloudflare"
 ASSISTANT_SUMMARY = "List Cloudflare zones and inspect their DNS records through OAuth."
 ASSISTANT_RPC_COMMAND = "/usr/local/bin/shimpz-assistant-rpc"
 ASSISTANT_ALLOWED_HOSTS = ("api.cloudflare.com",)
-ASSISTANT_HEALTH_PATH = "/health"
+ASSISTANT_HEALTH_PATH = "/healthz"
 
 _HEX_ID = re.compile(r"[0-9a-f]{32}\Z")
 _STATUS = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")

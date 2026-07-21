@@ -405,7 +405,7 @@ class LocalContractTests(unittest.TestCase):
         registry = self._registry(CURRENT_ASSISTANT_IMAGE)
         spec = registry["shimpz-cloudflare"]
         self.assertEqual(spec.allowed_hosts, ("api.cloudflare.com",))
-        self.assertEqual(spec.health_path, "/health")
+        self.assertEqual(spec.health_path, "/healthz")
         self.assertEqual(set(spec.powers), {"list-zones", "list-dns-records"})
         self.assertTrue(all(power.approval == "none" for power in spec.powers.values()))
         self.assertTrue(all(power.accounts == ("cloudflare",) for power in spec.powers.values()))
