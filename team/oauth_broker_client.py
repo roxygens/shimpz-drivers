@@ -237,7 +237,12 @@ class OAuthBrokerClient:
         _provider, canonical_scopes = _intent(provider_id, scopes)
         if not isinstance(claim, str) or _CLAIM.fullmatch(claim) is None:
             raise OAuthBrokerClientError("OAuth claim is invalid")
-        verifier = _binding(code_verifier, "verifier")
+        verifier = _private_text(
+            code_verifier,
+            "verifier",
+            minimum=43,
+            maximum=128,
+        )
         return self._tokens(
             self._post(
                 "claim",

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import assistant_account_challenges
 import oauth_account_store
+import oauth_broker_client
 import oauth_http_client
 import oauth_pkce_challenges
 import oauth_providers
@@ -138,6 +139,38 @@ def _candidates(
     return tuple(sorted(candidates, key=lambda item: (item.assistant_id, item.account_id)))
 
 
+def _missing_candidate(
+    pending: assistant_account_challenges.PendingAccountChallenge,
+    store: oauth_account_store.OAuthAccountStore,
+) -> _Candidate:
+    candidates = _candidates(pending)
+    metadata_by_binding: dict[
+        tuple[str, str],
+        oauth_account_store.OAuthAccountMetadata,
+    ] = {}
+    by_assistant: dict[str, dict[str, dict[str, object]]] = {}
+    for candidate in candidates:
+        by_assistant.setdefault(candidate.assistant_id, {})[candidate.account_id] = {
+            "provider": candidate.provider,
+            "scopes": candidate.scopes,
+        }
+    for assistant_id, declarations in by_assistant.items():
+        for item in store.metadata(pending.team_id, assistant_id, declarations):
+            metadata_by_binding[(assistant_id, item.id)] = item
+    selected = next(
+        (
+            candidate
+            for candidate in candidates
+            if metadata_by_binding[(candidate.assistant_id, candidate.account_id)].status
+            in {"missing", "refresh-required", "reauthorization-required"}
+        ),
+        None,
+    )
+    if selected is None:
+        raise OAuthAccountUnavailableError("all pending OAuth accounts are already configured")
+    return selected
+
+
 class OAuthAccountService:
     """Start and complete only controller-reviewed OAuth Authorization Code flows."""
 
@@ -188,31 +221,7 @@ class OAuthAccountService:
         """Create one trusted URL for the first deterministic missing account."""
         client_id, _client_secret, redirect_uri = self._client_configuration()
         try:
-            candidates = _candidates(pending)
-            metadata_by_binding: dict[
-                tuple[str, str],
-                oauth_account_store.OAuthAccountMetadata,
-            ] = {}
-            by_assistant: dict[str, dict[str, dict[str, object]]] = {}
-            for candidate in candidates:
-                by_assistant.setdefault(candidate.assistant_id, {})[candidate.account_id] = {
-                    "provider": candidate.provider,
-                    "scopes": candidate.scopes,
-                }
-            for assistant_id, declarations in by_assistant.items():
-                for item in self._store.metadata(pending.team_id, assistant_id, declarations):
-                    metadata_by_binding[(assistant_id, item.id)] = item
-            selected = next(
-                (
-                    candidate
-                    for candidate in candidates
-                    if metadata_by_binding[(candidate.assistant_id, candidate.account_id)].status
-                    in {"missing", "refresh-required", "reauthorization-required"}
-                ),
-                None,
-            )
-            if selected is None:
-                raise OAuthAccountUnavailableError("all pending OAuth accounts are already configured")
+            selected = _missing_candidate(pending, self._store)
             public = self._challenge.create(
                 session_binding=session_binding,
                 team_id=selected.team_id,
@@ -335,5 +344,170 @@ class OAuthAccountService:
             oauth_account_store.OAuthAccountStoreError,
             oauth_http_client.OAuthHTTPError,
             OAuthAccountServiceError,
+        ):
+            raise OAuthAccountServiceError("OAuth account could not be disconnected") from None
+
+
+class BrokeredOAuthAccountService:
+    """Controller orchestration that never owns an OAuth Client Secret."""
+
+    def __init__(
+        self,
+        *,
+        challenge: oauth_pkce_challenges.OAuthPKCEChallengeStore,
+        store: oauth_account_store.OAuthAccountStore,
+        broker: oauth_broker_client.OAuthBrokerClient,
+    ) -> None:
+        if (
+            not isinstance(challenge, oauth_pkce_challenges.OAuthPKCEChallengeStore)
+            or not isinstance(store, oauth_account_store.OAuthAccountStore)
+            or not isinstance(broker, oauth_broker_client.OAuthBrokerClient)
+        ):
+            raise OAuthAccountServiceError("brokered OAuth account service configuration is invalid")
+        self._challenge = challenge
+        self._store = store
+        self._broker = broker
+
+    def __repr__(self) -> str:
+        return "<BrokeredOAuthAccountService shimpz.com>"
+
+    def authorization_url(
+        self,
+        pending: assistant_account_challenges.PendingAccountChallenge,
+        session_binding: object,
+    ) -> str:
+        try:
+            selected = _missing_candidate(pending, self._store)
+            public = self._challenge.create(
+                session_binding=session_binding,
+                team_id=selected.team_id,
+                assistant_id=selected.assistant_id,
+                account_id=selected.account_id,
+                provider_id=selected.provider,
+                scopes=selected.scopes,
+            )
+            return self._broker.authorization_url(
+                provider_id=public.provider_id,
+                state=public.state,
+                code_challenge=public.code_challenge,
+                scopes=public.scopes,
+            )
+        except OAuthAccountUnavailableError:
+            raise
+        except (
+            assistant_account_challenges.AccountChallengeError,
+            oauth_account_store.OAuthAccountStoreError,
+            oauth_broker_client.OAuthBrokerClientError,
+            oauth_pkce_challenges.OAuthChallengeError,
+            oauth_providers.OAuthProviderError,
+            OAuthAccountServiceError,
+            KeyError,
+            TypeError,
+        ):
+            raise OAuthAccountServiceError("OAuth account could not be started") from None
+
+    def complete(
+        self,
+        state: object,
+        claim: object,
+        session_binding: object,
+        current_declaration_callback: Callable[[str, str, str], object],
+    ) -> OAuthAccountCompletion:
+        if not callable(current_declaration_callback):
+            raise OAuthAccountServiceError("OAuth declaration resolver is unavailable")
+        try:
+            exchange = self._challenge.claim_callback(
+                state=state,
+                session_binding=session_binding,
+            )
+            try:
+                current = current_declaration_callback(
+                    exchange.team_id,
+                    exchange.assistant_id,
+                    exchange.account_id,
+                )
+            except OAuthAccountDeclarationError:
+                raise OAuthAccountServiceError("OAuth account declaration is unavailable") from None
+            provider, scopes = _declaration(current)
+            if provider != exchange.provider_id or scopes != exchange.scopes:
+                raise OAuthAccountServiceError("OAuth account declaration changed")
+            token_set = self._broker.claim(
+                provider_id=provider,
+                claim=claim,
+                state=state,
+                code_verifier=exchange.code_verifier,
+                scopes=scopes,
+            )
+            metadata = self._store.put(
+                exchange.team_id,
+                exchange.assistant_id,
+                exchange.account_id,
+                provider,
+                scopes,
+                token_set,
+                None,
+            )
+            return OAuthAccountCompletion(
+                team_id=exchange.team_id,
+                assistant_id=exchange.assistant_id,
+                account_id=exchange.account_id,
+                provider=metadata.provider,
+                scopes=metadata.scopes,
+                generation=metadata.generation,
+            )
+        except (
+            oauth_account_store.OAuthAccountStoreError,
+            oauth_broker_client.OAuthBrokerClientError,
+            oauth_pkce_challenges.OAuthChallengeError,
+            oauth_providers.OAuthProviderError,
+            OAuthAccountServiceError,
+        ):
+            raise OAuthAccountServiceError("OAuth account could not be completed") from None
+
+    def refresh(
+        self,
+        provider: object,
+        scopes: object,
+        refresh_token: object,
+        broker_lease: object,
+    ) -> object:
+        try:
+            return self._broker.refresh(
+                provider_id=provider,
+                refresh_token=refresh_token,
+                broker_lease=broker_lease,
+                scopes=scopes,
+            )
+        except oauth_broker_client.OAuthBrokerClientError:
+            raise OAuthAccountServiceError("OAuth account could not be refreshed") from None
+
+    def disconnect(
+        self,
+        team_id: object,
+        assistant_id: object,
+        account_id: object,
+    ) -> bool:
+        def revoke(
+            provider: str,
+            access_token: str,
+            refresh_token: str | None,
+            broker_lease: str | None,
+        ) -> None:
+            self._broker.revoke(
+                provider_id=provider,
+                token=refresh_token or access_token,
+                broker_lease=broker_lease,
+            )
+
+        try:
+            return self._store.revoke_then_delete(
+                team_id,
+                assistant_id,
+                account_id,
+                revoke,
+            )
+        except (
+            oauth_account_store.OAuthAccountStoreError,
+            oauth_broker_client.OAuthBrokerClientError,
         ):
             raise OAuthAccountServiceError("OAuth account could not be disconnected") from None
