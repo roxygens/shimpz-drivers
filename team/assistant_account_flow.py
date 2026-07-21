@@ -40,6 +40,10 @@ _FORBIDDEN_PUBLIC_FIELDS = frozenset(
     }
 )
 _PROVIDER_PUBLIC_METADATA = {
+    "cloudflare": (
+        "Cloudflare",
+        "Connect your Cloudflare account so this Assistant can use only its reviewed read permissions.",
+    ),
     "x": (
         "X",
         "Connect your X account so this Assistant can use only its reviewed X permissions.",

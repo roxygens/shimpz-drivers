@@ -117,6 +117,34 @@ def _request(power: str, interrupt_id: str) -> brain_runtime_client.PowerRequest
     return brain_runtime_client.PowerRequest(interrupt_id, "x-assistant", power, {}, "none")
 
 
+def _cloudflare_spec() -> AssistantSpec:
+    return AssistantSpec(
+        assistant_id="shimpz-cloudflare",
+        name="Shimpz Cloudflare",
+        summary="test",
+        image="example.invalid/cloudflare@sha256:" + ("b" * 64),
+        rpc_command="/app/rpc",
+        health_path="/healthz",
+        powers={
+            "list-zones": PowerSpec(
+                "POST",
+                "/v1/powers/list-zones",
+                "List a bounded page of Cloudflare zones and domains.",
+                {},
+                {},
+                "none",
+                (),
+                ("cloudflare",),
+            )
+        },
+        secrets={},
+        allowed_hosts=("api.cloudflare.com",),
+        accounts={
+            "cloudflare": AccountSpec("cloudflare", ("dns.read", "offline_access", "zone.read")),
+        },
+    )
+
+
 class AssistantAccountFlowTests(unittest.TestCase):
     def test_batch_collects_every_unusable_account_before_any_power(self) -> None:
         expiry = int(time.time()) + 3600
@@ -208,6 +236,52 @@ class AssistantAccountFlowTests(unittest.TestCase):
         )
         self.assertNotIn("must-never-be-public", repr(payload))
         self.assertNotIn("access_token", repr(payload))
+
+    def test_cloudflare_challenge_projects_reviewed_oauth_metadata(self) -> None:
+        spec = _cloudflare_spec()
+        requirement = assistant_account_challenges.AccountRequirement(
+            "shimpz-cloudflare",
+            "Shimpz Cloudflare",
+            ("list-zones",),
+            (("cloudflare", "cloudflare", ("dns.read", "offline_access", "zone.read")),),
+        )
+        challenge = assistant_account_challenges.PendingAccountChallenge(
+            "b" * 32,
+            "team_1",
+            time.monotonic() + 300,
+            (requirement,),
+            {"input": "must-never-be-public"},
+        )
+
+        payload = assistant_account_flow.challenge_payload(
+            challenge,
+            {"shimpz-cloudflare": _Active(spec)},
+        )
+
+        self.assertEqual(
+            payload["requirements"],
+            [
+                {
+                    "assistant_id": "shimpz-cloudflare",
+                    "assistant_name": "Shimpz Cloudflare",
+                    "account_id": "cloudflare",
+                    "provider": "cloudflare",
+                    "name": "Cloudflare",
+                    "summary": (
+                        "Connect your Cloudflare account so this Assistant can use only its reviewed read permissions."
+                    ),
+                    "scopes": ["dns.read", "offline_access", "zone.read"],
+                    "powers": [
+                        {
+                            "id": "list-zones",
+                            "name": "List Zones",
+                            "summary": "List a bounded page of Cloudflare zones and domains.",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertNotIn("must-never-be-public", repr(payload))
 
     def test_inventory_flattens_status_without_token_or_generation_fields(self) -> None:
         spec = _spec()
