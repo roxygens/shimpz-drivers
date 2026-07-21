@@ -46,6 +46,7 @@ TEST_ACCOUNT_ACCESS_TOKEN = "-".join(("oauth", "access", "test", "token", "12345
 TEST_ACCOUNT_REFRESH_TOKEN = "-".join(("oauth", "refresh", "test", "token", "123456789"))
 CURRENT_ASSISTANT_IMAGE = "ghcr.io/theshimpz/shimpz-space@sha256:" + "b" * 64
 OUTDATED_ASSISTANT_IMAGE = "ghcr.io/theshimpz/shimpz-space@sha256:" + "a" * 64
+UV_IMAGE = "ghcr.io/astral-sh/uv:0.11.25@sha256:1e3808aa9023d0980e7c15b1fa7c1ac16ff35925780cf5c459858b2d693f01a9"
 
 
 class LocalContractTests(unittest.TestCase):
@@ -457,6 +458,7 @@ class LocalContractTests(unittest.TestCase):
             "/var/lib/shimpz-local/assistant-accounts/key &&",
             dockerfile,
         )
+
         self.assertIn(
             "chmod 0700 /var/log/shimpz-local /var/lib/shimpz-local/storage "
             "/var/lib/shimpz-local/inference \\\n"
@@ -470,6 +472,18 @@ class LocalContractTests(unittest.TestCase):
         )
         self.assertIn("SHIMPZ_LOCAL_POWER_JOURNAL_PATH", source)
         self.assertIn("SHIMPZ_LOCAL_APPROVAL_GRANTS_PATH", source)
+
+    def test_local_runtime_copies_only_builder_resolved_dependencies(self) -> None:
+        dockerfile = (TEAM / "Dockerfile.local").read_text(encoding="utf-8")
+        runtime = dockerfile.split(" AS runtime\n", 1)[1]
+
+        self.assertIn(f"FROM {UV_IMAGE} AS uv", dockerfile)
+        self.assertIn("COPY --from=uv /uv /usr/local/bin/uv", dockerfile)
+        self.assertIn("COPY --from=dependencies /opt/venv /opt/venv", runtime)
+        self.assertNotIn("uv-install.sh", dockerfile)
+        self.assertNotIn("apt-get", runtime)
+        self.assertNotIn("curl", runtime)
+        self.assertNotIn("/usr/local/bin/uv", runtime)
 
     def test_local_controller_accepts_an_injected_power_journal(self) -> None:
         image = "127.0.0.1:5000/shimpz/shimpz-assistant@sha256:" + "a" * 64
