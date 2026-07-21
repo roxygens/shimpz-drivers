@@ -51,7 +51,7 @@ import local_audit
 import local_token_store
 import oauth_account_service
 import oauth_account_store
-import oauth_http_client
+import oauth_broker_client
 import oauth_pkce_challenges
 import power_journal
 import team_storage
@@ -583,10 +583,8 @@ class LocalController:
         assistant_accounts: oauth_account_store.OAuthAccountStore | None = None,
         account_challenges: assistant_account_challenges.AccountChallengeStore | None = None,
         oauth_pkce: oauth_pkce_challenges.OAuthPKCEChallengeStore | None = None,
-        oauth_http: oauth_http_client.OAuthHTTPClient | None = None,
-        oauth_service: oauth_account_service.OAuthAccountService | None = None,
-        cloudflare_oauth_client_id: object = None,
-        cloudflare_oauth_client_secret: object = None,
+        oauth_broker: oauth_broker_client.OAuthBrokerClient | None = None,
+        oauth_service: oauth_account_service.BrokeredOAuthAccountService | None = None,
         approval_challenges: assistant_approval_challenges.ApprovalChallengeStore | None = None,
         approval_grants: assistant_approval_grants.ApprovalGrantStore | None = None,
     ) -> None:
@@ -604,24 +602,11 @@ class LocalController:
         self.assistant_accounts = assistant_accounts or oauth_account_store.OAuthAccountStore()
         self.account_challenges = account_challenges or assistant_account_challenges.AccountChallengeStore()
         self.oauth_pkce = oauth_pkce or oauth_pkce_challenges.OAuthPKCEChallengeStore()
-        self.oauth_http = oauth_http or oauth_http_client.OAuthHTTPClient()
-        self.cloudflare_oauth_client_id = (
-            os.environ.get("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_ID")
-            if cloudflare_oauth_client_id is None
-            else cloudflare_oauth_client_id
-        )
-        self.cloudflare_oauth_client_secret = (
-            os.environ.get("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_SECRET")
-            if cloudflare_oauth_client_secret is None
-            else cloudflare_oauth_client_secret
-        )
-        self.oauth_service = oauth_service or oauth_account_service.OAuthAccountService(
-            client_id=self.cloudflare_oauth_client_id,
-            client_secret=self.cloudflare_oauth_client_secret,
-            redirect_uri=oauth_http_client.LOCAL_REDIRECT_URI,
+        self.oauth_broker = oauth_broker or oauth_broker_client.OAuthBrokerClient()
+        self.oauth_service = oauth_service or oauth_account_service.BrokeredOAuthAccountService(
             challenge=self.oauth_pkce,
             store=self.assistant_accounts,
-            http=self.oauth_http,
+            broker=self.oauth_broker,
         )
         self.approval_challenges = approval_challenges or assistant_approval_challenges.ApprovalChallengeStore()
         self.approval_grants = approval_grants or assistant_approval_grants.ApprovalGrantStore(
@@ -1579,14 +1564,13 @@ class LocalController:
         provider: str,
         scopes: tuple[str, ...],
         refresh_token: str,
-        _broker_lease: str | None,
+        broker_lease: str | None,
     ) -> object:
-        return self.oauth_http.refresh(
-            provider_id=provider,
-            client_id=self.cloudflare_oauth_client_id,
-            client_secret=self.cloudflare_oauth_client_secret,
-            refresh_token=refresh_token,
-            scopes=scopes,
+        return self.oauth_service.refresh(
+            provider,
+            scopes,
+            refresh_token,
+            broker_lease,
         )
 
     def _resolve_power_accounts(
@@ -1688,6 +1672,93 @@ class LocalController:
                     code="assistant-account-contract-invalid",
                 ) from exc
         return {"team_id": team_id, **payload}
+
+    def start_assistant_account_authorization(
+        self,
+        team_id: object,
+        challenge_id: object,
+        session_binding: object,
+    ) -> dict[str, object]:
+        try:
+            challenge = self.account_challenges.get(team_id, challenge_id)
+            authorization_url = self.oauth_service.authorization_url(
+                challenge,
+                session_binding,
+            )
+        except assistant_account_challenges.AccountChallengeError as exc:
+            raise ApiProblem(
+                HTTPStatus.CONFLICT,
+                "Assistant account request expired; retry the message",
+                code="assistant-account-challenge-expired",
+            ) from exc
+        except oauth_account_service.OAuthAccountServiceError as exc:
+            raise ApiProblem(
+                HTTPStatus.BAD_GATEWAY,
+                "Assistant account authorization is unavailable",
+                code="assistant-account-oauth-unavailable",
+            ) from exc
+        return {"authorization_url": authorization_url}
+
+    def _current_account_declaration(
+        self,
+        team_id: str,
+        assistant_id: str,
+        account_id: str,
+    ) -> object:
+        with self._lock(team_id):
+            installed = {item["assistant"]: item["status"] for item in self.list_assistants(team_id)["assistants"]}
+            spec = self._resolve(assistant_id)
+            declaration = spec.accounts.get(account_id)
+            if installed.get(assistant_id) != "running" or declaration is None:
+                raise oauth_account_service.OAuthAccountDeclarationError("OAuth account declaration is unavailable")
+            return declaration
+
+    def complete_cloudflare_oauth_callback(
+        self,
+        *,
+        state: object,
+        claim: object,
+        session_binding: object,
+    ) -> dict[str, object]:
+        try:
+            completed = self.oauth_service.complete(
+                state,
+                claim,
+                session_binding,
+                self._current_account_declaration,
+            )
+        except oauth_account_service.OAuthAccountServiceError as exc:
+            raise ApiProblem(
+                HTTPStatus.BAD_GATEWAY,
+                "Assistant account authorization could not be completed",
+                code="assistant-account-oauth-unavailable",
+            ) from exc
+        return {
+            "connected": True,
+            "team_id": completed.team_id,
+            "assistant_id": completed.assistant_id,
+            "account_id": completed.account_id,
+        }
+
+    def disconnect_assistant_account(
+        self,
+        team_id: object,
+        assistant_id: object,
+        account_id: object,
+    ) -> dict[str, object]:
+        try:
+            disconnected = self.oauth_service.disconnect(
+                team_id,
+                assistant_id,
+                account_id,
+            )
+        except oauth_account_service.OAuthAccountServiceError as exc:
+            raise ApiProblem(
+                HTTPStatus.BAD_GATEWAY,
+                "Assistant account could not be disconnected",
+                code="assistant-account-oauth-unavailable",
+            ) from exc
+        return {"disconnected": disconnected}
 
     def replace_assistant_secrets(self, team_id: str, body: object) -> dict[str, object]:
         team_id = validate_team_id(team_id)
@@ -3984,6 +4055,20 @@ class Handler(BaseHTTPRequestHandler):
             return HTTPStatus.OK, controller.list_teams(), "team-list", None, None
         if self.command == "DELETE" and parts == ["v1", "space"]:
             return HTTPStatus.OK, controller.reset_space(), "space-reset", None, None
+        if self.command == "POST" and parts == ["v1", "oauth", "cloudflare", "callback"]:
+            body = self._body()
+            if set(body) != {"state", "claim", "session_binding"}:
+                raise ApiProblem(
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    "OAuth callback is invalid",
+                    code="invalid-body",
+                )
+            result = controller.complete_cloudflare_oauth_callback(
+                state=body["state"],
+                claim=body["claim"],
+                session_binding=body["session_binding"],
+            )
+            return HTTPStatus.OK, result, "assistant-account-complete", None, None
         return None
 
     def _file_route(self, parts: list[str]) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
@@ -4202,16 +4287,47 @@ class Handler(BaseHTTPRequestHandler):
         self,
         parts: list[str],
     ) -> tuple[HTTPStatus, dict[str, object], str, str | None, str | None] | None:
-        if len(parts) != 4 or parts[:2] != ["v1", "teams"] or parts[3] != "assistant-accounts":
+        if len(parts) < 4 or parts[:2] != ["v1", "teams"] or parts[3] != "assistant-accounts":
             return None
         team_id = validate_team_id(parts[2])
-        if self.command == "GET":
+        if len(parts) == 4 and self.command == "GET":
             return (
                 HTTPStatus.OK,
                 self.server.controller.list_assistant_accounts(team_id),
                 "assistant-account-list",
                 team_id,
                 None,
+            )
+        if len(parts) == 7 and parts[4] == "challenges" and parts[6] == "authorize" and self.command == "POST":
+            body = self._body()
+            if set(body) != {"session_binding"}:
+                raise ApiProblem(
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    "OAuth authorization is invalid",
+                    code="invalid-body",
+                )
+            return (
+                HTTPStatus.OK,
+                self.server.controller.start_assistant_account_authorization(
+                    team_id,
+                    parts[5],
+                    body["session_binding"],
+                ),
+                "assistant-account-authorize",
+                team_id,
+                None,
+            )
+        if len(parts) == 6 and self.command == "DELETE":
+            return (
+                HTTPStatus.OK,
+                self.server.controller.disconnect_assistant_account(
+                    team_id,
+                    parts[4],
+                    parts[5],
+                ),
+                "assistant-account-disconnect",
+                team_id,
+                parts[4],
             )
         return None
 

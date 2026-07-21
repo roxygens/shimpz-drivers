@@ -18,6 +18,7 @@ import chat_orchestrator
 import inference_config
 import local_app
 import local_registry
+import oauth_account_service
 import oauth_account_store
 
 
@@ -114,6 +115,129 @@ class LocalOAuthAccountTests(unittest.TestCase):
             route,
             (HTTPStatus.OK, expected, "assistant-account-list", "team_1", None),
         )
+
+    def test_local_controller_uses_hosted_broker_without_oauth_client_credentials(self) -> None:
+        source = (TEAM / "local_app.py").read_text(encoding="utf-8")
+        self.assertIn("BrokeredOAuthAccountService", source)
+        self.assertIn("OAuthBrokerClient", source)
+        self.assertNotIn("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_ID", source)
+        self.assertNotIn("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_SECRET", source)
+
+    def test_authorization_and_callback_delegate_to_one_brokered_service(self) -> None:
+        requirement = assistant_account_challenges.AccountRequirement(
+            assistant_id="shimpz-cloudflare",
+            assistant_name="Shimpz Cloudflare",
+            power_ids=("list-zones",),
+            accounts=(("cloudflare", "cloudflare", ("dns.read", "offline_access", "zone.read")),),
+        )
+        challenges = assistant_account_challenges.AccountChallengeStore()
+        pending = challenges.create("team_1", (requirement,), {"private": "continuation"})
+        calls: list[tuple[str, object]] = []
+
+        class Service:
+            def authorization_url(self, challenge, session_binding):
+                calls.append(("start", (challenge, session_binding)))
+                return (
+                    "https://shimpz.com/api/oauth/cloudflare/start?state="
+                    + "s" * 43
+                    + "&code_challenge="
+                    + "c" * 43
+                    + "&scope=dns.read+offline_access+zone.read"
+                )
+
+            def complete(self, state, claim, session_binding, resolver):
+                calls.append(("complete", (state, claim, session_binding, resolver)))
+                return oauth_account_service.OAuthAccountCompletion(
+                    "team_1",
+                    "shimpz-cloudflare",
+                    "cloudflare",
+                    "cloudflare",
+                    ("dns.read", "offline_access", "zone.read"),
+                    1,
+                )
+
+        controller = object.__new__(local_app.LocalController)
+        controller.account_challenges = challenges
+        controller.oauth_service = Service()
+        controller._current_account_declaration = lambda *_args: None
+
+        started = controller.start_assistant_account_authorization(
+            "team_1",
+            pending.id,
+            "browser-session-private-123456789",
+        )
+        completed = controller.complete_cloudflare_oauth_callback(
+            state="s" * 43,
+            claim="a" * 64,
+            session_binding="browser-session-private-123456789",
+        )
+
+        self.assertEqual(set(started), {"authorization_url"})
+        self.assertEqual(
+            completed,
+            {
+                "connected": True,
+                "team_id": "team_1",
+                "assistant_id": "shimpz-cloudflare",
+                "account_id": "cloudflare",
+            },
+        )
+        self.assertEqual([call[0] for call in calls], ["start", "complete"])
+
+    def test_internal_oauth_routes_are_closed_and_exact(self) -> None:
+        controller = SimpleNamespace(
+            start_assistant_account_authorization=lambda team, challenge, binding: {
+                "authorization_url": f"https://shimpz.com/{team}/{challenge}/{binding}"
+            },
+            complete_cloudflare_oauth_callback=lambda **_values: {
+                "connected": True,
+                "team_id": "team_1",
+                "assistant_id": "shimpz-cloudflare",
+                "account_id": "cloudflare",
+            },
+            disconnect_assistant_account=lambda *_values: {"disconnected": True},
+        )
+        handler = object.__new__(local_app.Handler)
+        handler.server = SimpleNamespace(controller=controller)
+        handler._body = lambda **_kwargs: {"session_binding": "browser-session-private-123456789"}
+        handler.command = "POST"
+
+        authorize = handler._assistant_account_route(
+            [
+                "v1",
+                "teams",
+                "team_1",
+                "assistant-accounts",
+                "challenges",
+                "a" * 32,
+                "authorize",
+            ]
+        )
+        self.assertEqual(authorize[0], HTTPStatus.OK)
+        self.assertEqual(authorize[2], "assistant-account-authorize")
+
+        handler._body = lambda **_kwargs: {
+            "state": "s" * 43,
+            "claim": "a" * 64,
+            "session_binding": "browser-session-private-123456789",
+        }
+        callback = handler._fixed_route(["v1", "oauth", "cloudflare", "callback"])
+        self.assertEqual(callback[0], HTTPStatus.OK)
+        self.assertEqual(callback[2], "assistant-account-complete")
+
+        handler.command = "DELETE"
+        disconnected = handler._assistant_account_route(
+            [
+                "v1",
+                "teams",
+                "team_1",
+                "assistant-accounts",
+                "shimpz-cloudflare",
+                "cloudflare",
+            ]
+        )
+        self.assertEqual(disconnected[1], {"disconnected": True})
+        self.assertEqual(disconnected[2], "assistant-account-disconnect")
 
     def test_chat_pauses_before_any_power_when_account_is_missing(self) -> None:
         spec = self._registry()["shimpz-assistant"]
