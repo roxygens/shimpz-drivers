@@ -23,15 +23,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-import oauth_providers
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+import oauth_providers
 
 STATE_PATH = Path("/var/lib/shimpz-local/assistant-accounts/state/accounts.json")
 KEY_PATH = Path("/var/lib/shimpz-local/assistant-accounts/key/aes256.key")
 MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_TOKEN_BYTES = 16 * 1024
-MAX_PLAINTEXT_BYTES = (MAX_TOKEN_BYTES * 2) + 2048
+MAX_PLAINTEXT_BYTES = (MAX_TOKEN_BYTES * 3) + 2048
 MAX_ACCOUNTS_PER_ASSISTANT = 16
 MAX_TOTAL_RECORDS = 4096
 MAX_ACCOUNT_ID_BYTES = 256
@@ -90,6 +91,7 @@ class OAuthAccountMetadata:
 class _TokenGrant:
     access_token: str
     refresh_token: str | None
+    broker_lease: str | None
     scopes: tuple[str, ...]
     expires_at: int
     account: OAuthAccountIdentity | None
@@ -179,6 +181,7 @@ def _token_set(
     try:
         access_token = value.access_token  # type: ignore[attr-defined]
         refresh_token = value.refresh_token  # type: ignore[attr-defined]
+        broker_lease = getattr(value, "broker_lease", None)
         raw_scopes = value.scopes  # type: ignore[attr-defined]
         expires_in = value.expires_in  # type: ignore[attr-defined]
     except (AttributeError, TypeError) as exc:
@@ -196,6 +199,7 @@ def _token_set(
     return _TokenGrant(
         access_token=str(_token(access_token, "OAuth access token")),
         refresh_token=_token(refresh_token, "OAuth refresh token", optional=True),
+        broker_lease=_token(broker_lease, "OAuth broker lease", optional=True),
         scopes=expected_scopes,
         expires_at=expiry,
         account=_account(account),
@@ -571,6 +575,7 @@ class OAuthAccountStore:
             {
                 "access_token": grant.access_token,
                 "refresh_token": grant.refresh_token,
+                "broker_lease": grant.broker_lease,
                 "account": (
                     None
                     if grant.account is None
@@ -601,13 +606,19 @@ class OAuthAccountStore:
         if len(plaintext) > MAX_PLAINTEXT_BYTES:
             raise OAuthAccountStoreError("decrypted OAuth account is malformed")
         value = _strict_json(plaintext)
-        if not isinstance(value, dict) or set(value) != {"access_token", "refresh_token", "account"}:
+        if not isinstance(value, dict) or set(value) != {
+            "access_token",
+            "refresh_token",
+            "broker_lease",
+            "account",
+        }:
             raise OAuthAccountStoreError("decrypted OAuth account is malformed")
         try:
             account = _account(value.get("account"))
             return _TokenGrant(
                 access_token=str(_token(value.get("access_token"), "OAuth access token")),
                 refresh_token=_token(value.get("refresh_token"), "OAuth refresh token", optional=True),
+                broker_lease=_token(value.get("broker_lease"), "OAuth broker lease", optional=True),
                 scopes=scopes,
                 expires_at=expires_at,
                 account=account,
@@ -703,7 +714,7 @@ class OAuthAccountStore:
         account_id: object,
         provider: object,
         scopes: object,
-        refresh_callback: Callable[[str], object],
+        refresh_callback: Callable[[str, str | None], object],
     ) -> str:
         """Return one bounded access token, refreshing once under a single-flight lock."""
         team = _team_id(team_id)
@@ -727,7 +738,7 @@ class OAuthAccountStore:
                 return grant.access_token
             if grant.refresh_token is None:
                 raise OAuthAccountReauthorizationError("OAuth account requires reauthorization")
-            refreshed = refresh_callback(grant.refresh_token)
+            refreshed = refresh_callback(grant.refresh_token, grant.broker_lease)
             canonical = _token_set(refreshed, expected_scopes, self._now(), grant.account)
             self.put(
                 team,
@@ -860,7 +871,7 @@ class OAuthAccountStore:
         team_id: object,
         assistant_id: object,
         account_id: object,
-        revoke_callback: Callable[[str, str, str | None], None],
+        revoke_callback: Callable[[str, str, str | None, str | None], None],
     ) -> bool:
         """Delete one grant only after its authenticated tokens are revoked upstream."""
         team = _team_id(team_id)
@@ -881,7 +892,7 @@ class OAuthAccountStore:
             record = _validate_record(raw_record)
             provider, _, _, _, _ = _record_metadata(record)
             grant = self._resolve_record(team, assistant, account, record)
-            revoke_callback(provider, grant.access_token, grant.refresh_token)
+            revoke_callback(provider, grant.access_token, grant.refresh_token, grant.broker_lease)
             records.pop(account)
             if not records:
                 assistants.pop(assistant, None)

@@ -97,11 +97,11 @@ class _AccountStore(Protocol):
         account_id: object,
         provider: object,
         scopes: object,
-        refresh_callback: Callable[[str], object],
+        refresh_callback: Callable[[str, str | None], object],
     ) -> str: ...
 
 
-RefreshCallback = Callable[[str, tuple[str, ...], str], object]
+RefreshCallback = Callable[[str, tuple[str, ...], str, str | None], object]
 
 
 def _team_id(value: object) -> str:
@@ -463,7 +463,12 @@ def resolve_power_accounts(
                 account_id,
                 provider,
                 scopes,
-                lambda token, p=provider, s=scopes: refresh_callback(p, s, token),
+                lambda token, lease, p=provider, s=scopes: refresh_callback(
+                    p,
+                    s,
+                    token,
+                    lease,
+                ),
             )
         except Exception as exc:
             raise AccountFlowError("Assistant account could not be resolved") from exc

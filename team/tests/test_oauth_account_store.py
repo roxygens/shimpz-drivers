@@ -25,8 +25,9 @@ def tokens(
     refresh: str | None = REFRESH,
     scopes: tuple[str, ...] = SCOPES,
     expires_in: int = 3600,
+    broker_lease: str | None = None,
 ) -> OAuthTokenSet:
-    return OAuthTokenSet(access, refresh, scopes, expires_in)
+    return OAuthTokenSet(access, refresh, scopes, expires_in, broker_lease)
 
 
 class OAuthAccountStoreTests(unittest.TestCase):
@@ -64,7 +65,7 @@ class OAuthAccountStoreTests(unittest.TestCase):
                     "x",
                     "x",
                     SCOPES,
-                    lambda _: self.fail("unexpired token must not refresh"),
+                    lambda _token, _lease: self.fail("unexpired token must not refresh"),
                 ),
                 ACCESS,
             )
@@ -106,7 +107,14 @@ class OAuthAccountStoreTests(unittest.TestCase):
             )
             self.assertEqual((first.generation, second.generation, writes), (1, 2, 2))
             self.assertEqual(
-                store.resolve("team_1", "shimpz-assistant", "x", "x", SCOPES, lambda _: None),
+                store.resolve(
+                    "team_1",
+                    "shimpz-assistant",
+                    "x",
+                    "x",
+                    SCOPES,
+                    lambda _token, _lease: None,
+                ),
                 "new-access-token-123456789",
             )
 
@@ -120,7 +128,7 @@ class OAuthAccountStoreTests(unittest.TestCase):
                 "x",
                 "x",
                 SCOPES,
-                tokens(expires_in=30),
+                tokens(expires_in=30, broker_lease="broker-lease-private-material-123456789"),
                 ACCOUNT,
             )
             self.assertEqual(
@@ -137,8 +145,9 @@ class OAuthAccountStoreTests(unittest.TestCase):
             release = threading.Event()
             calls: list[str] = []
 
-            def refresh(value: str) -> OAuthTokenSet:
+            def refresh(value: str, lease: str | None) -> OAuthTokenSet:
                 calls.append(value)
+                self.assertEqual(lease, "broker-lease-private-material-123456789")
                 entered.set()
                 self.assertTrue(release.wait(2))
                 return tokens(access="refreshed-access-token-123456789", expires_in=3600)
@@ -177,7 +186,14 @@ class OAuthAccountStoreTests(unittest.TestCase):
             self.assertEqual(drifted.scopes, SCOPES)
             self.assertIsNone(drifted.account)
             with self.assertRaises(oauth_account_store.OAuthAccountReauthorizationError):
-                store.resolve("team_1", "shimpz-assistant", "x", "x", SCOPES, lambda _: None)
+                store.resolve(
+                    "team_1",
+                    "shimpz-assistant",
+                    "x",
+                    "x",
+                    SCOPES,
+                    lambda _token, _lease: None,
+                )
 
             reduced = {"x": {"provider": "x", "scopes": reduced_scopes}}
             now[0] = 1_031
@@ -186,7 +202,14 @@ class OAuthAccountStoreTests(unittest.TestCase):
                 "reauthorization-required",
             )
             with self.assertRaises(oauth_account_store.OAuthAccountReauthorizationError):
-                store.resolve("team_1", "shimpz-assistant", "x", "x", reduced_scopes, lambda _: None)
+                store.resolve(
+                    "team_1",
+                    "shimpz-assistant",
+                    "x",
+                    "x",
+                    reduced_scopes,
+                    lambda _token, _lease: None,
+                )
 
     def test_aad_rejects_cross_identity_copy_and_metadata_tampering(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -317,15 +340,15 @@ class OAuthAccountStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = self._store(Path(directory))
             store.put("team_1", "shimpz-assistant", "x", "x", SCOPES, tokens(), ACCOUNT)
-            observed: list[tuple[str, str, str | None]] = []
+            observed: list[tuple[str, str, str | None, str | None]] = []
 
-            def fail(provider: str, access: str, refresh: str | None) -> None:
-                observed.append((provider, access, refresh))
+            def fail(provider: str, access: str, refresh: str | None, lease: str | None) -> None:
+                observed.append((provider, access, refresh, lease))
                 raise RuntimeError("synthetic upstream failure")
 
             with self.assertRaisesRegex(RuntimeError, "upstream failure"):
                 store.revoke_then_delete("team_1", "shimpz-assistant", "x", fail)
-            self.assertEqual(observed, [("x", ACCESS, REFRESH)])
+            self.assertEqual(observed, [("x", ACCESS, REFRESH, None)])
             self.assertEqual(
                 store.metadata("team_1", "shimpz-assistant", DECLARATIONS)[0].status,
                 "connected",
@@ -336,10 +359,13 @@ class OAuthAccountStoreTests(unittest.TestCase):
                     "team_1",
                     "shimpz-assistant",
                     "x",
-                    lambda provider, access, refresh: observed.append((provider, access, refresh)),
+                    lambda provider, access, refresh, lease: observed.append((provider, access, refresh, lease)),
                 )
             )
-            self.assertEqual(observed, [("x", ACCESS, REFRESH), ("x", ACCESS, REFRESH)])
+            self.assertEqual(
+                observed,
+                [("x", ACCESS, REFRESH, None), ("x", ACCESS, REFRESH, None)],
+            )
             self.assertFalse(
                 store.revoke_then_delete(
                     "team_1",

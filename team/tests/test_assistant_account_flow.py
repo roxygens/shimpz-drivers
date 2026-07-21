@@ -256,14 +256,14 @@ class AssistantAccountFlowTests(unittest.TestCase):
         spec = _spec()
         token = "-".join(("private", "access", "token", "123456"))
         store = _Store({}, {("x-assistant", "x-write"): token})
-        refresh_calls: list[tuple[str, tuple[str, ...], str]] = []
+        refresh_calls: list[tuple[str, tuple[str, ...], str, str | None]] = []
 
         accounts = assistant_account_flow.resolve_power_accounts(
             "team_1",
             spec,
             "publish-post",
             store,
-            lambda provider, scopes, refresh: refresh_calls.append((provider, scopes, refresh)),
+            lambda provider, scopes, refresh, lease: refresh_calls.append((provider, scopes, refresh, lease)),
         )
 
         self.assertEqual(
@@ -272,10 +272,17 @@ class AssistantAccountFlowTests(unittest.TestCase):
         )
         self.assertEqual(len(store.resolved), 1)
         callback = store.resolved[0][-1]
-        callback("private-refresh-token-123")
+        callback("private-refresh-token-123", "private-broker-lease-123")
         self.assertEqual(
             refresh_calls,
-            [("x", ("offline.access", "tweet.read", "tweet.write", "users.read"), "private-refresh-token-123")],
+            [
+                (
+                    "x",
+                    ("offline.access", "tweet.read", "tweet.write", "users.read"),
+                    "private-refresh-token-123",
+                    "private-broker-lease-123",
+                )
+            ],
         )
 
     def test_flow_fails_closed_on_drift_sensitive_public_fields_and_invalid_tokens(self) -> None:

@@ -46,6 +46,7 @@ class OAuthTokenSet:
     refresh_token: str | None
     scopes: tuple[str, ...]
     expires_in: int
+    broker_lease: str | None = None
 
 
 class OAuthTransport(Protocol):

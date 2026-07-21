@@ -2199,7 +2199,12 @@ def _power_account_generations(
     return tuple((item.id, item.generation) for item in metadata)
 
 
-def _refresh_oauth_account(provider: str, scopes: tuple[str, ...], refresh_token: str) -> object:
+def _refresh_oauth_account(
+    provider: str,
+    scopes: tuple[str, ...],
+    refresh_token: str,
+    _broker_lease: str | None,
+) -> object:
     try:
         return _oauth_http.refresh(
             provider_id=provider,

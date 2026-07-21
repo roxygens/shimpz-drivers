@@ -308,7 +308,12 @@ class OAuthAccountService:
     def disconnect(self, team_id: object, assistant_id: object, account_id: object) -> bool:
         """Revoke each upstream token before atomically deleting local custody."""
 
-        def revoke(provider: str, access_token: str, refresh_token: str | None) -> None:
+        def revoke(
+            provider: str,
+            access_token: str,
+            refresh_token: str | None,
+            _broker_lease: str | None,
+        ) -> None:
             client_id, client_secret, _ = self._client_configuration()
             tokens = tuple(dict.fromkeys(token for token in (refresh_token, access_token) if token))
             for token in tokens:

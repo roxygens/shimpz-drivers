@@ -1579,6 +1579,7 @@ class LocalController:
         provider: str,
         scopes: tuple[str, ...],
         refresh_token: str,
+        _broker_lease: str | None,
     ) -> object:
         return self.oauth_http.refresh(
             provider_id=provider,
