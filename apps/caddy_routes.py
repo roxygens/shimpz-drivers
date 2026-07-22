@@ -11,7 +11,7 @@ shimpz-caddy is connected to EVERY app's own network (so it can reverse_proxy to
 upstream), which means an app container can ALSO reach shimpz-caddy:8080 directly and send an
 arbitrary Host header — routing purely by Host, Caddy would happily proxy that request to a
 DIFFERENT app's upstream, a lateral-movement path per-app network isolation never closed
-(SECURITY_ENGINEERING_PLAN.md item 1). Every rendered site therefore opens with a `remote_ip`
+by itself. Every rendered site therefore opens with a `remote_ip`
 gate: only requests whose source IP falls inside the `edge` network (where the ONLY legitimate
 caller — cloudflared — lives) are served; anything else gets 403 before any reverse_proxy happens.
 The edge subnet is never hardcoded: `_edge_subnet()` asks the Docker API for the network's CURRENT

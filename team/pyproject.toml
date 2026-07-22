@@ -3,7 +3,7 @@ name = "team-driver"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-    # Pinned EXACT — SECURITY_ENGINEERING_PLAN.md item 6: an open range lets any future release install
+    # Pinned EXACT: an open range lets any future release install
     # silently on the next rebuild. Docker consumes only the committed lock via `uv sync --frozen`.
     "docker==7.1.0",
     # One-use X25519 + AES-GCM delivery means the credential endpoint never returns plaintext.

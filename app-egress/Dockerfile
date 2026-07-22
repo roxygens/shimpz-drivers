@@ -5,7 +5,7 @@
 # reaches ONLY the hosts it declared in [needs].egress (its effective_egress), read per-app from the
 # policy dir the driver writes. Holds NO credential and NO docker.sock; a compromise here can, at
 # worst, reach hosts apps already declared. stdlib-only (socket/select/base64) — zero third-party deps.
-# Pinned by digest (not the movable tag) — SECURITY_ENGINEERING_PLAN.md item 6. Same digest as the other
+# Pinned by digest (not the movable tag). Same digest as the other
 # driver sidecars; bump all together.
 FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
 ARG SOURCE_DATE_EPOCH=0

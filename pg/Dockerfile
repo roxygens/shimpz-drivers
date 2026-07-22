@@ -6,8 +6,8 @@
 # and each Team principal can mutate only its exact registered database set. This sidecar deliberately
 # holds no Cloudflare, Docker, or account credential.
 # The only third-party piece is postgresql-client (psql/createdb/dropdb); no Python DB driver is needed.
-# Pinned by digest (not just the `3.14-slim` tag, which can move) — SECURITY_ENGINEERING_PLAN.md
-# item 6. `docker pull python:3.14-slim` resolved to this exact digest; bump both together.
+# Pinned by digest (not just the `3.14-slim` tag, which can move). `docker pull
+# python:3.14-slim` resolved to this exact digest; bump both together.
 FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
 ARG SOURCE_DATE_EPOCH=0
 

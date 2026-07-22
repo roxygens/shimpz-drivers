@@ -2,7 +2,7 @@
 # check=skip=SecretsUsedInArgOrEnv ; false positive: the *_TOKEN_GID/DOCKER_GID ARGs are numeric group IDs, never secrets
 #
 # team-driver — the SECOND container (besides shimpz-driver) holding /var/run/docker.sock, dedicated
-# to Team lifecycle. `shimpz-brain` never mounts the socket (SECURITY_ENGINEERING_PLAN.md 1.1); the
+# to Team lifecycle. `shimpz-brain` never mounts the socket; the
 # authenticated admin panel calls this driver's restricted, allowlisted, audited API instead. This
 # process's own UID is unprivileged (10001) — defense-in-depth against trivial filesystem tampering,
 # not a claim that socket access itself is contained (holding the socket is host-root-equivalent).
@@ -42,7 +42,7 @@ ARG SHIMPZ_ACCOUNTS_BRAIN_RESOLVE_TOKEN_GID=10013
 # Controller-owned token shared read-only with the isolated Brain runtime.
 ARG SHIMPZ_BRAIN_RUNTIME_TOKEN_GID=10016
 
-# Downloaded + hash-checked BEFORE execution — never `curl | sh` (SECURITY_ENGINEERING_PLAN.md item 6).
+# Downloaded + hash-checked BEFORE execution — never `curl | sh`.
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" -o /tmp/uv-install.sh && \
     echo "${UV_INSTALL_SHA256}  /tmp/uv-install.sh" | sha256sum -c - && \

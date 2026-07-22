@@ -4,7 +4,7 @@
 # A CONNECT-only, broad+audited-by-default proxy, optionally narrowed by SHIMPZ_EGRESS_ALLOW. It joins
 # only Brain-egress networks, never a Team core/App/data plane; Apps use the separate token-gated
 # app-egress-proxy. Holds no credential or docker.sock. stdlib-only — zero third-party dependencies.
-# Pinned by digest (not the movable `3.14-slim` tag) — SECURITY_ENGINEERING_PLAN.md item 6. Same digest
+# Pinned by digest (not the movable `3.14-slim` tag). Same digest
 # as the other driver sidecars; bump all together.
 FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
 ARG SOURCE_DATE_EPOCH=0

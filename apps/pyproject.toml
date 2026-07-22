@@ -3,7 +3,7 @@ name = "shimpz-driver"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-    # Pinned EXACT — SECURITY_ENGINEERING_PLAN.md item 6: an open range (`>=7.1.0`) lets any future
+    # Pinned EXACT: an open range (`>=7.1.0`) lets any future
     # release install silently on the next rebuild. Docker consumes this declaration only through
     # the committed, hash-bound uv.lock with `uv sync --frozen`.
     "docker==7.1.0",

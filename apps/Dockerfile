@@ -2,12 +2,12 @@
 # check=skip=SecretsUsedInArgOrEnv ; false positive: the *_TOKEN_GID/*_TOKEN_* ARGs here hold numeric group IDs and file paths, never secret values
 #
 # shimpz-driver — the ONLY container in this stack that holds /var/run/docker.sock.
-# `shimpz-brain` never mounts it (SECURITY_ENGINEERING_PLAN.md 1.1). This process's own UID is
+# `shimpz-brain` never mounts it. This process's own UID is
 # unprivileged (10001), but note holding the socket is host-root-equivalent regardless of
 # UID — the non-root user is defense-in-depth against trivial container-filesystem tampering,
 # not a claim that socket access itself is contained.
-# Pinned by digest (not just the `3.14-slim` tag, which can move) — SECURITY_ENGINEERING_PLAN.md
-# item 6, extra weight given this is the ONE container holding docker.sock. `docker pull
+# Pinned by digest (not just the `3.14-slim` tag, which can move), with extra weight because this
+# is the ONE container holding docker.sock. `docker pull
 # python:3.14-slim` resolved to this exact digest; bump both together.
 FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
 ARG SOURCE_DATE_EPOCH=0
@@ -41,8 +41,8 @@ ARG DOCKER_GID=989
 # lookup. Picked well outside the base image's/DOCKER_GID's normal range to avoid collision.
 ARG SHIMPZ_DRIVER_TOKEN_GID=10002
 
-# Downloaded to a file and hash-checked BEFORE execution — never `curl | sh` (SECURITY_ENGINEERING_PLAN.md
-# item 6: an unverified pipe-to-shell is a full supply-chain compromise if astral.sh (or anything on
+# Downloaded to a file and hash-checked BEFORE execution — never `curl | sh` (an unverified
+# pipe-to-shell is a full supply-chain compromise if astral.sh, or anything on
 # the path to it) is ever compromised or MITM'd, pinned version or not).
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" -o /tmp/uv-install.sh && \
@@ -56,8 +56,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
 
 # `driver` needs TWO supplementary groups: `dockersock` (to read/write the Docker socket) and
 # `shimpzdriver-token` (so the token file it writes can be group-readable by `shimpz-brain`'s `abc` user,
-# which is NOT UID 10001 and was previously locked out entirely — SECURITY_ENGINEERING_PLAN.md
-# item 1). Neither is driver's PRIMARY group so a plain `chown driver:X` still says what X means.
+# which is NOT UID 10001 and was previously locked out entirely). Neither is driver's PRIMARY
+# group so a plain `chown driver:X` still says what X means.
 RUN groupadd -g "${DOCKER_GID}" dockersock \
     && groupadd -g "${SHIMPZ_DRIVER_TOKEN_GID}" shimpzdriver-token \
     && useradd -u 10001 -g dockersock -G shimpzdriver-token -M -s /usr/sbin/nologin driver

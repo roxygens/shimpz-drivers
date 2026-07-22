@@ -18,7 +18,7 @@ from validate import DeployRequest
 RUNTIME_UID = 10001
 WORKSPACE_VOLUME = os.environ.get("SHIMPZ_WORKSPACE_VOLUME", "shimpz_shimpz-workspace")
 # Each app's network exists ONLY for that app — no shared bridge, so an app can never resolve or
-# reach another app's container (SECURITY_ENGINEERING_PLAN.md item 3). app.py connects shimpz-caddy
+# reach another app's container. app.py connects shimpz-caddy
 # (always) and PostgreSQL (only when the app's own env declares a database) to it.
 APP_NETWORK_PREFIX = os.environ.get("SHIMPZ_APP_NETWORK_PREFIX", "net_app_")
 # Multi-instance (R137): SHIMPZ_SUFFIX names this instance's resources; empty (the default) keeps
@@ -34,7 +34,7 @@ MEM_LIMIT = "1g"
 NANO_CPUS = 500_000_000  # 0.5 vCPU
 PIDS_LIMIT = 256
 
-# Log shipping (SECURITY_ENGINEERING_PLAN.md item 5): Vector reads Docker's on-disk json-file logs
+# Log shipping: Vector reads Docker's on-disk json-file logs
 # (a read-only host-path mount, never docker.sock), but those files are named by CONTAINER ID, not
 # app name. The `labels` log-opt embeds the container's labels into every line's `attrs` field
 # ({"attrs":{"shimpz.app":"myapp"}}), so Vector derives the app name from the log line itself, with
