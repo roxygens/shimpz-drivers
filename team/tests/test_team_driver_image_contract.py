@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 
 
-class TeamDriverImageContractTests(unittest.TestCase):
-    def test_image_packages_brain_runtime_client_with_a_narrow_token_group(self) -> None:
+class StaticTeamDriverImageContractTests(unittest.TestCase):
+    def test_static_image_packages_brain_runtime_client_with_a_narrow_token_group(self) -> None:
         dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
 
         for module in (
