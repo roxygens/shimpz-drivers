@@ -2,8 +2,8 @@
 """bus-driver — the ONLY container that holds SHIMPZ_BUS_ADMIN_* (the Redpanda cluster superuser).
 
 SECURITY_ENGINEERING_PLAN.md item 2: `shimpz-brain` never sees the cluster superuser credential; it calls
-this restricted, allowlisted, audited HTTP API instead — the same pattern cf-driver/
-pg-driver already proved. Every endpoint is one SPECIFIC operation with a fixed request shape
+this restricted, allowlisted, audited HTTP API instead — the same pattern pg-driver already
+proved. Every endpoint is one SPECIFIC operation with a fixed request shape
 (validate.py), mirroring shimpz-bus's own existing admin-authenticated subcommands exactly
 (health/topics/create/produce/tail/provision) — this is a credential relocation, not a new
 capability. shimpz-bus's OTHER subcommands (new-worker/services/discover) never touched this

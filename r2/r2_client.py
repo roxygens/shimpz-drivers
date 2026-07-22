@@ -4,8 +4,7 @@ A thin wrapper over the `rclone` binary, called ONLY by app.py's already-allowli
 endpoint handlers. Never exposes a generic "run any rclone command" call — every function here is
 one SPECIFIC operation (copy up, presigned link, list, copy down, immutable backup upload, or bounded
 backup range read) with a FIXED argv list (never a shell string, so a bucket key can't inject a
-command). Same shape as cf-driver's cf_client.py:
-the credential lives here, the brain only ever asks for one of these named operations.
+command). The credential lives here; the brain only ever asks for one of these named operations.
 
 Managed credentials keep the existing RCLONE_CONFIG_R2_* fallback. BYOK calls instead build a fresh,
 explicit environment from a validated request-scoped bundle. Neither path mutates os.environ and no

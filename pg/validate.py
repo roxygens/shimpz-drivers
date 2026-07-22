@@ -1,8 +1,8 @@
 """Allowlist validation for pg-driver — runs BEFORE any psql/createdb/dropdb call.
 
 Nothing here touches Postgres; it only decides yes/no and returns a validated project name the
-caller (app.py) turns into pg_client.py calls. Same shape as cf-driver/driver's own
-validate.py modules — the actual security boundary, not the client that acts on its output.
+caller (app.py) turns into pg_client.py calls. This validator is the actual security boundary,
+not the client that acts on its output.
 """
 
 from __future__ import annotations

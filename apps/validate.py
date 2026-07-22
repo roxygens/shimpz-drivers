@@ -363,7 +363,7 @@ def _validate_target(target: object, field: str) -> str:
 # ── stack recreate (Phase C2): the marketplace's live-apply of a saved secret ────────────────────
 # The admin panel (which holds the .env secrets, never the socket) passes the new env for ONE
 # stateless capability sidecar; the driver (which holds the socket, never the .env) recreates
-# it. This positive allowlist is the security boundary: ONLY these three services, and for each ONLY
+# it. This positive allowlist is the security boundary: ONLY these two services, and for each ONLY
 # its own env keys — `shimpz-brain`, `postgres`, `redpanda`, `cloudflared`, and every stray key are refused BY
 # CONSTRUCTION (a bad request can never recreate the brain or a stateful datastore, nor inject PATH).
 RECREATABLE: dict[str, frozenset[str]] = {
@@ -376,7 +376,6 @@ RECREATABLE: dict[str, frozenset[str]] = {
         }
     ),
     "openai-driver": frozenset({"OPENAI_API_KEY", "VOICE_TOOLS_OPENAI_KEY"}),
-    "cf-driver": frozenset({"SHIMPZ_CF_TOKEN", "SHIMPZ_CF_ACCOUNT"}),
 }
 
 
