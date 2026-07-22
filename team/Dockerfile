@@ -107,8 +107,8 @@ RUN mkdir -p /run/shimpz-teamdriver /var/log/team-driver /var/lib/team-driver/pg
         /var/lib/team-driver/assistant-secrets/key \
         /var/lib/team-driver/assistant-accounts/state \
         /var/lib/team-driver/assistant-accounts/key \
-    # egress-policy mountpoint owned by the driver uid, so a FRESH policy volume copies up writable
-    # (an existing root-owned volume needs the one-time `chown 10001` — see docs/TESTS.md)
+    # egress-policy mountpoint owned by the driver uid, so a fresh policy volume copies up writable.
+    # A legacy root-owned volume must be chowned to uid 10001 once before upgrading.
     && chown teamdriver:dockersock /app-egress-policy
 
 USER teamdriver
