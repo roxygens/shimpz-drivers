@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-import assistant_contract
 import cloudflare_assistant_contract
 
 REGISTRY_PATH = Path("/etc/shimpz/local-assistants.json")
@@ -91,7 +90,7 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RegistryError("the baked Assistant registry is unreadable") from exc
-    contracts = (assistant_contract, cloudflare_assistant_contract)
+    contracts = (cloudflare_assistant_contract,)
     expected_ids = {contract.ASSISTANT_ID for contract in contracts}
     if (
         not isinstance(raw, dict)
@@ -122,12 +121,8 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
 
 
 def validate_power_input(assistant_id: str, power: str, payload: object) -> dict[str, object]:
-    if assistant_id == cloudflare_assistant_contract.ASSISTANT_ID:
-        return cloudflare_assistant_contract.validate_power_input(assistant_id, power, payload)
-    return assistant_contract.validate_power_input(assistant_id, power, payload)
+    return cloudflare_assistant_contract.validate_power_input(assistant_id, power, payload)
 
 
 def validate_power_output(assistant_id: str, power: str, payload: object) -> dict[str, object]:
-    if assistant_id == cloudflare_assistant_contract.ASSISTANT_ID:
-        return cloudflare_assistant_contract.validate_power_output(assistant_id, power, payload)
-    return assistant_contract.validate_power_output(assistant_id, power, payload)
+    return cloudflare_assistant_contract.validate_power_output(assistant_id, power, payload)

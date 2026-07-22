@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 TEAM = Path(__file__).resolve().parents[1]
-FIXTURE = TEAM / "tests" / "fixtures" / "shimpz-assistant"
+FIXTURE = TEAM / "tests" / "fixtures" / "reference-assistant"
 REGISTRY_IMAGE = "registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
 BUILDKIT_IMAGE = "moby/buildkit:v0.31.1@sha256:6b59b7df63a8cb9902736f9ddf7fcff8261613d3e7449b8ea8b7537fc399c03a"
 APP_EGRESS_IMAGE = (
@@ -201,7 +201,7 @@ class DockerFlowTests(unittest.TestCase):
         registry = f"shimpz-registry-{unique}"
         controller = f"shimpz-controller-{unique}"
         egress_proxy = f"shimpz-egress-proxy-{unique}"
-        fixture_tag = f"shimpz-assistant-test:{unique}"
+        fixture_tag = f"shimpz-cloudflare-test:{unique}"
         controller_tag = f"shimpz-team-driver-local-test:{unique}"
         token_volume = f"shimpz-local-token-{unique}"
         runtime_token_volume = f"shimpz-local-runtime-token-{unique}"
@@ -288,7 +288,7 @@ class DockerFlowTests(unittest.TestCase):
             )
             registry_port = int(self._run("port", registry, "5000/tcp").stdout.strip().rsplit(":", 1)[1])
             self._wait_registry(registry_port)
-            repository_tag = f"127.0.0.1:{registry_port}/shimpz/shimpz-assistant:test"
+            repository_tag = f"127.0.0.1:{registry_port}/shimpz/shimpz-cloudflare:test"
             self._run("tag", fixture_tag, repository_tag)
             self._run("push", repository_tag)
             repo_digests = json.loads(
@@ -453,19 +453,10 @@ class DockerFlowTests(unittest.TestCase):
             self.assertEqual(unauthenticated, 401)
             status, catalog = self._api(port, token, "GET", "/v1/assistants")
             self.assertEqual(status, 200)
-            self.assertEqual(catalog["assistants"][0]["id"], "shimpz-assistant")
+            self.assertEqual(catalog["assistants"][0]["id"], "shimpz-cloudflare")
             self.assertEqual(
                 catalog["assistants"][0]["powers"],
-                [
-                    "cancel-direct-upload",
-                    "create-post",
-                    "create-test-direct-upload",
-                    "delete-post",
-                    "identity-me",
-                    "list-direct-uploads",
-                    "public-user-lookup",
-                    "verify-mux-webhook",
-                ],
+                ["list-dns-records", "list-zones"],
             )
 
             status, created = self._api(
@@ -574,7 +565,7 @@ class DockerFlowTests(unittest.TestCase):
                 token,
                 "POST",
                 "/v1/teams/demo_team/assistants",
-                {"assistant": "shimpz-assistant"},
+                {"assistant": "shimpz-cloudflare"},
             )
             self.assertEqual(installed_status, 200, installed)
             self.assertTrue(installed["installed"], installed)
@@ -586,7 +577,7 @@ class DockerFlowTests(unittest.TestCase):
                 "--filter",
                 f"label=com.shimpz.local.space-id={space_id}",
                 "--filter",
-                "label=com.shimpz.local.assistant-id=shimpz-assistant",
+                "label=com.shimpz.local.assistant-id=shimpz-cloudflare",
                 "--format",
                 "{{.Names}}",
             ).stdout.strip()
@@ -625,7 +616,7 @@ class DockerFlowTests(unittest.TestCase):
                 token,
                 "POST",
                 "/v1/teams/demo_team/assistants",
-                {"assistant": "shimpz-assistant"},
+                {"assistant": "shimpz-cloudflare"},
             )
             self.assertEqual((recovered_status, recovered["installed"]), (200, False))
             replacement_assistant_id = self._run("inspect", "--format", "{{.Id}}", assistant_name).stdout.strip()
@@ -637,7 +628,7 @@ class DockerFlowTests(unittest.TestCase):
                 token,
                 "POST",
                 "/v1/teams/demo_team/assistants",
-                {"assistant": "shimpz-assistant"},
+                {"assistant": "shimpz-cloudflare"},
             )
             self.assertFalse(installed_again["installed"])
             self.assertEqual(
@@ -646,16 +637,16 @@ class DockerFlowTests(unittest.TestCase):
             )
 
             _, listed = self._api(port, token, "GET", "/v1/teams/demo_team/assistants")
-            self.assertEqual(listed["assistants"], [{"assistant": "shimpz-assistant", "status": "running"}])
+            self.assertEqual(listed["assistants"], [{"assistant": "shimpz-cloudflare", "status": "running"}])
             help_status, assistant_help = self._api(
                 port,
                 token,
                 "GET",
-                "/v1/teams/demo_team/assistants/shimpz-assistant/help/pt",
+                "/v1/teams/demo_team/assistants/shimpz-cloudflare/help/pt",
             )
             self.assertEqual(help_status, 200)
-            self.assertEqual(assistant_help["assistant"], "shimpz-assistant")
-            self.assertIn("# Shimpz Assistant", assistant_help["markdown"])
+            self.assertEqual(assistant_help["assistant"], "shimpz-cloudflare")
+            self.assertIn("# Shimpz Cloudflare", assistant_help["markdown"])
             self.assertRegex(assistant_help["trace_id"], r"^[0-9a-f]{32}$")
             secret_status, secret_inventory = self._api(
                 port,
@@ -665,14 +656,7 @@ class DockerFlowTests(unittest.TestCase):
             )
             self.assertEqual(secret_status, 200)
             secret_items = secret_inventory["assistants"][0]["secrets"]
-            self.assertEqual(
-                [(item["id"], item["configured"], item["mask"]) for item in secret_items],
-                [
-                    ("mux-token-id", False, None),
-                    ("mux-token-secret", False, None),
-                    ("mux-webhook-signing-secret", False, None),
-                ],
-            )
+            self.assertEqual(secret_items, [])
             account_status, account_inventory = self._api(
                 port,
                 token,
@@ -693,10 +677,10 @@ class DockerFlowTests(unittest.TestCase):
                     "expires_at": account["expires_at"],
                 },
                 {
-                    "assistant_id": "shimpz-assistant",
-                    "id": "x",
-                    "provider": "x",
-                    "scopes": ["offline.access", "tweet.read", "tweet.write", "users.read"],
+                    "assistant_id": "shimpz-cloudflare",
+                    "id": "cloudflare",
+                    "provider": "cloudflare",
+                    "scopes": ["dns.read", "offline_access", "zone.read"],
                     "status": "missing",
                     "account": None,
                     "expires_at": None,
@@ -706,8 +690,8 @@ class DockerFlowTests(unittest.TestCase):
                 port,
                 token,
                 "POST",
-                "/v1/teams/demo_team/assistants/shimpz-assistant/powers/public-user-lookup",
-                {"username": "OpenAI"},
+                "/v1/teams/demo_team/assistants/shimpz-cloudflare/powers/list-zones",
+                {"page": 1, "per_page": 25},
             )
             self.assertEqual(account_required, 409)
             self.assertEqual(missing_account["code"], "assistant-account-unavailable")
@@ -715,7 +699,7 @@ class DockerFlowTests(unittest.TestCase):
                 port,
                 token,
                 "POST",
-                "/v1/teams/demo_team/assistants/shimpz-assistant/powers/shell",
+                "/v1/teams/demo_team/assistants/shimpz-cloudflare/powers/shell",
                 {},
             )
             self.assertEqual(unknown_power, 404)
@@ -735,21 +719,21 @@ class DockerFlowTests(unittest.TestCase):
             ).stdout.strip()
             self.assertEqual(
                 policy_contract,
-                '["api.mux.com", "api.x.com"] 0o640 10001 10017',
+                '["api.cloudflare.com"] 0o640 10001 10017',
             )
 
             _, removed = self._api(
                 port,
                 token,
                 "DELETE",
-                "/v1/teams/demo_team/assistants/shimpz-assistant",
+                "/v1/teams/demo_team/assistants/shimpz-cloudflare",
             )
             self.assertTrue(removed["uninstalled"])
             _, removed_again = self._api(
                 port,
                 token,
                 "DELETE",
-                "/v1/teams/demo_team/assistants/shimpz-assistant",
+                "/v1/teams/demo_team/assistants/shimpz-cloudflare",
             )
             self.assertFalse(removed_again["uninstalled"])
             proxy_networks_after_uninstall = json.loads(self._run("inspect", egress_proxy).stdout)[0][
@@ -814,7 +798,7 @@ class DockerFlowTests(unittest.TestCase):
                 token,
                 "POST",
                 "/v1/teams/reset_team/assistants",
-                {"assistant": "shimpz-assistant"},
+                {"assistant": "shimpz-cloudflare"},
             )
             self._api(
                 port,
@@ -889,7 +873,7 @@ class DockerFlowTests(unittest.TestCase):
                 token,
                 "POST",
                 "/v1/teams/cleanup_team/assistants",
-                {"assistant": "shimpz-assistant"},
+                {"assistant": "shimpz-cloudflare"},
             )
             self.assertEqual(len(self._owned_ids("container", space_id, "assistant")), 1)
             self.assertEqual(len(self._owned_ids("network", space_id, "team")), 1)

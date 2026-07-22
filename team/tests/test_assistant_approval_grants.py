@@ -9,24 +9,24 @@ from pathlib import Path
 
 import assistant_approval_grants
 
-IMAGE_V1 = "ghcr.io/theshimpz/shimpz-assistant@sha256:" + "a" * 64
-IMAGE_V2 = "ghcr.io/theshimpz/shimpz-assistant@sha256:" + "b" * 64
+IMAGE_V1 = "ghcr.io/theshimpz/shimpz-cloudflare@sha256:" + "a" * 64
+IMAGE_V2 = "ghcr.io/theshimpz/shimpz-cloudflare@sha256:" + "b" * 64
 
 
 class ApprovalGrantStoreTests(unittest.TestCase):
     def test_once_grant_survives_restart_but_is_bound_to_the_exact_release(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state" / "grants.sqlite3"
-            grant = assistant_approval_grants.Grant("team_1", "shimpz-assistant", "create-post", IMAGE_V1)
+            grant = assistant_approval_grants.Grant("team_1", "shimpz-cloudflare", "protected-action", IMAGE_V1)
             store = assistant_approval_grants.ApprovalGrantStore(path)
             store.grant_many((grant,))
             store.close()
 
             reopened = assistant_approval_grants.ApprovalGrantStore(path)
             self.addCleanup(reopened.close)
-            self.assertTrue(reopened.is_granted("team_1", "shimpz-assistant", "create-post", IMAGE_V1))
-            self.assertFalse(reopened.is_granted("team_1", "shimpz-assistant", "create-post", IMAGE_V2))
-            self.assertFalse(reopened.is_granted("team_2", "shimpz-assistant", "create-post", IMAGE_V1))
+            self.assertTrue(reopened.is_granted("team_1", "shimpz-cloudflare", "protected-action", IMAGE_V1))
+            self.assertFalse(reopened.is_granted("team_1", "shimpz-cloudflare", "protected-action", IMAGE_V2))
+            self.assertFalse(reopened.is_granted("team_2", "shimpz-cloudflare", "protected-action", IMAGE_V1))
             self.assertEqual(reopened.list_team("team_1"), (grant,))
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertFalse(path.with_name(path.name + "-wal").exists())
@@ -36,9 +36,9 @@ class ApprovalGrantStoreTests(unittest.TestCase):
             store = assistant_approval_grants.ApprovalGrantStore(Path(directory) / "grants.sqlite3")
             self.addCleanup(store.close)
             grants = (
-                assistant_approval_grants.Grant("team_1", "first-assistant", "create-post", IMAGE_V1),
-                assistant_approval_grants.Grant("team_1", "second-assistant", "create-post", IMAGE_V1),
-                assistant_approval_grants.Grant("team_2", "first-assistant", "create-post", IMAGE_V1),
+                assistant_approval_grants.Grant("team_1", "first-assistant", "protected-action", IMAGE_V1),
+                assistant_approval_grants.Grant("team_1", "second-assistant", "protected-action", IMAGE_V1),
+                assistant_approval_grants.Grant("team_2", "first-assistant", "protected-action", IMAGE_V1),
             )
             store.grant_many(grants)
 
@@ -54,13 +54,15 @@ class ApprovalGrantStoreTests(unittest.TestCase):
             path = Path(directory) / "grants.sqlite3"
             store = assistant_approval_grants.ApprovalGrantStore(path, max_grants=1)
             self.addCleanup(store.close)
-            store.grant_many((assistant_approval_grants.Grant("team_1", "first-assistant", "create-post", IMAGE_V1),))
+            store.grant_many(
+                (assistant_approval_grants.Grant("team_1", "first-assistant", "protected-action", IMAGE_V1),)
+            )
             with self.assertRaises(assistant_approval_grants.ApprovalGrantError):
                 store.grant_many(
-                    (assistant_approval_grants.Grant("team_1", "second-assistant", "create-post", IMAGE_V1),)
+                    (assistant_approval_grants.Grant("team_1", "second-assistant", "protected-action", IMAGE_V1),)
                 )
             with self.assertRaises(assistant_approval_grants.ApprovalGrantError):
-                store.is_granted("../team", "first-assistant", "create-post", IMAGE_V1)
+                store.is_granted("../team", "first-assistant", "protected-action", IMAGE_V1)
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "grants.sqlite3"
@@ -112,7 +114,7 @@ class ApprovalGrantStoreTests(unittest.TestCase):
                             assistant_approval_grants.Grant(
                                 "team_1",
                                 "first-assistant",
-                                "create-post",
+                                "protected-action",
                                 IMAGE_V1,
                             ),
                         )

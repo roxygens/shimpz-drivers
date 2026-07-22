@@ -36,8 +36,8 @@ import assistant_approval_challenges
 import assistant_approval_flow
 import assistant_approval_grants
 import assistant_chat
-import assistant_contract
 import assistant_genesis
+import assistant_help
 import assistant_manifest
 import assistant_secret_challenges
 import assistant_secret_flow
@@ -87,7 +87,7 @@ MAX_SPACE_ID_LENGTH = 48
 MAX_BODY_BYTES = 16 * 1024
 MAX_CHAT_BODY_BYTES = 24 * 1024
 MAX_SECRET_BODY_BYTES = 512 * 1024
-MAX_RESPONSE_BYTES = assistant_contract.MAX_HELP_BYTES * 6 + 1024
+MAX_RESPONSE_BYTES = assistant_help.MAX_HELP_BYTES * 6 + 1024
 MAX_API_RESPONSE_BYTES = 128 * 1024
 MAX_EGRESS_POLICY_BYTES = 16 * 1024
 EGRESS_TOKEN_FILE_BYTES = 33
@@ -118,7 +118,7 @@ ASSISTANT_UID = "10001:10001"
 ASSISTANT_MEMORY = 128 * 1024 * 1024
 ASSISTANT_NANO_CPUS = 250_000_000
 ASSISTANT_PIDS = 64
-READINESS_RECOVERY_ASSISTANTS = frozenset({assistant_contract.ASSISTANT_ID})
+READINESS_RECOVERY_ASSISTANTS = frozenset({"shimpz-cloudflare"})
 STORAGE_ROOT = Path("/var/lib/shimpz-local/storage")
 INFERENCE_ROOT = Path("/var/lib/shimpz-local/inference")
 LOCAL_POWER_JOURNAL_PATH = Path(
@@ -3515,7 +3515,7 @@ class LocalController:
         """Read bounded Markdown only from one installed, running Assistant's fixed RPC."""
         team_id = validate_team_id(team_id)
         try:
-            locale = assistant_contract.validate_help_locale(locale)
+            locale = assistant_help.validate_locale(locale)
         except ValueError as exc:
             raise ApiProblem(
                 HTTPStatus.BAD_REQUEST,
@@ -3542,7 +3542,7 @@ class LocalController:
             except _UnsupportedAssistantRpcPathError:
                 raw_result = self._rpc(container, spec, "GET", "/v1/help", {})
         try:
-            help_payload = assistant_contract.validate_help_payload(raw_result)
+            help_payload = assistant_help.validate_payload(raw_result)
         except ValueError as exc:
             raise ApiProblem(
                 HTTPStatus.BAD_GATEWAY,

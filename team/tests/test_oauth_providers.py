@@ -19,7 +19,7 @@ class OAuthProviderTests(unittest.TestCase):
             provider.allowed_scopes,
             {"dns.read", "offline_access", "zone.read"},
         )
-        self.assertEqual(set(oauth_providers.PROVIDERS), {"cloudflare", "x"})
+        self.assertEqual(set(oauth_providers.PROVIDERS), {"cloudflare"})
         with self.assertRaises(TypeError):
             oauth_providers.PROVIDERS["evil"] = provider
 

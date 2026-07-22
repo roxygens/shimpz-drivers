@@ -39,8 +39,8 @@ import accounts_client
 import assistant_account_challenges
 import assistant_account_flow
 import assistant_chat
-import assistant_contract
 import assistant_genesis
+import assistant_help
 import assistant_manifest
 import assistant_secret_challenges
 import assistant_secret_flow
@@ -1592,7 +1592,7 @@ CHAT_OUTPUT_CAP = 60000
 MAX_INBOX_FILE_BYTES = 25 * 1024 * 1024
 # Base64 expands by 4/3; leave a small fixed envelope for the JSON keys and filename.
 MAX_FILE_BODY_BYTES = 4 * ((MAX_INBOX_FILE_BYTES + 2) // 3) + 8192
-MAX_ASSISTANT_RPC_OUTPUT_BYTES = assistant_contract.MAX_HELP_BYTES * 6 + 1024
+MAX_ASSISTANT_RPC_OUTPUT_BYTES = assistant_help.MAX_HELP_BYTES * 6 + 1024
 ASSISTANT_RPC_TIMEOUT_SECONDS = 8
 MAX_CHAT_FILES = 8
 MAX_CHAT_ASSISTANTS = 16
@@ -1640,11 +1640,7 @@ class _PendingHostedChat:
 
 
 def _hosted_secret_spec(active: _ActiveAssistant) -> _HostedAssistantSecretSpec:
-    name = (
-        assistant_contract.ASSISTANT_NAME
-        if active.assistant_id == assistant_contract.ASSISTANT_ID
-        else active.assistant_id.replace("-", " ").title()
-    )
+    name = active.assistant_id.replace("-", " ").title()
     return _HostedAssistantSecretSpec(
         assistant_id=active.assistant_id,
         name=name,
@@ -2086,7 +2082,7 @@ def _assistant_help(
 ) -> dict[str, str]:
     """Read bounded Markdown through one fixed RPC from an installed running Assistant."""
     try:
-        locale = assistant_contract.validate_help_locale(locale)
+        locale = assistant_help.validate_locale(locale)
     except ValueError as exc:
         raise ApiError(HTTPStatus.BAD_REQUEST, "Assistant Help locale is not supported") from exc
     with _lock_for(team_id):
@@ -2116,7 +2112,7 @@ def _assistant_help(
                 operation="Assistant Help",
             )
     try:
-        help_payload = assistant_contract.validate_help_payload(raw_result)
+        help_payload = assistant_help.validate_payload(raw_result)
     except ValueError as exc:
         raise ApiError(HTTPStatus.BAD_GATEWAY, f"Assistant Help from {current_id!r} is invalid") from exc
     return {"assistant": current_id, **help_payload}

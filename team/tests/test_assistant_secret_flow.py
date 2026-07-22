@@ -33,7 +33,7 @@ def _spec() -> AssistantSpec:
             "key": SecretSpec("Key", "Write key"),
             "secret": SecretSpec("Secret", "Write secret"),
         },
-        allowed_hosts=("api.x.com",),
+        allowed_hosts=("api.example.com",),
     )
 
 

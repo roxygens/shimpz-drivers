@@ -10,13 +10,13 @@ import assistant_approval_flow
 def requirement(interrupt_id: str = "interrupt-1") -> assistant_approval_challenges.ApprovalRequirement:
     return assistant_approval_challenges.ApprovalRequirement(
         interrupt_id=interrupt_id,
-        assistant_id="shimpz-assistant",
-        assistant_name="Shimpz Assistant",
-        power_id="create-post",
+        assistant_id="shimpz-cloudflare",
+        assistant_name="Shimpz Cloudflare",
+        power_id="protected-action",
         power_summary="Publish one approved Post.",
         input_json='{"text":"Approved Post"}',
         approval="each-run",
-        assistant_image="ghcr.io/theshimpz/shimpz-assistant@sha256:" + "a" * 64,
+        assistant_image="ghcr.io/theshimpz/shimpz-cloudflare@sha256:" + "a" * 64,
     )
 
 

@@ -73,11 +73,11 @@ class _Store:
 
 
 def _spec() -> AssistantSpec:
-    read_scopes = ("tweet.read", "users.read")
-    write_scopes = ("offline.access", "tweet.read", "tweet.write", "users.read")
+    read_scopes = ("dns.read", "zone.read")
+    write_scopes = ("dns.read", "offline_access", "zone.read")
     return AssistantSpec(
-        assistant_id="x-assistant",
-        name="X Assistant",
+        assistant_id="cloudflare-assistant",
+        name="Cloudflare Assistant",
         summary="test",
         image="example.invalid/x@sha256:" + ("a" * 64),
         rpc_command="/app/rpc",
@@ -86,35 +86,35 @@ def _spec() -> AssistantSpec:
             "read-profile": PowerSpec(
                 "POST",
                 "/read-profile",
-                "Read one public X profile.",
+                "Read one external profile.",
                 {},
                 {},
                 "none",
                 (),
-                ("x-read",),
+                ("cloudflare-read",),
             ),
             "publish-post": PowerSpec(
                 "POST",
                 "/publish-post",
-                "Publish one approved X Post.",
+                "Publish one approved external update.",
                 {},
                 {},
                 "each-run",
                 (),
-                ("x-write",),
+                ("cloudflare-write",),
             ),
         },
         secrets={},
-        allowed_hosts=("api.x.com",),
+        allowed_hosts=("api.cloudflare.com",),
         accounts={
-            "x-read": AccountSpec("x", read_scopes),
-            "x-write": AccountSpec("x", write_scopes),
+            "cloudflare-read": AccountSpec("cloudflare", read_scopes),
+            "cloudflare-write": AccountSpec("cloudflare", write_scopes),
         },
     )
 
 
 def _request(power: str, interrupt_id: str) -> brain_runtime_client.PowerRequest:
-    return brain_runtime_client.PowerRequest(interrupt_id, "x-assistant", power, {}, "none")
+    return brain_runtime_client.PowerRequest(interrupt_id, "cloudflare-assistant", power, {}, "none")
 
 
 def _cloudflare_spec() -> AssistantSpec:
@@ -151,19 +151,19 @@ class AssistantAccountFlowTests(unittest.TestCase):
         spec = _spec()
         store = _Store(
             {
-                ("x-assistant", "x-read"): _Metadata(
-                    "x-read",
-                    "x",
-                    tuple(sorted(spec.accounts["x-read"].scopes)),
+                ("cloudflare-assistant", "cloudflare-read"): _Metadata(
+                    "cloudflare-read",
+                    "cloudflare",
+                    tuple(sorted(spec.accounts["cloudflare-read"].scopes)),
                     "connected",
                     _Account("123", "reader", "Reader"),
                     expiry,
                     1,
                 ),
-                ("x-assistant", "x-write"): _Metadata(
-                    "x-write",
-                    "x",
-                    tuple(sorted(spec.accounts["x-write"].scopes)),
+                ("cloudflare-assistant", "cloudflare-write"): _Metadata(
+                    "cloudflare-write",
+                    "cloudflare",
+                    tuple(sorted(spec.accounts["cloudflare-write"].scopes)),
                     "refresh-required",
                     _Account("123", "reader", "Reader"),
                     expiry,
@@ -174,7 +174,7 @@ class AssistantAccountFlowTests(unittest.TestCase):
 
         requirements = assistant_account_flow.requirements_for_batch(
             "team_1",
-            {"x-assistant": _Active(spec)},
+            {"cloudflare-assistant": _Active(spec)},
             (_request("read-profile", "one"), _request("publish-post", "two")),
             store,
         )
@@ -183,16 +183,16 @@ class AssistantAccountFlowTests(unittest.TestCase):
         self.assertEqual(requirements[0].power_ids, ("publish-post",))
         self.assertEqual(
             requirements[0].accounts,
-            (("x-write", "x", ("offline.access", "tweet.read", "tweet.write", "users.read")),),
+            (("cloudflare-write", "cloudflare", ("dns.read", "offline_access", "zone.read")),),
         )
 
     def test_challenge_is_exact_bounded_public_metadata(self) -> None:
         spec = _spec()
         requirement = assistant_account_challenges.AccountRequirement(
-            "x-assistant",
-            "X Assistant",
+            "cloudflare-assistant",
+            "Cloudflare Assistant",
             ("publish-post",),
-            (("x-write", "x", ("offline.access", "tweet.read", "tweet.write", "users.read")),),
+            (("cloudflare-write", "cloudflare", ("dns.read", "offline_access", "zone.read")),),
         )
         challenge = assistant_account_challenges.PendingAccountChallenge(
             "a" * 32,
@@ -204,7 +204,7 @@ class AssistantAccountFlowTests(unittest.TestCase):
 
         payload = assistant_account_flow.challenge_payload(
             challenge,
-            {"x-assistant": _Active(spec)},
+            {"cloudflare-assistant": _Active(spec)},
         )
 
         self.assertEqual(
@@ -217,18 +217,20 @@ class AssistantAccountFlowTests(unittest.TestCase):
             payload["requirements"],
             [
                 {
-                    "assistant_id": "x-assistant",
-                    "assistant_name": "X Assistant",
-                    "account_id": "x-write",
-                    "provider": "x",
-                    "name": "X",
-                    "summary": "Connect your X account so this Assistant can use only its reviewed X permissions.",
-                    "scopes": ["offline.access", "tweet.read", "tweet.write", "users.read"],
+                    "assistant_id": "cloudflare-assistant",
+                    "assistant_name": "Cloudflare Assistant",
+                    "account_id": "cloudflare-write",
+                    "provider": "cloudflare",
+                    "name": "Cloudflare",
+                    "summary": (
+                        "Connect your Cloudflare account so this Assistant can use only its reviewed read permissions."
+                    ),
+                    "scopes": ["dns.read", "offline_access", "zone.read"],
                     "powers": [
                         {
                             "id": "publish-post",
                             "name": "Publish Post",
-                            "summary": "Publish one approved X Post.",
+                            "summary": "Publish one approved external update.",
                         }
                     ],
                 }
@@ -288,19 +290,19 @@ class AssistantAccountFlowTests(unittest.TestCase):
         expiry = 1_800_000_000
         store = _Store(
             {
-                ("x-assistant", "x-read"): _Metadata(
-                    "x-read",
-                    "x",
-                    tuple(sorted(spec.accounts["x-read"].scopes)),
+                ("cloudflare-assistant", "cloudflare-read"): _Metadata(
+                    "cloudflare-read",
+                    "cloudflare",
+                    tuple(sorted(spec.accounts["cloudflare-read"].scopes)),
                     "missing",
                     None,
                     None,
                     0,
                 ),
-                ("x-assistant", "x-write"): _Metadata(
-                    "x-write",
-                    "x",
-                    tuple(sorted(spec.accounts["x-write"].scopes)),
+                ("cloudflare-assistant", "cloudflare-write"): _Metadata(
+                    "cloudflare-write",
+                    "cloudflare",
+                    tuple(sorted(spec.accounts["cloudflare-write"].scopes)),
                     "refresh-required",
                     _Account("123", "juliano", "Juliano"),
                     expiry,
@@ -329,7 +331,7 @@ class AssistantAccountFlowTests(unittest.TestCase):
     def test_private_resolution_returns_only_the_selected_power_account(self) -> None:
         spec = _spec()
         token = "-".join(("private", "access", "token", "123456"))
-        store = _Store({}, {("x-assistant", "x-write"): token})
+        store = _Store({}, {("cloudflare-assistant", "cloudflare-write"): token})
         refresh_calls: list[tuple[str, tuple[str, ...], str, str | None]] = []
 
         accounts = assistant_account_flow.resolve_power_accounts(
@@ -342,7 +344,7 @@ class AssistantAccountFlowTests(unittest.TestCase):
 
         self.assertEqual(
             accounts,
-            {"x-write": {"type": "oauth2-bearer", "access_token": token}},
+            {"cloudflare-write": {"type": "oauth2-bearer", "access_token": token}},
         )
         self.assertEqual(len(store.resolved), 1)
         callback = store.resolved[0][-1]
@@ -351,8 +353,8 @@ class AssistantAccountFlowTests(unittest.TestCase):
             refresh_calls,
             [
                 (
-                    "x",
-                    ("offline.access", "tweet.read", "tweet.write", "users.read"),
+                    "cloudflare",
+                    ("dns.read", "offline_access", "zone.read"),
                     "private-refresh-token-123",
                     "private-broker-lease-123",
                 )
@@ -363,10 +365,10 @@ class AssistantAccountFlowTests(unittest.TestCase):
         spec = _spec()
         drifted = _Store(
             {
-                ("x-assistant", "x-read"): _Metadata(
-                    "x-read",
-                    "x",
-                    ("tweet.read",),
+                ("cloudflare-assistant", "cloudflare-read"): _Metadata(
+                    "cloudflare-read",
+                    "cloudflare",
+                    ("dns.read",),
                     "connected",
                     None,
                     int(time.time()) + 60,
@@ -377,14 +379,14 @@ class AssistantAccountFlowTests(unittest.TestCase):
         with self.assertRaises(assistant_account_flow.AccountFlowError):
             assistant_account_flow.requirements_for_batch(
                 "team_1",
-                {"x-assistant": _Active(spec)},
+                {"cloudflare-assistant": _Active(spec)},
                 (_request("read-profile", "one"),),
                 drifted,
             )
         with self.assertRaises(assistant_account_flow.AccountFlowError):
             assistant_account_flow._assert_public_payload({"access_token": "private"})
 
-        invalid_token_store = _Store({}, {("x-assistant", "x-read"): "short"})
+        invalid_token_store = _Store({}, {("cloudflare-assistant", "cloudflare-read"): "short"})
         with self.assertRaises(assistant_account_flow.AccountFlowError):
             assistant_account_flow.resolve_power_accounts(
                 "team_1",

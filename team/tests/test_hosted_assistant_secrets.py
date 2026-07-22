@@ -22,7 +22,32 @@ _patched = harness._patched
 
 TEAM_ID = "team_1"
 ANCHOR_ID = "a" * 64
-ASSISTANT_ID = app.assistant_contract.ASSISTANT_ID
+ASSISTANT_ID = "shimpz-cloudflare"
+ZONE_INPUT = {"page": 1, "per_page": 25}
+DNS_INPUT = {"zone_id": "a" * 32, "page": 1, "per_page": 25}
+
+
+def _zones(name: str = "example.com") -> dict[str, object]:
+    return {
+        "zones": [
+            {
+                "id": "a" * 32,
+                "name": name,
+                "status": "active",
+                "type": "full",
+                "paused": False,
+                "account": {"id": "b" * 32, "name": "Shimpz"},
+            }
+        ],
+        "pagination": {"page": 1, "per_page": 25, "count": 1, "total_count": 1, "total_pages": 1},
+    }
+
+
+def _records() -> dict[str, object]:
+    return {
+        "records": [],
+        "pagination": {"page": 1, "per_page": 25, "count": 0, "total_count": 0, "total_pages": 0},
+    }
 SECRET_VALUES = {
     "x-bearer-token": "bearer-test-value-123456789",
     "x-api-key": "consumer-key-value-123456789",
@@ -39,15 +64,15 @@ class _Runtime:
             app.brain_runtime_client.PowerRequest(
                 "public-read",
                 ASSISTANT_ID,
-                "public-user-lookup",
-                {"username": "XDevelopers"},
+                "list-zones",
+                ZONE_INPUT,
                 "none",
             ),
             app.brain_runtime_client.PowerRequest(
                 "identity-read",
                 ASSISTANT_ID,
-                "identity-me",
-                {},
+                "list-dns-records",
+                DNS_INPUT,
                 "none",
             ),
         )
@@ -59,7 +84,7 @@ class _Runtime:
         self.resume_calls += 1
         if set(results) != {"public-read", "identity-read"}:
             raise AssertionError("the complete Power batch must resume together")
-        return app.brain_runtime_client.RuntimeTurn("completed", "X account connected.", ())
+        return app.brain_runtime_client.RuntimeTurn("completed", "Cloudflare account connected.", ())
 
 
 class _RouteHarness:
@@ -109,7 +134,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 power_id: replace(
                     power,
                     secrets=(
-                        tuple(SECRET_VALUES)[:1] if power_id == "public-user-lookup" else tuple(SECRET_VALUES)[1:]
+                        tuple(SECRET_VALUES)[:1] if power_id == "list-zones" else tuple(SECRET_VALUES)[1:]
                     ),
                     accounts=(),
                 )
@@ -128,13 +153,13 @@ class HostedAssistantSecretTests(unittest.TestCase):
 
     def _rpc(self, _team_id, _token, _container, _command, _method, path, payload):
         self.rpc_calls.append((path, payload))
-        return {"id": "123", "name": "X Developers", "username": "XDevelopers"}
+        return _zones() if path.endswith("list-zones") else _records()
 
     @contextlib.contextmanager
     def _environment(self):
         with _patched(
             _active_team_assistants=lambda _team_id: (self.active,),
-            _require_assistant_genesis=lambda _container: "Use only the declared X Powers.",
+            _require_assistant_genesis=lambda _container: "Use only the declared Cloudflare Powers.",
             _chat_file_metadata=lambda _team_id, _files: [],
             _inference_store=types.SimpleNamespace(
                 load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test")
@@ -182,7 +207,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
             self.assertEqual(self.runtime.resume_calls, 0)
             self.assertEqual(self.rpc_calls, [])
             requirement = challenge["requirements"][0]
-            self.assertEqual(requirement["power_ids"], ["identity-me", "public-user-lookup"])
+            self.assertEqual(requirement["power_ids"], ["list-dns-records", "list-zones"])
             self.assertEqual(
                 {item["id"] for item in requirement["secrets"]},
                 set(SECRET_VALUES),
@@ -190,7 +215,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
             serialized = app.json.dumps(challenge)
             for secret in SECRET_VALUES.values():
                 self.assertNotIn(secret, serialized)
-            self.assertNotIn("XDevelopers", serialized)
+            self.assertNotIn("private-value", serialized)
 
             @contextlib.contextmanager
             def exclusive(_team_id, _lease):
@@ -203,23 +228,23 @@ class HostedAssistantSecretTests(unittest.TestCase):
                     app._AuthorizationLease(TEAM_ID, ANCHOR_ID, "account_1", ("account", "account_1")),
                 )
 
-        self.assertEqual(result["reply"], "X account connected.")
+        self.assertEqual(result["reply"], "Cloudflare account connected.")
         self.assertEqual(self.runtime.resume_calls, 1)
         self.assertEqual(len(self.rpc_calls), 2)
         payloads = dict(self.rpc_calls)
         self.assertEqual(
-            payloads["/v1/powers/public-user-lookup"],
+            payloads["/v1/powers/list-zones"],
             {
-                "input": {"username": "XDevelopers"},
+                "input": ZONE_INPUT,
                 "secrets": {"x-bearer-token": SECRET_VALUES["x-bearer-token"]},
                 "accounts": {},
             },
         )
 
         self.assertEqual(
-            payloads["/v1/powers/identity-me"],
+            payloads["/v1/powers/list-dns-records"],
             {
-                "input": {},
+                "input": DNS_INPUT,
                 "secrets": {
                     secret_id: SECRET_VALUES[secret_id]
                     for secret_id in (
@@ -345,11 +370,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
             _patched(
                 _assistant_secrets=self.secret_store,
                 _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.assistant_container),
-                _assistant_rpc=lambda *_args, **_kwargs: {
-                    "id": "123",
-                    "name": secret,
-                    "username": "XDevelopers",
-                },
+                _assistant_rpc=lambda *_args, **_kwargs: _zones(secret),
             ),
             self.assertRaises(app.ApiError) as caught,
         ):
@@ -359,8 +380,8 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 ASSISTANT_ID,
                 self.contract,
                 self.assistant_container,
-                "public-user-lookup",
-                {"username": "XDevelopers"},
+                "list-zones",
+                ZONE_INPUT,
             )
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_GATEWAY)
         self.assertNotIn(secret, caught.exception.message)
@@ -394,8 +415,8 @@ class HostedAssistantSecretTests(unittest.TestCase):
             (
                 app.assistant_secret_challenges.SecretRequirement(
                     ASSISTANT_ID,
-                    "Shimpz Assistant",
-                    ("public-user-lookup",),
+                    "Shimpz Cloudflare",
+                    ("list-zones",),
                     (("x-bearer-token", "X Bearer Token", "Required."),),
                 ),
             ),
@@ -433,7 +454,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
             (
                 app.assistant_secret_challenges.SecretRequirement(
                     ASSISTANT_ID,
-                    "Shimpz Assistant",
+                    "Shimpz Cloudflare",
                     ("read-account",),
                     (("primary-token", "Primary token", "Primary credential."),),
                 ),
@@ -531,7 +552,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
         contract = app.marketplace.AssistantContract("assistant-rpc", {}, declared)
         spec = types.SimpleNamespace(
             assistant=contract,
-            image="registry.example/shimpz-assistant@sha256:" + ("d" * 64),
+            image="registry.example/shimpz-cloudflare@sha256:" + ("d" * 64),
             port=8080,
             health_path="/health",
         )
@@ -560,7 +581,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
             (
                 app.assistant_secret_challenges.SecretRequirement(
                     ASSISTANT_ID,
-                    "Shimpz Assistant",
+                    "Shimpz Cloudflare",
                     ("old-power",),
                     (("obsolete-token", "Obsolete token", "Removed."),),
                 ),
@@ -610,7 +631,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
             (
                 app.assistant_secret_challenges.SecretRequirement(
                     ASSISTANT_ID,
-                    "Shimpz Assistant",
+                    "Shimpz Cloudflare",
                     ("read",),
                     (("retained-token", "Retained token", "Required."),),
                 ),
@@ -630,8 +651,8 @@ class HostedAssistantSecretTests(unittest.TestCase):
     def test_chat_rechecks_a_pending_secret_challenge_after_acquiring_its_slot(self) -> None:
         requirement = app.assistant_secret_challenges.SecretRequirement(
             ASSISTANT_ID,
-            "Shimpz Assistant",
-            ("public-user-lookup",),
+            "Shimpz Cloudflare",
+            ("list-zones",),
             (("x-bearer-token", "X Bearer Token", "Required."),),
         )
         pending = app.assistant_secret_challenges.PendingSecretChallenge(
@@ -660,8 +681,8 @@ class HostedAssistantSecretTests(unittest.TestCase):
     def test_stream_rechecks_pending_secrets_before_sending_any_stream_bytes(self) -> None:
         requirement = app.assistant_secret_challenges.SecretRequirement(
             ASSISTANT_ID,
-            "Shimpz Assistant",
-            ("public-user-lookup",),
+            "Shimpz Cloudflare",
+            ("list-zones",),
             (("x-bearer-token", "X Bearer Token", "Required."),),
         )
         pending = app.assistant_secret_challenges.PendingSecretChallenge(

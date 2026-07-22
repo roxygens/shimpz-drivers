@@ -7,10 +7,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-import assistant_contract
 import assistant_manifest
+import cloudflare_assistant_contract
 
-FIXTURE_MANIFEST = Path(__file__).resolve().parent / "fixtures" / "shimpz-assistant" / "shimpz.assistant.toml"
+FIXTURE_MANIFEST = Path(__file__).resolve().parent / "fixtures" / "reference-assistant" / "shimpz.assistant.toml"
 
 
 def manifest(
@@ -97,21 +97,21 @@ class Container:
 
 
 class AssistantManifestTests(unittest.TestCase):
-    def test_docker_lifecycle_fixture_matches_the_reviewed_x_oauth_contract(self):
+    def test_docker_lifecycle_fixture_matches_the_reviewed_cloudflare_contract(self):
         declared = assistant_manifest.parse_manifest_contract(FIXTURE_MANIFEST.read_bytes())
         reviewed = assistant_manifest.reviewed_manifest_contract(
-            allowed_hosts=assistant_contract.ASSISTANT_ALLOWED_HOSTS,
+            allowed_hosts=cloudflare_assistant_contract.ASSISTANT_ALLOWED_HOSTS,
             secrets={
                 secret_id: SimpleNamespace(**metadata)
-                for secret_id, metadata in assistant_contract.secret_contracts().items()
+                for secret_id, metadata in cloudflare_assistant_contract.secret_contracts().items()
             },
             powers={
                 power_id: SimpleNamespace(**metadata)
-                for power_id, metadata in assistant_contract.power_contracts().items()
+                for power_id, metadata in cloudflare_assistant_contract.power_contracts().items()
             },
             accounts={
                 account_id: SimpleNamespace(**metadata)
-                for account_id, metadata in assistant_contract.account_contracts().items()
+                for account_id, metadata in cloudflare_assistant_contract.account_contracts().items()
             },
         )
 
@@ -148,7 +148,7 @@ class AssistantManifestTests(unittest.TestCase):
                 "read-key": ("Read Key", "Authorizes reviewed reads."),
             },
             powers={"write": ("write-key",), "read": ("read-key",)},
-            accounts={"social": ("x", ("users.read", "tweet.read"))},
+            accounts={"social": ("cloudflare", ("zone.read", "dns.read"))},
             power_accounts={"write": ("social",), "read": ("social",)},
         )
 
@@ -167,8 +167,8 @@ class AssistantManifestTests(unittest.TestCase):
             (
                 assistant_manifest.AccountDeclaration(
                     "social",
-                    "x",
-                    ("tweet.read", "users.read"),
+                    "cloudflare",
+                    ("dns.read", "zone.read"),
                 ),
             ),
         )
@@ -208,7 +208,7 @@ class AssistantManifestTests(unittest.TestCase):
             manifest() + b"\x00",
             b"\xff",
             b'schema_version = 2\nallowed_hosts = ["example.com"',
-            b"x" * (assistant_manifest.MAX_MANIFEST_BYTES + 1),
+            b"cloudflare" * (assistant_manifest.MAX_MANIFEST_BYTES + 1),
         )
         for content in invalid:
             with self.subTest(size=len(content)), self.assertRaises(assistant_manifest.ManifestError):
@@ -233,33 +233,33 @@ class AssistantManifestTests(unittest.TestCase):
         valid = manifest(
             secrets={},
             powers={"lookup": ()},
-            accounts={"x": ("x", ("tweet.read", "users.read"))},
-            power_accounts={"lookup": ("x",)},
+            accounts={"cloudflare": ("cloudflare", ("dns.read", "zone.read"))},
+            power_accounts={"lookup": ("cloudflare",)},
         )
         contract = assistant_manifest.parse_manifest_contract(valid)
-        self.assertEqual(contract.accounts[0].provider, "x")
-        self.assertEqual(contract.accounts[0].scopes, ("tweet.read", "users.read"))
+        self.assertEqual(contract.accounts[0].provider, "cloudflare")
+        self.assertEqual(contract.accounts[0].scopes, ("dns.read", "zone.read"))
 
         invalid = (
             manifest(
                 secrets={},
                 powers={"lookup": ()},
-                accounts={"x": ("x", ("tweet.read",))},
+                accounts={"cloudflare": ("cloudflare", ("dns.read",))},
                 power_accounts={"lookup": ()},
             ),
             manifest(secrets={}, powers={"lookup": ()}, power_accounts={"lookup": ("missing",)}),
             manifest(
                 secrets={},
                 powers={"lookup": ()},
-                accounts={"x": ("x", ("tweet.read", "tweet.read"))},
-                power_accounts={"lookup": ("x",)},
+                accounts={"cloudflare": ("cloudflare", ("dns.read", "dns.read"))},
+                power_accounts={"lookup": ("cloudflare",)},
             ),
-            valid.replace(b'scopes = ["tweet.read", "users.read"]', b"scopes = []"),
-            valid.replace(b'provider = "x"', b'provider = "X"'),
-            valid.replace(b'scopes = ["tweet.read", "users.read"]', b'scopes = ["tweet/read"]'),
+            valid.replace(b'scopes = ["dns.read", "zone.read"]', b"scopes = []"),
+            valid.replace(b'provider = "cloudflare"', b'provider = "Cloudflare"'),
+            valid.replace(b'scopes = ["dns.read", "zone.read"]', b'scopes = ["tweet/read"]'),
             valid.replace(
-                b'scopes = ["tweet.read", "users.read"]',
-                b'scopes = ["tweet.read"]\ntoken_url = "https://evil.example"',
+                b'scopes = ["dns.read", "zone.read"]',
+                b'scopes = ["dns.read"]\ntoken_url = "https://evil.example"',
             ),
         )
         for content in invalid:
@@ -270,12 +270,12 @@ class AssistantManifestTests(unittest.TestCase):
         valid = manifest(
             secrets={},
             powers={"lookup": ()},
-            accounts={"x": ("x", ("tweet.read",))},
-            power_accounts={"lookup": ("x",)},
+            accounts={"cloudflare": ("cloudflare", ("dns.read",))},
+            power_accounts={"lookup": ("cloudflare",)},
         )
         for obsolete in (
-            valid.replace(b"[accounts.x]", b"[connections.x]"),
-            valid.replace(b'accounts = ["x"]', b'connections = ["x"]'),
+            valid.replace(b"[accounts.cloudflare]", b"[connections.cloudflare]"),
+            valid.replace(b'accounts = ["cloudflare"]', b'connections = ["cloudflare"]'),
         ):
             with self.subTest(obsolete=obsolete), self.assertRaises(assistant_manifest.ManifestError):
                 assistant_manifest.parse_manifest_contract(obsolete)
@@ -318,7 +318,7 @@ class AssistantManifestTests(unittest.TestCase):
             allowed_hosts=("api.example.com", "cdn.example.com"),
             secrets={"api-token": ("API Token", "Token for the public API.")},
             powers={"lookup": ("api-token",)},
-            accounts={"social": ("x", ("tweet.read", "users.read"))},
+            accounts={"social": ("cloudflare", ("dns.read", "zone.read"))},
             power_accounts={"lookup": ("social",)},
         )
         container = Container("container-one", content)
@@ -328,7 +328,7 @@ class AssistantManifestTests(unittest.TestCase):
             allowed_hosts=("cdn.example.com", "api.example.com"),
             secret_declarations={"api-token": ("API Token", "Token for the public API.")},
             power_secret_refs={"lookup": ("api-token",)},
-            account_declarations={"social": ("x", ("users.read", "tweet.read"))},
+            account_declarations={"social": ("cloudflare", ("zone.read", "dns.read"))},
             power_account_refs={"lookup": ("social",)},
         )
         self.assertEqual(cache.get(container, expected), expected)
@@ -339,28 +339,28 @@ class AssistantManifestTests(unittest.TestCase):
                 allowed_hosts=("api.example.com", "evil.example.com"),
                 secret_declarations={"api-token": ("API Token", "Token for the public API.")},
                 power_secret_refs={"lookup": ("api-token",)},
-                account_declarations={"social": ("x", ("tweet.read", "users.read"))},
+                account_declarations={"social": ("cloudflare", ("dns.read", "zone.read"))},
                 power_account_refs={"lookup": ("social",)},
             ),
             assistant_manifest.canonical_manifest_contract(
                 allowed_hosts=("api.example.com", "cdn.example.com"),
                 secret_declarations={"api-token": ("Different Name", "Token for the public API.")},
                 power_secret_refs={"lookup": ("api-token",)},
-                account_declarations={"social": ("x", ("tweet.read", "users.read"))},
+                account_declarations={"social": ("cloudflare", ("dns.read", "zone.read"))},
                 power_account_refs={"lookup": ("social",)},
             ),
             assistant_manifest.canonical_manifest_contract(
                 allowed_hosts=("api.example.com", "cdn.example.com"),
                 secret_declarations={"api-token": ("API Token", "Token for the public API.")},
                 power_secret_refs={"other-power": ("api-token",)},
-                account_declarations={"social": ("x", ("tweet.read", "users.read"))},
+                account_declarations={"social": ("cloudflare", ("dns.read", "zone.read"))},
                 power_account_refs={"other-power": ("social",)},
             ),
             assistant_manifest.canonical_manifest_contract(
                 allowed_hosts=("api.example.com", "cdn.example.com"),
                 secret_declarations={"api-token": ("API Token", "Token for the public API.")},
                 power_secret_refs={"lookup": ("api-token",)},
-                account_declarations={"social": ("other", ("tweet.read", "users.read"))},
+                account_declarations={"social": ("other", ("dns.read", "zone.read"))},
                 power_account_refs={"lookup": ("social",)},
             ),
             assistant_manifest.canonical_manifest_contract(

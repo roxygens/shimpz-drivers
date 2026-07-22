@@ -87,7 +87,7 @@ class LocalAssistantEgressTests(unittest.TestCase):
         self.controller.space_id = "local-space"
         self.controller.client = types.SimpleNamespace(containers=_Containers(self.proxy))
         self.spec = types.SimpleNamespace(
-            assistant_id="shimpz-assistant",
+            assistant_id="shimpz-cloudflare",
             allowed_hosts=("api.open-meteo.com", "geocoding-api.open-meteo.com"),
         )
         self.controller.registry = {self.spec.assistant_id: self.spec}

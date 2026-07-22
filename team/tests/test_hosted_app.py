@@ -198,7 +198,7 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
         )
 
     def test_manifest_must_match_reviewed_hosts_before_admission(self) -> None:
-        spec = app.marketplace.APPS["shimpz-assistant"]
+        spec = app.marketplace.APPS["shimpz-cloudflare"]
         container = types.SimpleNamespace(id="assistant-generation")
         reviewed_contracts: list[app.assistant_manifest.ManifestContract] = []
 
@@ -280,7 +280,7 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
 
     def test_manifest_mismatch_rolls_back_before_policy_proxy_or_start(self) -> None:
         events: list[object] = []
-        spec = app.marketplace.APPS["shimpz-assistant"]
+        spec = app.marketplace.APPS["shimpz-cloudflare"]
         state = {"created": False}
         container = types.SimpleNamespace(
             id="assistant-generation",
@@ -331,7 +331,7 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             ):
                 app._install_app(
                     "team_1",
-                    "shimpz-assistant",
+                    "shimpz-cloudflare",
                     spec,
                     "account_1",
                     types.SimpleNamespace(owner="account_1"),
@@ -344,7 +344,7 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             [
                 "create",
                 ("disconnect", "assistant-generation"),
-                ("connect-app", "assistant-generation", ("shimpz-assistant", "shimpz-assistant.team")),
+                ("connect-app", "assistant-generation", ("shimpz-cloudflare", "shimpz-cloudflare.team")),
                 "admit",
                 ("remove-container", "assistant-generation"),
             ],
@@ -353,17 +353,17 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
     def test_existing_policy_bytes_must_match_the_admitted_hosts(self) -> None:
         hosts = ("api.open-meteo.com", "geocoding-api.open-meteo.com")
         with tempfile.TemporaryDirectory() as directory, _patched(APP_EGRESS_POLICY_DIR=Path(directory)):
-            token = app._app_egress_token("team_1", "shimpz-assistant")
+            token = app._app_egress_token("team_1", "shimpz-cloudflare")
             assert token is not None
             app._write_egress_policy(token, hosts)
             self.assertEqual(
-                app._validate_egress_policy("team_1", "shimpz-assistant", hosts),
+                app._validate_egress_policy("team_1", "shimpz-cloudflare", hosts),
                 token,
             )
 
             (Path(directory) / f"{token}.json").write_text('["evil.example"]', encoding="ascii")
             with self.assertRaises(app.ApiError) as caught:
-                app._validate_egress_policy("team_1", "shimpz-assistant", hosts)
+                app._validate_egress_policy("team_1", "shimpz-cloudflare", hosts)
         self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
 
     def test_nonempty_hosts_require_the_exact_admitted_proxy_token(self) -> None:
@@ -404,8 +404,8 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
 
     def test_empty_hosts_build_no_proxy_environment(self) -> None:
-        spec = app.marketplace.APPS["shimpz-assistant"]
-        kwargs = app.manifests.build_team_app_kwargs("team_1", "shimpz-assistant", spec)
+        spec = app.marketplace.APPS["shimpz-cloudflare"]
+        kwargs = app.manifests.build_team_app_kwargs("team_1", "shimpz-cloudflare", spec)
         environment = kwargs["environment"]
 
         self.assertFalse({key for key in environment if key.upper().endswith("_PROXY")})
@@ -422,10 +422,10 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         self.addCleanup(setattr, app, "_assistant_secret_challenges", original_secrets)
 
     def _journal_chat_environment(self, journal, runtime, rpc):
-        contract = app.marketplace.APPS["shimpz-assistant"].assistant
+        contract = app.marketplace.APPS["shimpz-cloudflare"].assistant
         assert contract is not None
         assistant = app._ActiveAssistant(
-            "shimpz-assistant",
+            "shimpz-cloudflare",
             contract,
             types.SimpleNamespace(id="b" * 64),
         )
@@ -450,7 +450,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         for account_id, declaration in contract.accounts.items():
             account_store.put(
                 "team_1",
-                "shimpz-assistant",
+                "shimpz-cloudflare",
                 account_id,
                 declaration.provider,
                 declaration.scopes,
@@ -463,7 +463,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             )
         return anchor, _patched(
             _active_team_assistants=lambda _team_id: (assistant,),
-            _require_assistant_genesis=lambda _container: "Use only the declared X Powers.",
+            _require_assistant_genesis=lambda _container: "Use only the declared Cloudflare Powers.",
             _chat_file_metadata=lambda _team_id, _files: [],
             _inference_store=types.SimpleNamespace(load=lambda _team_id: config),
             _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
@@ -495,11 +495,11 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 app._validated_team_name(invalid)
 
     def test_hosted_lifecycle_rejects_an_active_chat_before_any_mutation(self) -> None:
-        spec = app.marketplace.APPS["shimpz-assistant"]
+        spec = app.marketplace.APPS["shimpz-cloudflare"]
         lease = types.SimpleNamespace(owner="account_1")
         operations = (
-            lambda: app._install_app("team_1", "shimpz-assistant", spec, "account_1", lease),
-            lambda: app._uninstall_app("team_1", "shimpz-assistant", lease),
+            lambda: app._install_app("team_1", "shimpz-cloudflare", spec, "account_1", lease),
+            lambda: app._uninstall_app("team_1", "shimpz-cloudflare", lease),
             lambda: app._lifecycle("team_1", "restart", lease),
         )
         chat_lock = app._chat_lock_for("team_1")
@@ -547,7 +547,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 "team_1",
                 "Prepare the campaign",
                 [],
-                ("shimpz-assistant",),
+                ("shimpz-cloudflare",),
                 types.SimpleNamespace(owner="account_1"),
             )
 
@@ -767,9 +767,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
     def test_completed_power_is_cached_until_a_successful_brain_resume(self) -> None:
         request = app.brain_runtime_client.PowerRequest(
             "power-1",
-            "shimpz-assistant",
-            "public-user-lookup",
-            {"username": "XDevelopers"},
+            "shimpz-cloudflare",
+            "list-zones",
+            {"page": 1, "per_page": 25},
             "none",
         )
 
@@ -789,17 +789,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 return app.brain_runtime_client.RuntimeTurn("completed", "Cached reply", ())
 
         runtime = Runtime()
-        power_result = {
-            "locations": [
-                {
-                    "name": "Lisbon",
-                    "country": "Portugal",
-                    "latitude": 38.72,
-                    "longitude": -9.14,
-                    "timezone": "Europe/Lisbon",
-                }
-            ]
-        }
+        power_result = {"zones": [], "page": 1, "per_page": 25, "total_pages": 0}
         rpc = mock.Mock(return_value={"result": power_result})
         with tempfile.TemporaryDirectory() as directory:
             journal = app.power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
@@ -811,7 +801,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                         "team_1",
                         "Greet me",
                         [],
-                        ("shimpz-assistant",),
+                        ("shimpz-cloudflare",),
                         "first-turn",
                         anchor,
                         "account_1",
@@ -824,7 +814,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                     "team_1",
                     "Greet me",
                     [],
-                    ("shimpz-assistant",),
+                    ("shimpz-cloudflare",),
                     "retry-turn",
                     anchor,
                     "account_1",
@@ -844,9 +834,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
     def test_uncertain_power_fails_closed_before_a_second_rpc(self) -> None:
         normalized = app.brain_runtime_client.PowerRequest(
             "power-1",
-            "shimpz-assistant",
-            "public-user-lookup",
-            {"username": "XDevelopers"},
+            "shimpz-cloudflare",
+            "list-zones",
+            {"page": 1, "per_page": 25},
             "none",
         )
         thread_id = app._brain_thread_id("team_1", ANCHOR_ID)
@@ -856,9 +846,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             def start(_context, _message):
                 raw = app.brain_runtime_client.PowerRequest(
                     "power-1",
-                    "shimpz-assistant",
-                    "public-user-lookup",
-                    {"username": "XDevelopers"},
+                    "shimpz-cloudflare",
+                    "list-zones",
+                    {"page": 1, "per_page": 25},
                     "none",
                 )
                 return app.brain_runtime_client.RuntimeTurn("power-required", "", (raw,))
@@ -875,7 +865,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             operation = app._power_operation(
                 normalized,
                 "b" * 64,
-                account_generations=(("x", 1),),
+                account_generations=(("cloudflare", 1),),
             )
             batch = journal.prepare_batch(ANCHOR_ID, thread_id, (operation,))
             journal.begin(batch, operation)
@@ -886,7 +876,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                     "team_1",
                     "Greet me",
                     [],
-                    ("shimpz-assistant",),
+                    ("shimpz-cloudflare",),
                     "retry-turn",
                     anchor,
                     "account_1",

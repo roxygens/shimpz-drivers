@@ -98,24 +98,7 @@ _CLOUDFLARE = _provider(
     client_auth_method="client_secret_basic",
 )
 
-# Retained only while the existing Shimpz Assistant artifact is removed from
-# the marketplace in a separate release. New OAuth execution is Cloudflare-only.
-_X_LEGACY_DECLARATION = _provider(
-    provider_id="x",
-    authorization_endpoint="https://x.com/i/oauth2/authorize",
-    token_endpoint=urlunsplit(("https", "api.x.com", "/2/oauth2/token", "", "")),
-    revocation_endpoint="https://api.x.com/2/oauth2/revoke",
-    api_hosts=("api.x.com",),
-    allowed_scopes=frozenset({"offline.access", "tweet.read", "tweet.write", "users.read"}),
-    client_auth_method="none",
-)
-
-PROVIDERS = MappingProxyType(
-    {
-        _CLOUDFLARE.id: _CLOUDFLARE,
-        _X_LEGACY_DECLARATION.id: _X_LEGACY_DECLARATION,
-    }
-)
+PROVIDERS = MappingProxyType({_CLOUDFLARE.id: _CLOUDFLARE})
 
 
 def resolve(provider_id: object) -> OAuthProvider:

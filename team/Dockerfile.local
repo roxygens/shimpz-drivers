@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
-# check=skip=SecretsUsedInArgOrEnv ; SHIMPZ_ASSISTANT_IMAGE is a public OCI digest, not a credential
+# check=skip=SecretsUsedInArgOrEnv ; the Cloudflare Assistant image is a public OCI digest, not a credential
 #
 # Separate local-only Team controller. It does not copy the hosted app.py/runsc/PG control
 # plane; only the narrow LangGraph runtime protocol and Controller-owned Power loop are shared.
@@ -20,7 +20,7 @@ WORKDIR /app
 COPY --from=dependencies /opt/venv /opt/venv
 
 COPY local_app.py local_audit.py local_registry.py local_token_store.py local_healthcheck.py team_storage.py assistant_genesis.py assistant_manifest.py \
-    assistant_contract.py cloudflare_assistant_contract.py assistant_secret_store.py assistant_secret_challenges.py assistant_secret_flow.py \
+    assistant_help.py cloudflare_assistant_contract.py assistant_secret_store.py assistant_secret_challenges.py assistant_secret_flow.py \
     assistant_account_challenges.py assistant_account_flow.py oauth_account_store.py oauth_account_service.py \
     oauth_broker_client.py oauth_http_client.py oauth_pkce_challenges.py oauth_providers.py \
     assistant_approval_challenges.py assistant_approval_flow.py assistant_approval_grants.py \
@@ -28,14 +28,12 @@ COPY local_app.py local_audit.py local_registry.py local_token_store.py local_he
     power_journal.py ./
 
 # A normal source build remains possible, but cannot start until release automation supplies the
-# published Shimpz Assistant digest with `--build-arg SHIMPZ_ASSISTANT_IMAGE=repo@sha256:...`.
-ARG SHIMPZ_ASSISTANT_IMAGE=ghcr.io/theshimpz/shimpz-space@sha256:0000000000000000000000000000000000000000000000000000000000000000
+# published Cloudflare Assistant digest with `--build-arg SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE=repo@sha256:...`.
 ARG SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE=ghcr.io/theshimpz/shimpz-space@sha256:0000000000000000000000000000000000000000000000000000000000000000
 RUN mkdir -p /etc/shimpz && \
-    SHIMPZ_ASSISTANT_IMAGE="$SHIMPZ_ASSISTANT_IMAGE" \
     SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE="$SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE" \
     /opt/venv/bin/python -c \
-    'import json, os, pathlib; pathlib.Path("/etc/shimpz/local-assistants.json").write_text(json.dumps({"schema": 2, "images": {"shimpz-assistant": os.environ["SHIMPZ_ASSISTANT_IMAGE"], "shimpz-cloudflare": os.environ["SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE"]}}, separators=(",", ":")) + "\n", encoding="utf-8")'
+    'import json, os, pathlib; pathlib.Path("/etc/shimpz/local-assistants.json").write_text(json.dumps({"schema": 2, "images": {"shimpz-cloudflare": os.environ["SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE"]}}, separators=(",", ":")) + "\n", encoding="utf-8")'
 
 RUN groupadd --gid 10001 shimpzlocal && \
     groupadd --gid 10010 shimpzteamdriver-token && \

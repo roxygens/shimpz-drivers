@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import assistant_contract
+import cloudflare_assistant_contract
 import network_policy
 
 # Also bounds derived names: the per-app DB project "team_<sha10>_<app>" stays within pg-driver's
@@ -22,8 +22,8 @@ import network_policy
 APP_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$")
 DIGEST_IMAGE_RE = re.compile(r"^[a-z0-9.-]+(?::[0-9]{1,5})?/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$")
 RESERVED_APP_IDS = network_policy.RESERVED_SERVICE_ALIASES
-SHIMPZ_ASSISTANT_IMAGE = (
-    "ghcr.io/theshimpz/shimpz-space@sha256:0bd6ecdf1075df37e0a1b19d58b7d0711beef9b7ccad088222e0c8951c4ad888"
+SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE = (
+    "ghcr.io/theshimpz/shimpz-space@sha256:31af82a29962ae1ae298fa87417a433286a0aa1bf3da0862dc7127d4646efac5"
 )
 
 
@@ -89,29 +89,30 @@ APPS: dict[str, AppSpec] = {
     ),
     # First closed Genesis/Powers adapter for the hosted Team controller. The browser supplies only
     # this ID; the controller owns the digest, runtime envelope and identity labels below.
-    assistant_contract.ASSISTANT_ID: AppSpec(
-        image=SHIMPZ_ASSISTANT_IMAGE,
+    cloudflare_assistant_contract.ASSISTANT_ID: AppSpec(
+        image=SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE,
         port=8080,
-        health_path="/health",
+        health_path=cloudflare_assistant_contract.ASSISTANT_HEALTH_PATH,
         db=False,
-        allowed_hosts=assistant_contract.ASSISTANT_ALLOWED_HOSTS,
+        allowed_hosts=cloudflare_assistant_contract.ASSISTANT_ALLOWED_HOSTS,
         first_party=True,
         required_image_labels=(
-            ("org.shimpz.assistant.id", assistant_contract.ASSISTANT_ID),
+            ("org.shimpz.assistant.id", cloudflare_assistant_contract.ASSISTANT_ID),
             ("org.shimpz.assistant.api", "1"),
         ),
         assistant=AssistantContract(
-            rpc_command=assistant_contract.ASSISTANT_RPC_COMMAND,
+            rpc_command=cloudflare_assistant_contract.ASSISTANT_RPC_COMMAND,
             powers={
-                power_id: PowerSpec(**contract) for power_id, contract in assistant_contract.power_contracts().items()
+                power_id: PowerSpec(**contract)
+                for power_id, contract in cloudflare_assistant_contract.power_contracts().items()
             },
             secrets={
                 secret_id: SecretSpec(**contract)
-                for secret_id, contract in assistant_contract.secret_contracts().items()
+                for secret_id, contract in cloudflare_assistant_contract.secret_contracts().items()
             },
             accounts={
                 account_id: AccountSpec(**contract)
-                for account_id, contract in assistant_contract.account_contracts().items()
+                for account_id, contract in cloudflare_assistant_contract.account_contracts().items()
             },
         ),
     ),
@@ -148,8 +149,8 @@ def resolve(app_id: object) -> tuple[str, AppSpec]:
 
 
 def validate_power_input(assistant_id: str, power: str, payload: object) -> dict[str, object]:
-    return assistant_contract.validate_power_input(assistant_id, power, payload)
+    return cloudflare_assistant_contract.validate_power_input(assistant_id, power, payload)
 
 
 def validate_power_output(assistant_id: str, power: str, payload: object) -> dict[str, object]:
-    return assistant_contract.validate_power_output(assistant_id, power, payload)
+    return cloudflare_assistant_contract.validate_power_output(assistant_id, power, payload)

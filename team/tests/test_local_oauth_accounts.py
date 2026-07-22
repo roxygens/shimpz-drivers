@@ -32,7 +32,6 @@ class LocalOAuthAccountTests(unittest.TestCase):
                     {
                         "schema": 2,
                         "images": {
-                            "shimpz-assistant": "example.invalid/shimpz@sha256:" + ("a" * 64),
                             "shimpz-cloudflare": "example.invalid/cloudflare@sha256:" + ("b" * 64),
                         },
                     }
@@ -74,7 +73,7 @@ class LocalOAuthAccountTests(unittest.TestCase):
                 Path(directory) / "key" / "aes256.key",
             )
             controller.list_assistants = lambda _team: {
-                "assistants": [{"assistant": "shimpz-assistant", "status": "running"}]
+                "assistants": [{"assistant": "shimpz-cloudflare", "status": "running"}]
             }
 
             payload = controller.list_assistant_accounts("team_1")
@@ -85,13 +84,15 @@ class LocalOAuthAccountTests(unittest.TestCase):
             payload["accounts"],
             [
                 {
-                    "assistant_id": "shimpz-assistant",
-                    "assistant_name": "Shimpz Assistant",
-                    "id": "x",
-                    "provider": "x",
-                    "name": "X",
-                    "summary": "Connect your X account so this Assistant can use only its reviewed X permissions.",
-                    "scopes": ["offline.access", "tweet.read", "tweet.write", "users.read"],
+                    "assistant_id": "shimpz-cloudflare",
+                    "assistant_name": "Shimpz Cloudflare",
+                    "id": "cloudflare",
+                    "provider": "cloudflare",
+                    "name": "Cloudflare",
+                    "summary": (
+                        "Connect your Cloudflare account so this Assistant can use only its reviewed read permissions."
+                    ),
+                    "scopes": ["dns.read", "offline_access", "zone.read"],
                     "status": "missing",
                     "account": None,
                     "expires_at": None,
@@ -242,12 +243,12 @@ class LocalOAuthAccountTests(unittest.TestCase):
         self.assertEqual(disconnected[2], "assistant-account-disconnect")
 
     def test_chat_pauses_before_any_power_when_account_is_missing(self) -> None:
-        spec = self._registry()["shimpz-assistant"]
+        spec = self._registry()["shimpz-cloudflare"]
         request = brain_runtime_client.PowerRequest(
             interrupt_id="call-1",
             assistant_id=spec.assistant_id,
-            power="public-user-lookup",
-            input={"username": "shimpz"},
+            power="list-zones",
+            input={"page": 1, "per_page": 25},
             approval="none",
         )
 
@@ -295,22 +296,22 @@ class LocalOAuthAccountTests(unittest.TestCase):
                 "openai",
                 "test-api-key",
                 "turn-token",
-                message="Find @shimpz on X",
+                message="List my Cloudflare zones",
             )
 
         self.assertIsInstance(result[2], chat_orchestrator.ChatSuspension)
         self.assertEqual(len(result[3]), 1)
-        self.assertEqual(result[3][0].accounts[0][0], "x")
+        self.assertEqual(result[3][0].accounts[0][0], "cloudflare")
         self.assertEqual(result[4:], ((), ()))
 
     def test_account_resume_is_one_use_and_returns_completed_turn(self) -> None:
         registry = self._registry()
-        spec = registry["shimpz-assistant"]
+        spec = registry["shimpz-cloudflare"]
         request = brain_runtime_client.PowerRequest(
             interrupt_id="call-1",
             assistant_id=spec.assistant_id,
-            power="identity-me",
-            input={},
+            power="list-zones",
+            input={"page": 1, "per_page": 25},
             approval="none",
         )
         continuation = chat_orchestrator.ChatContinuation(
@@ -323,8 +324,8 @@ class LocalOAuthAccountTests(unittest.TestCase):
             assistant_account_challenges.AccountRequirement(
                 assistant_id=spec.assistant_id,
                 assistant_name=spec.name,
-                power_ids=("identity-me",),
-                accounts=(("x", "x", spec.accounts["x"].scopes),),
+                power_ids=("list-zones",),
+                accounts=(("cloudflare", "cloudflare", spec.accounts["cloudflare"].scopes),),
             ),
         )
 
@@ -359,13 +360,13 @@ class LocalOAuthAccountTests(unittest.TestCase):
             controller.assistant_accounts.put(
                 "team_1",
                 spec.assistant_id,
-                "x",
-                "x",
-                spec.accounts["x"].scopes,
+                "cloudflare",
+                "cloudflare",
+                spec.accounts["cloudflare"].scopes,
                 SimpleNamespace(
                     access_token="a" * 32,
                     refresh_token="r" * 32,
-                    scopes=spec.accounts["x"].scopes,
+                    scopes=spec.accounts["cloudflare"].scopes,
                     expires_in=3600,
                 ),
             )

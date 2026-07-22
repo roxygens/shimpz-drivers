@@ -11,48 +11,24 @@ import marketplace
 
 
 class LocalRegistryAccountTests(unittest.TestCase):
-    def test_x_oauth_intent_matches_the_first_party_contract(self) -> None:
-        digest = "127.0.0.1:5000/shimpz/shimpz-assistant@sha256:" + "a" * 64
+    def test_cloudflare_contract_matches_hosted_and_local_registries(self) -> None:
+        digest = "127.0.0.1:5000/shimpz/shimpz-cloudflare@sha256:" + "a" * 64
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "registry.json"
             path.write_text(
-                json.dumps(
-                    {
-                        "schema": 2,
-                        "images": {
-                            "shimpz-assistant": digest,
-                            "shimpz-cloudflare": digest,
-                        },
-                    }
-                ),
+                json.dumps({"schema": 2, "images": {"shimpz-cloudflare": digest}}),
                 encoding="utf-8",
             )
-            registry = local_registry.load_registry(path)
-            spec = registry["shimpz-assistant"]
+            spec = local_registry.load_registry(path)["shimpz-cloudflare"]
 
-        self.assertEqual(
-            set(spec.secrets),
-            {"mux-token-id", "mux-token-secret", "mux-webhook-signing-secret"},
-        )
-        self.assertEqual(spec.accounts["x"].provider, "x")
-        self.assertEqual(
-            spec.accounts["x"].scopes,
-            ("offline.access", "tweet.read", "tweet.write", "users.read"),
-        )
-        x_powers = {"public-user-lookup", "identity-me", "create-post", "delete-post"}
-        mux_api_powers = {"list-direct-uploads", "create-test-direct-upload", "cancel-direct-upload"}
-        for power_id, power in spec.powers.items():
-            self.assertEqual(power.accounts, ("x",) if power_id in x_powers else ())
-            self.assertEqual(
-                power.secrets,
-                ("mux-token-id", "mux-token-secret")
-                if power_id in mux_api_powers
-                else ("mux-webhook-signing-secret",)
-                if power_id == "verify-mux-webhook"
-                else (),
-            )
+        self.assertEqual(spec.secrets, {})
+        self.assertEqual(spec.accounts["cloudflare"].provider, "cloudflare")
+        self.assertEqual(spec.accounts["cloudflare"].scopes, ("dns.read", "offline_access", "zone.read"))
+        self.assertEqual(spec.allowed_hosts, ("api.cloudflare.com",))
+        self.assertTrue(all(power.accounts == ("cloudflare",) for power in spec.powers.values()))
 
-        hosted = marketplace.APPS["shimpz-assistant"]
+        hosted = marketplace.APPS["shimpz-cloudflare"]
+        assert hosted.assistant is not None
         self.assertEqual(
             assistant_manifest.reviewed_manifest_contract(
                 allowed_hosts=spec.allowed_hosts,
@@ -67,16 +43,6 @@ class LocalRegistryAccountTests(unittest.TestCase):
                 accounts=hosted.assistant.accounts,
             ),
         )
-
-        cloudflare = registry["shimpz-cloudflare"]
-        self.assertEqual(cloudflare.secrets, {})
-        self.assertEqual(cloudflare.accounts["cloudflare"].provider, "cloudflare")
-        self.assertEqual(
-            cloudflare.accounts["cloudflare"].scopes,
-            ("dns.read", "offline_access", "zone.read"),
-        )
-        self.assertEqual(cloudflare.allowed_hosts, ("api.cloudflare.com",))
-        self.assertTrue(all(power.accounts == ("cloudflare",) for power in cloudflare.powers.values()))
 
 
 if __name__ == "__main__":

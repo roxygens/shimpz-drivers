@@ -15,7 +15,7 @@ def requirement() -> assistant_secret_challenges.SecretRequirement:
     return assistant_secret_challenges.SecretRequirement(
         assistant_id="x-assistant",
         assistant_name="X Assistant",
-        power_ids=("identity-me",),
+        power_ids=("read-profile",),
         secrets=(("x-api-key", "X API Key", "Identifies the X application."),),
     )
 

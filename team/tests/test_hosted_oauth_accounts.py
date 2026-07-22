@@ -17,10 +17,27 @@ app = harness.app
 _patched = harness._patched
 
 TEAM_ID = "team_1"
-ASSISTANT_ID = app.assistant_contract.ASSISTANT_ID
-SCOPES = ("tweet.read", "users.read")
+ASSISTANT_ID = "shimpz-cloudflare"
+SCOPES = ("dns.read", "zone.read")
 ACCESS_TOKEN = "-".join(("hosted", "access", "token", "value", "123456789"))
 ANCHOR_ID = "a" * 64
+ZONE_INPUT = {"page": 1, "per_page": 25}
+
+
+def _zones(name: str = "example.com") -> dict[str, object]:
+    return {
+        "zones": [
+            {
+                "id": "a" * 32,
+                "name": name,
+                "status": "active",
+                "type": "full",
+                "paused": False,
+                "account": {"id": "b" * 32, "name": "Shimpz"},
+            }
+        ],
+        "pagination": {"page": 1, "per_page": 25, "count": 1, "total_count": 1, "total_pages": 1},
+    }
 
 
 class _Runtime:
@@ -30,8 +47,8 @@ class _Runtime:
         self.request = app.brain_runtime_client.PowerRequest(
             "lookup",
             ASSISTANT_ID,
-            "public-user-lookup",
-            {"username": "XDevelopers"},
+            "list-zones",
+            ZONE_INPUT,
             "none",
         )
 
@@ -63,12 +80,12 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 power_id: replace(
                     power,
                     secrets=(),
-                    accounts=("x",) if power_id == "public-user-lookup" else (),
+                    accounts=("cloudflare",) if power_id == "list-zones" else (),
                 )
                 for power_id, power in trusted.powers.items()
             },
             secrets={},
-            accounts={"x": app.marketplace.AccountSpec("x", SCOPES)},
+            accounts={"cloudflare": app.marketplace.AccountSpec("cloudflare", SCOPES)},
         )
         self.container = types.SimpleNamespace(id="b" * 64)
         self.active = app._ActiveAssistant(ASSISTANT_ID, self.contract, self.container)
@@ -77,8 +94,8 @@ class HostedOAuthAccountTests(unittest.TestCase):
         self.store.put(
             TEAM_ID,
             ASSISTANT_ID,
-            "x",
-            "x",
+            "cloudflare",
+            "cloudflare",
             SCOPES,
             app.oauth_http_client.OAuthTokenSet(ACCESS_TOKEN, "refresh-token-value-123456789", SCOPES, 3600),
         )
@@ -89,7 +106,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
 
         def rpc(_team_id, _token, _container, _command, _method, _path, payload):
             captured.append(payload)
-            return {"id": "123", "name": "X Developers", "username": "XDevelopers"}
+            return _zones()
 
         with _patched(
             _assistant_accounts=self.store,
@@ -102,8 +119,8 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 ASSISTANT_ID,
                 self.contract,
                 self.container,
-                "public-user-lookup",
-                {"username": "XDevelopers"},
+                "list-zones",
+                ZONE_INPUT,
             )
             payload = app.assistant_account_flow.inventory_payload(
                 TEAM_ID,
@@ -111,15 +128,15 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 self.store,
             )
 
-        self.assertEqual(result["result"]["username"], "XDevelopers")
+        self.assertEqual(result["result"]["zones"][0]["name"], "example.com")
         self.assertEqual(
             captured,
             [
                 {
-                    "input": {"username": "XDevelopers"},
+                    "input": ZONE_INPUT,
                     "secrets": {},
                     "accounts": {
-                        "x": {"type": "oauth2-bearer", "access_token": ACCESS_TOKEN},
+                        "cloudflare": {"type": "oauth2-bearer", "access_token": ACCESS_TOKEN},
                     },
                 }
             ],
@@ -136,7 +153,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
             _patched(
                 _assistant_accounts=self.store,
                 _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.container),
-                _assistant_rpc=lambda *_args, **_kwargs: {"id": "123", "name": ACCESS_TOKEN},
+                _assistant_rpc=lambda *_args, **_kwargs: _zones(ACCESS_TOKEN),
             ),
             self.assertRaises(app.ApiError) as caught,
         ):
@@ -146,8 +163,8 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 ASSISTANT_ID,
                 self.contract,
                 self.container,
-                "public-user-lookup",
-                {"username": "XDevelopers"},
+                "list-zones",
+                ZONE_INPUT,
             )
 
         self.assertEqual(caught.exception.status, app.HTTPStatus.BAD_GATEWAY)
@@ -158,9 +175,9 @@ class HostedOAuthAccountTests(unittest.TestCase):
         challenge_store = app.assistant_account_challenges.AccountChallengeStore()
         requirement = app.assistant_account_challenges.AccountRequirement(
             ASSISTANT_ID,
-            "Shimpz Assistant",
-            ("public-user-lookup",),
-            (("x", "x", SCOPES),),
+            "Shimpz Cloudflare",
+            ("list-zones",),
+            (("cloudflare", "cloudflare", SCOPES),),
         )
         challenge_store.create(TEAM_ID, (requirement,), object())
         without_accounts = replace(
@@ -184,7 +201,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
             powers={
                 power_id: replace(
                     power,
-                    secrets=("lookup-key",) if power_id == "public-user-lookup" else (),
+                    secrets=("lookup-key",) if power_id == "list-zones" else (),
                 )
                 for power_id, power in self.contract.powers.items()
             },
@@ -210,7 +227,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
 
             def rpc(_team_id, _token, _container, _command, _method, _path, payload):
                 rpc_calls.append(payload)
-                return {"id": "123", "name": "X Developers", "username": "XDevelopers"}
+                return _zones()
 
             @contextlib.contextmanager
             def exclusive(_team_id, _lease):
@@ -238,7 +255,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
             ):
                 account_prompt = app._chat_in_turn(
                     TEAM_ID,
-                    "Look up XDevelopers.",
+                    "Look up Cloudflare.",
                     [],
                     (ASSISTANT_ID,),
                     "initial-turn",
@@ -290,9 +307,9 @@ class HostedOAuthAccountTests(unittest.TestCase):
             (
                 app.assistant_account_challenges.AccountRequirement(
                     ASSISTANT_ID,
-                    "Shimpz Assistant",
-                    ("public-user-lookup",),
-                    (("x", "x", SCOPES),),
+                    "Shimpz Cloudflare",
+                    ("list-zones",),
+                    (("cloudflare", "cloudflare", SCOPES),),
                 ),
             ),
             pending,
@@ -306,8 +323,8 @@ class HostedOAuthAccountTests(unittest.TestCase):
             complete=lambda state, code, session, resolver: types.SimpleNamespace(
                 team_id=TEAM_ID,
                 assistant_id=ASSISTANT_ID,
-                account_id="x",
-                provider="x",
+                account_id="cloudflare",
+                provider="cloudflare",
                 scopes=SCOPES,
                 generation=9,
             ),
@@ -358,8 +375,8 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 "connected": True,
                 "team_id": TEAM_ID,
                 "assistant_id": ASSISTANT_ID,
-                "account_id": "x",
-                "provider": "x",
+                "account_id": "cloudflare",
+                "provider": "cloudflare",
                 "scopes": list(SCOPES),
                 "challenge_id": challenge.id,
             },
@@ -384,9 +401,9 @@ class HostedOAuthAccountTests(unittest.TestCase):
             (
                 app.assistant_account_challenges.AccountRequirement(
                     ASSISTANT_ID,
-                    "Shimpz Assistant",
-                    ("public-user-lookup",),
-                    (("x", "x", SCOPES),),
+                    "Shimpz Cloudflare",
+                    ("list-zones",),
+                    (("cloudflare", "cloudflare", SCOPES),),
                 ),
             ),
             object(),

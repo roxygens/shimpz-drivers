@@ -16,10 +16,7 @@ class _Image:
         image_id: str = "sha256:" + "b" * 64,
     ) -> None:
         self.id = image_id
-        self.attrs = {
-            "RepoDigests": repo_digests,
-            "Config": {"Labels": labels},
-        }
+        self.attrs = {"RepoDigests": repo_digests, "Config": {"Labels": labels}}
 
 
 class _Images:
@@ -45,94 +42,51 @@ class _Images:
 
 def _assistant_image(
     *,
-    digest: str = marketplace.SHIMPZ_ASSISTANT_IMAGE,
-    assistant_id: str = "shimpz-assistant",
+    digest: str = marketplace.SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE,
+    assistant_id: str = "shimpz-cloudflare",
     assistant_api: str = "1",
 ) -> _Image:
     return _Image(
         repo_digests=[digest],
-        labels={
-            "org.shimpz.assistant.id": assistant_id,
-            "org.shimpz.assistant.api": assistant_api,
-        },
+        labels={"org.shimpz.assistant.id": assistant_id, "org.shimpz.assistant.api": assistant_api},
     )
 
 
 class MarketplaceImageTests(unittest.TestCase):
-    def test_shimpz_assistant_registry_contract_is_digest_backed_and_resource_free(self) -> None:
-        spec = marketplace.APPS["shimpz-assistant"]
-        self.assertEqual(
-            spec.image,
-            "ghcr.io/theshimpz/shimpz-space@sha256:0bd6ecdf1075df37e0a1b19d58b7d0711beef9b7ccad088222e0c8951c4ad888",
-        )
+    def test_cloudflare_is_the_only_first_party_assistant(self) -> None:
+        self.assertEqual(set(marketplace.APPS), {"notification-center", "shimpz-cloudflare"})
+        spec = marketplace.APPS["shimpz-cloudflare"]
+        self.assertEqual(spec.image, marketplace.SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE)
         self.assertTrue(marketplace.is_digest_image(spec.image))
-        self.assertEqual((spec.port, spec.health_path), (8080, "/health"))
+        self.assertEqual((spec.port, spec.health_path), (8080, "/healthz"))
         self.assertFalse(spec.db)
-        self.assertEqual(spec.allowed_hosts, ("api.mux.com", "api.x.com"))
+        self.assertEqual(spec.allowed_hosts, ("api.cloudflare.com",))
         self.assertTrue(spec.first_party)
         self.assertEqual(
             dict(spec.required_image_labels),
-            {"org.shimpz.assistant.id": "shimpz-assistant", "org.shimpz.assistant.api": "1"},
+            {"org.shimpz.assistant.id": "shimpz-cloudflare", "org.shimpz.assistant.api": "1"},
         )
         self.assertIsNotNone(spec.assistant)
+        assert spec.assistant is not None
+        self.assertEqual(set(spec.assistant.powers), {"list-zones", "list-dns-records"})
+        self.assertEqual(spec.assistant.secrets, {})
+        self.assertEqual(spec.assistant.accounts["cloudflare"].provider, "cloudflare")
         self.assertEqual(
-            set(spec.assistant.powers),
-            {
-                "public-user-lookup",
-                "identity-me",
-                "create-post",
-                "delete-post",
-                "list-direct-uploads",
-                "create-test-direct-upload",
-                "cancel-direct-upload",
-                "verify-mux-webhook",
-            },
+            spec.assistant.accounts["cloudflare"].scopes,
+            ("dns.read", "offline_access", "zone.read"),
         )
-        self.assertEqual(spec.assistant.powers["identity-me"].path, "/v1/powers/identity-me")
-        self.assertEqual(
-            set(spec.assistant.secrets),
-            {"mux-token-id", "mux-token-secret", "mux-webhook-signing-secret"},
-        )
-        self.assertEqual(spec.assistant.accounts["x"].provider, "x")
-        self.assertEqual(
-            spec.assistant.accounts["x"].scopes,
-            ("offline.access", "tweet.read", "tweet.write", "users.read"),
-        )
-        x_powers = {"public-user-lookup", "identity-me", "create-post", "delete-post"}
-        mux_api_powers = {"list-direct-uploads", "create-test-direct-upload", "cancel-direct-upload"}
-        for power_id, power in spec.assistant.powers.items():
-            self.assertEqual(power.accounts, ("x",) if power_id in x_powers else ())
-            self.assertEqual(
-                power.secrets,
-                ("mux-token-id", "mux-token-secret")
-                if power_id in mux_api_powers
-                else ("mux-webhook-signing-secret",)
-                if power_id == "verify-mux-webhook"
-                else (),
-            )
-
-    def test_x_powers_expose_closed_runtime_schemas_and_explicit_approval(self) -> None:
-        powers = marketplace.APPS["shimpz-assistant"].assistant.powers
-
-        approved = {"create-post", "delete-post", "create-test-direct-upload", "cancel-direct-upload"}
-        for power_id, power in powers.items():
-            self.assertEqual(power.approval, "each-run" if power_id in approved else "none")
-            self.assertEqual(power.input_schema["type"], "object")
-            self.assertFalse(power.input_schema["additionalProperties"])
-            self.assertFalse(power.output_schema["additionalProperties"])
+        self.assertTrue(all(power.accounts == ("cloudflare",) for power in spec.assistant.powers.values()))
+        self.assertTrue(all(power.approval == "none" for power in spec.assistant.powers.values()))
 
     def test_missing_digest_is_pulled_by_the_exact_registry_reference_then_rechecked(self) -> None:
-        spec = marketplace.APPS["shimpz-assistant"]
+        spec = marketplace.APPS["shimpz-cloudflare"]
         images = _Images(_assistant_image(), missing_once=True)
-
-        image_id = marketplace_image.ensure_digest_artifact(images, spec)
-
-        self.assertEqual(image_id, "sha256:" + "b" * 64)
+        self.assertEqual(marketplace_image.ensure_digest_artifact(images, spec), "sha256:" + "b" * 64)
         self.assertEqual(images.gets, [spec.image, spec.image])
         self.assertEqual(images.pulls, [spec.image])
 
     def test_digest_or_assistant_label_mismatch_is_refused_without_a_pull(self) -> None:
-        spec = marketplace.APPS["shimpz-assistant"]
+        spec = marketplace.APPS["shimpz-cloudflare"]
         mismatches = (
             _assistant_image(digest="ghcr.io/theshimpz/shimpz-space@sha256:" + "c" * 64),
             _assistant_image(assistant_id="other-assistant"),
@@ -154,29 +108,17 @@ class MarketplaceImageTests(unittest.TestCase):
         self.assertEqual(images.gets, [])
         self.assertEqual(images.pulls, [])
 
-    def test_shimpz_assistant_power_input_and_output_contracts_are_closed(self) -> None:
-        self.assertEqual(
-            marketplace.validate_power_input("shimpz-assistant", "public-user-lookup", {"username": "XDevelopers"}),
-            {"username": "XDevelopers"},
-        )
-        self.assertEqual(
-            marketplace.validate_power_input(
-                "shimpz-assistant",
-                "create-post",
-                {"text": "Hello from Shimpz"},
-            ),
-            {"text": "Hello from Shimpz"},
-        )
-        current = {"id": "2244994945", "name": "X Developers", "username": "XDevelopers"}
-        self.assertEqual(
-            marketplace.validate_power_output("shimpz-assistant", "identity-me", current),
-            current,
-        )
-        for payload in ({"username": 12}, {"username": "bad-name"}, {"username": "XDevelopers", "shell": "id"}, []):
+    def test_cloudflare_power_input_and_output_contracts_are_closed(self) -> None:
+        request = {"page": 1, "per_page": 25}
+        self.assertEqual(marketplace.validate_power_input("shimpz-cloudflare", "list-zones", request), request)
+        zones = {
+            "zones": [],
+            "pagination": {"page": 1, "per_page": 25, "count": 0, "total_count": 0, "total_pages": 0},
+        }
+        self.assertEqual(marketplace.validate_power_output("shimpz-cloudflare", "list-zones", zones), zones)
+        for payload in ({"page": 1, "per_page": 25, "shell": "id"}, {"page": 0, "per_page": 25}, []):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
-                marketplace.validate_power_input("shimpz-assistant", "public-user-lookup", payload)
-        with self.assertRaises(ValueError):
-            marketplace.validate_power_output("shimpz-assistant", "identity-me", current | {"path": "/host/x"})
+                marketplace.validate_power_input("shimpz-cloudflare", "list-zones", payload)
 
 
 if __name__ == "__main__":

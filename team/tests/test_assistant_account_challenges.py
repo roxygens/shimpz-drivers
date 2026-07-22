@@ -8,9 +8,9 @@ import assistant_account_challenges
 
 def requirement() -> assistant_account_challenges.AccountRequirement:
     return assistant_account_challenges.AccountRequirement(
-        assistant_id="shimpz-assistant",
-        assistant_name="Shimpz Assistant",
-        power_ids=("create-post", "identity-me"),
+        assistant_id="shimpz-cloudflare",
+        assistant_name="Shimpz Cloudflare",
+        power_ids=("protected-action", "read-profile"),
         accounts=(
             (
                 "x",
