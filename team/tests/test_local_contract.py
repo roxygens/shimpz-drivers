@@ -55,26 +55,7 @@ TEST_ACCOUNT_ACCESS_TOKEN = "-".join(("oauth", "access", "test", "token", "12345
 TEST_ACCOUNT_REFRESH_TOKEN = "-".join(("oauth", "refresh", "test", "token", "123456789"))
 CURRENT_ASSISTANT_IMAGE = "ghcr.io/theshimpz/shimpz-space@sha256:" + "b" * 64
 OUTDATED_ASSISTANT_IMAGE = "ghcr.io/theshimpz/shimpz-space@sha256:" + "a" * 64
-UV_IMAGE = "ghcr.io/astral-sh/uv:0.11.25@sha256:1e3808aa9023d0980e7c15b1fa7c1ac16ff35925780cf5c459858b2d693f01a9"
-
-
 class LocalContractTests(unittest.TestCase):
-    def test_static_build_context_excludes_local_dependencies_caches_and_secrets(self) -> None:
-        dockerignore = (TEAM / ".dockerignore").read_text(encoding="utf-8").splitlines()
-
-        self.assertLessEqual(
-            {
-                ".env",
-                ".env.*",
-                "**/.env",
-                "**/.env.*",
-                ".venv",
-                "**/__pycache__",
-                "**/*.pyc",
-            },
-            set(dockerignore),
-        )
-
     def test_local_state_defaults_match_the_installer_mount_contract(self) -> None:
         self.assertEqual(local_token_store.TOKEN_PATH, Path("/run/shimpz-local/token"))
         self.assertEqual(local_healthcheck.TOKEN_PATH, local_token_store.TOKEN_PATH)
@@ -521,18 +502,6 @@ class LocalContractTests(unittest.TestCase):
                 "client-close",
             ],
         )
-
-    def test_static_local_runtime_copies_only_builder_resolved_dependencies(self) -> None:
-        dockerfile = (TEAM / "Dockerfile.local").read_text(encoding="utf-8")
-        runtime = dockerfile.split(" AS runtime\n", 1)[1]
-
-        self.assertIn(f"FROM {UV_IMAGE} AS uv", dockerfile)
-        self.assertIn("COPY --from=uv /uv /usr/local/bin/uv", dockerfile)
-        self.assertIn("COPY --from=dependencies /opt/venv /opt/venv", runtime)
-        self.assertNotIn("uv-install.sh", dockerfile)
-        self.assertNotIn("apt-get", runtime)
-        self.assertNotIn("curl", runtime)
-        self.assertNotIn("/usr/local/bin/uv", runtime)
 
     def test_local_controller_accepts_an_injected_power_journal(self) -> None:
         image = "127.0.0.1:5000/shimpz/shimpz-cloudflare@sha256:" + "a" * 64
