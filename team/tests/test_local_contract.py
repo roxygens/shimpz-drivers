@@ -1546,6 +1546,9 @@ class LocalContractTests(unittest.TestCase):
         controller.approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
         controller.approval_grants = SimpleNamespace(revoke_team=lambda _team_id: 0)
         controller.assistant_secrets = SimpleNamespace(delete_team=lambda _team_id: False)
+        controller.assistant_accounts = SimpleNamespace(
+            delete_team=lambda team_id: events.append(("accounts-delete", team_id))
+        )
         controller._active_chat_guard = threading.Lock()
         controller._active_chat_tokens = {"team_1": "turn-token"}
         controller._cancelled_chat_tokens = set()
@@ -1617,6 +1620,7 @@ class LocalContractTests(unittest.TestCase):
                 "storage-destroy",
                 "inference-delete",
                 "network-remove",
+                ("accounts-delete", "team_1"),
                 "lifecycle-release",
                 "chat-release",
             ],
@@ -1650,6 +1654,7 @@ class LocalContractTests(unittest.TestCase):
         )
         controller._validate_network = lambda _network, team_id: events.append(("validate-network", team_id))
         controller._delete_all_secret_state = lambda: events.append("delete-secrets")
+        controller._delete_all_account_state = lambda: events.append("delete-accounts")
         controller._revoke_all_approval_grants = lambda: events.append("revoke-approvals")
         controller._remove_egress_policy = lambda team_id, assistant_id: events.append(
             ("remove-policy", team_id, assistant_id)
@@ -1665,6 +1670,7 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(result["assistants_removed"], 0)
         self.assertEqual(result["teams_removed"], 1)
         self.assertIn(("remove-policy", "team_1", "shimpz-cloudflare"), events)
+        self.assertLess(events.index("delete-accounts"), events.index("network-remove"))
 
     def test_destroy_brain_failure_is_redacted_and_mutates_nothing(self) -> None:
         events: list[str] = []
@@ -2259,6 +2265,19 @@ class LocalContractTests(unittest.TestCase):
 
     def test_install_replaces_an_outdated_release_after_current_contract_admission(self) -> None:
         controller, container, events = self._lifecycle_controller()
+        controller.assistant_accounts.put(
+            "team_1",
+            "shimpz-cloudflare",
+            "obsolete-account",
+            "cloudflare",
+            ("zone.read",),
+            SimpleNamespace(
+                access_token=TEST_ACCOUNT_ACCESS_TOKEN,
+                refresh_token=TEST_ACCOUNT_REFRESH_TOKEN,
+                scopes=("zone.read",),
+                expires_in=3600,
+            ),
+        )
         trusted_image = object()
         controller._trusted_image = lambda _spec: events.append("trusted") or trusted_image
         controller._create_assistant_container = lambda _team_id, _spec, _network, image: events.append(
@@ -2270,6 +2289,7 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(result, {"assistant": "shimpz-cloudflare", "installed": False})
         self.assertEqual(events, ["reload", "trusted", "reload", ("remove", True), ("create", trusted_image)])
         self.assertEqual(container.attrs["Config"]["Image"], OUTDATED_ASSISTANT_IMAGE)
+        self.assertFalse(controller.assistant_accounts.delete_assistant("team_1", "shimpz-cloudflare"))
 
     def test_release_update_is_generic_for_future_assistants(self) -> None:
         controller, container, events = self._lifecycle_controller()
@@ -2564,11 +2584,25 @@ class LocalContractTests(unittest.TestCase):
 
     def test_uninstall_removes_an_outdated_release_after_current_contract_admission(self) -> None:
         controller, _container, events = self._lifecycle_controller()
+        controller.assistant_accounts.put(
+            "team_1",
+            "shimpz-cloudflare",
+            "cloudflare",
+            "cloudflare",
+            ("zone.read",),
+            SimpleNamespace(
+                access_token=TEST_ACCOUNT_ACCESS_TOKEN,
+                refresh_token=TEST_ACCOUNT_REFRESH_TOKEN,
+                scopes=("zone.read",),
+                expires_in=3600,
+            ),
+        )
 
         result = controller.uninstall_assistant("team_1", "shimpz-cloudflare")
 
         self.assertEqual(result, {"assistant": "shimpz-cloudflare", "uninstalled": True})
         self.assertEqual(events, ["reload", ("remove", True)])
+        self.assertFalse(controller.assistant_accounts.delete_assistant("team_1", "shimpz-cloudflare"))
 
     def test_install_rejects_security_drift_without_resolving_or_removing(self) -> None:
         controller, container, events = self._lifecycle_controller()

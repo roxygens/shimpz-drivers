@@ -1479,6 +1479,44 @@ class LocalController:
             self._raise_secret_problem(exc)
 
     @staticmethod
+    def _raise_account_problem(exc: oauth_account_store.OAuthAccountStoreError) -> None:
+        raise ApiProblem(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Assistant account state is unavailable",
+            code="assistant-account-state-unavailable",
+        ) from exc
+
+    def _delete_assistant_account_state(self, team_id: str, assistant_id: str) -> None:
+        try:
+            self.assistant_accounts.delete_assistant(team_id, assistant_id)
+        except oauth_account_store.OAuthAccountStoreError as exc:
+            self._raise_account_problem(exc)
+
+    def _delete_team_account_state(self, team_id: str) -> None:
+        try:
+            self.assistant_accounts.delete_team(team_id)
+        except oauth_account_store.OAuthAccountStoreError as exc:
+            self._raise_account_problem(exc)
+
+    def _delete_all_account_state(self) -> None:
+        try:
+            self.assistant_accounts.delete_all()
+        except oauth_account_store.OAuthAccountStoreError as exc:
+            self._raise_account_problem(exc)
+
+    def _retain_declared_assistant_account_state(self, team_id: str, spec: AssistantSpec) -> None:
+        try:
+            pruned = self.assistant_accounts.retain_declared(
+                team_id,
+                spec.assistant_id,
+                tuple(sorted(spec.accounts)),
+            )
+        except oauth_account_store.OAuthAccountStoreError as exc:
+            self._raise_account_problem(exc)
+        if pruned:
+            self.account_challenges.cancel_team(team_id)
+
+    @staticmethod
     def _raise_approval_grant_problem(exc: assistant_approval_grants.ApprovalGrantError) -> None:
         raise ApiProblem(
             HTTPStatus.SERVICE_UNAVAILABLE,
@@ -3404,6 +3442,7 @@ class LocalController:
                 "the installed Assistant changed during update",
                 code="assistant-update-conflict",
             )
+        self._retain_declared_assistant_account_state(team_id, spec)
         remaining_egress = (
             self._team_has_egress_assistant(team_id, excluding=spec.assistant_id) if spec.allowed_hosts else None
         )
@@ -3485,6 +3524,7 @@ class LocalController:
                         remaining_egress=remaining_egress,
                     )
                 self._delete_assistant_secret_state(team_id, assistant_id)
+                self._delete_assistant_account_state(team_id, assistant_id)
                 return {"assistant": assistant_id, "uninstalled": False}
             self._validate_container_security(container, team_id, spec, network.name)
             remaining_egress = (
@@ -3509,6 +3549,7 @@ class LocalController:
                     remaining_egress=remaining_egress,
                 )
             self._delete_assistant_secret_state(team_id, assistant_id)
+            self._delete_assistant_account_state(team_id, assistant_id)
             return {"assistant": assistant_id, "uninstalled": True}
 
     def assistant_help(self, team_id: str, assistant_id: str, locale: str = "en") -> dict[str, str]:
@@ -3744,6 +3785,7 @@ class LocalController:
                     except inference_config.InferenceConfigError as exc:
                         self._raise_inference_problem(exc)
                     self._delete_team_secret_state(team_id)
+                    self._delete_team_account_state(team_id)
                     return {
                         "team_id": team_id,
                         "destroyed": False,
@@ -3768,6 +3810,7 @@ class LocalController:
                         code="docker-remove-failed",
                     ) from exc
                 self._delete_team_secret_state(team_id)
+                self._delete_team_account_state(team_id)
                 return {
                     "team_id": team_id,
                     "destroyed": True,
@@ -3851,6 +3894,7 @@ class LocalController:
                     (team_id, assistant_id) for team_id in owned_team_ids for assistant_id in self.registry
                 )
                 self._delete_all_secret_state()
+                self._delete_all_account_state()
                 self._revoke_all_approval_grants()
                 for container in containers:
                     container.remove(force=True)

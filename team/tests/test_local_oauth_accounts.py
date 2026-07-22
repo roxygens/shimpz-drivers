@@ -24,6 +24,9 @@ import oauth_account_service
 import oauth_account_store
 import oauth_broker_client
 
+TEST_ACCESS_TOKEN = "oauth-access-test-token-123456789"
+TEST_REFRESH_TOKEN = "oauth-refresh-test-token-123456789"
+
 
 class LocalOAuthAccountTests(unittest.TestCase):
     @staticmethod
@@ -65,6 +68,36 @@ class LocalOAuthAccountTests(unittest.TestCase):
 
         self.assertIs(controller.assistant_accounts, injected_store)
         self.assertIs(controller.account_challenges, injected_challenges)
+
+    def test_team_account_teardown_prevents_same_id_resurrection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = object.__new__(local_app.LocalController)
+            controller.assistant_accounts = oauth_account_store.OAuthAccountStore(
+                Path(directory) / "state" / "accounts.json",
+                Path(directory) / "key" / "aes256.key",
+            )
+            controller.assistant_accounts.put(
+                "team_1",
+                "shimpz-cloudflare",
+                "cloudflare",
+                "cloudflare",
+                ("zone.read",),
+                SimpleNamespace(
+                    access_token=TEST_ACCESS_TOKEN,
+                    refresh_token=TEST_REFRESH_TOKEN,
+                    scopes=("zone.read",),
+                    expires_in=3600,
+                ),
+            )
+
+            controller._delete_team_account_state("team_1")
+            recreated = controller.assistant_accounts.metadata(
+                "team_1",
+                "shimpz-cloudflare",
+                {"cloudflare": {"provider": "cloudflare", "scopes": ("zone.read",)}},
+            )
+
+        self.assertEqual(recreated[0].status, "missing")
 
     def test_account_inventory_is_exact_and_never_contains_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
