@@ -18,8 +18,7 @@ def validate_payload(payload: object) -> dict[str, str]:
     except UnicodeError as exc:
         raise ValueError("Assistant Help returned an invalid result") from exc
     if len(encoded) > MAX_HELP_BYTES or any(
-        (ord(character) < 32 and character not in "\n\t") or 127 <= ord(character) <= 159
-        for character in markdown
+        (ord(character) < 32 and character not in "\n\t") or 127 <= ord(character) <= 159 for character in markdown
     ):
         raise ValueError("Assistant Help returned an invalid result")
     return {"markdown": markdown}
