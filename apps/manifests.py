@@ -43,8 +43,9 @@ APP_LOG_CONFIG = docker.types.LogConfig(
     config={
         "fluentd-address": "127.0.0.1:24224",
         "fluentd-async": "true",
-        "fluentd-buffer-limit": "1048576",
-        "tag": "app.{{.Name}}",
+        "fluentd-buffer-limit": "4096",
+        "labels": "shimpz.app",
+        "tag": "shimpz.app",
     },
 )
 
