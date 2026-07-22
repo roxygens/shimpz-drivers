@@ -19,6 +19,7 @@ class TeamDriverImageContractTests(unittest.TestCase):
             "assistant_secret_store.py",
             "assistant_account_challenges.py",
             "assistant_account_flow.py",
+            "cloudflare_assistant_contract.py",
             "oauth_account_store.py",
             "oauth_account_service.py",
             "oauth_http_client.py",
