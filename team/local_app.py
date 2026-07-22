@@ -603,7 +603,11 @@ class LocalController:
         self.account_challenges = account_challenges or assistant_account_challenges.AccountChallengeStore()
         self.oauth_pkce = oauth_pkce or oauth_pkce_challenges.OAuthPKCEChallengeStore()
         self.oauth_broker = oauth_broker or oauth_broker_client.OAuthBrokerClient(
-            callback_mode=os.environ.get("SHIMPZ_OAUTH_CALLBACK_MODE", "loopback")
+            transport=oauth_broker_client.FixedBrokerTransport(
+                proxy_host=os.environ.get("SHIMPZ_OAUTH_BROKER_PROXY_HOST"),
+                proxy_token=os.environ.get("SHIMPZ_OAUTH_BROKER_PROXY_TOKEN"),
+            ),
+            callback_mode=os.environ.get("SHIMPZ_OAUTH_CALLBACK_MODE", "loopback"),
         )
         self.oauth_service = oauth_service or oauth_account_service.BrokeredOAuthAccountService(
             challenge=self.oauth_pkce,

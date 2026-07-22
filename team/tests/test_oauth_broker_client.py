@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 import oauth_broker_client
@@ -79,6 +80,50 @@ class OAuthBrokerClientTests(unittest.TestCase):
         self.assertEqual(parse_qs(urlsplit(url).query)["callback"], ["canary"])
         with self.assertRaises(oauth_broker_client.OAuthBrokerClientError):
             oauth_broker_client.OAuthBrokerClient(self.transport, callback_mode="https://evil.example")
+
+    def test_fixed_transport_uses_only_the_authenticated_broker_proxy(self) -> None:
+        response = Mock(
+            status=200,
+            read=Mock(return_value=b'{}'),
+            getheader=Mock(
+                side_effect=lambda name, default=None: "application/json" if name == "Content-Type" else default
+            ),
+        )
+        connection = Mock(getresponse=Mock(return_value=response))
+        token = "a" * 64
+        with patch.object(oauth_broker_client.http.client, "HTTPSConnection", return_value=connection) as connect:
+            transport = oauth_broker_client.FixedBrokerTransport(
+                proxy_host="oauth-broker-proxy",
+                proxy_token=token,
+            )
+            result = transport.request(
+                url="https://shimpz.com/api/oauth/cloudflare/claim",
+                headers={"Content-Type": "application/json"},
+                body=b"{}",
+            )
+
+        self.assertEqual(result.status, 200)
+        connect.assert_called_once_with("oauth-broker-proxy", 8889, timeout=10)
+        tunnel = connection.set_tunnel.call_args
+        self.assertEqual(tunnel.args, ("shimpz.com", 443))
+        self.assertRegex(tunnel.kwargs["headers"]["Proxy-Authorization"], r"^Basic [A-Za-z0-9+/]+=*$")
+        connection.request.assert_called_once_with(
+            "POST",
+            "/api/oauth/cloudflare/claim",
+            body=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+
+    def test_fixed_transport_rejects_partial_or_foreign_proxy_configuration(self) -> None:
+        invalid = (
+            {"proxy_host": "oauth-broker-proxy"},
+            {"proxy_token": "a" * 64},
+            {"proxy_host": "evil.example", "proxy_token": "a" * 64},
+            {"proxy_host": "oauth-broker-proxy", "proxy_token": "short"},
+        )
+        for values in invalid:
+            with self.subTest(values=set(values)), self.assertRaises(oauth_broker_client.OAuthBrokerClientError):
+                oauth_broker_client.FixedBrokerTransport(**values)
 
     def test_claim_refresh_and_revoke_use_only_fixed_broker_operations(self) -> None:
         claimed = self.client.claim(

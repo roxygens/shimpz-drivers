@@ -120,6 +120,8 @@ class LocalOAuthAccountTests(unittest.TestCase):
         source = (TEAM / "local_app.py").read_text(encoding="utf-8")
         self.assertIn("BrokeredOAuthAccountService", source)
         self.assertIn("OAuthBrokerClient", source)
+        self.assertIn("SHIMPZ_OAUTH_BROKER_PROXY_HOST", source)
+        self.assertIn("SHIMPZ_OAUTH_BROKER_PROXY_TOKEN", source)
         self.assertNotIn("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_ID", source)
         self.assertNotIn("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_SECRET", source)
 

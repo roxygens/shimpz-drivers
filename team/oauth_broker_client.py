@@ -10,6 +10,7 @@ from __future__ import annotations
 import http.client
 import json
 import re
+from base64 import b64encode
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -27,6 +28,9 @@ HTTP_TIMEOUT_SECONDS = 10
 _BINDING = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _CLAIM = re.compile(r"[0-9a-f]{64}\Z")
 _LEASE = re.compile(r"l1\.\d{10}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}\Z")
+_PROXY_HOST = "oauth-broker-proxy"
+_PROXY_TOKEN = re.compile(r"[0-9a-f]{64}\Z")
+_PROXY_PORT = 8889
 
 
 class OAuthBrokerClientError(RuntimeError):
@@ -53,6 +57,18 @@ class BrokerTransport(Protocol):
 class FixedBrokerTransport:
     """POST only to one reviewed shimpz.com broker operation."""
 
+    def __init__(self, *, proxy_host: object = None, proxy_token: object = None) -> None:
+        if proxy_host is None and proxy_token is None:
+            self._proxy: tuple[str, str] | None = None
+        elif (
+            proxy_host == _PROXY_HOST
+            and isinstance(proxy_token, str)
+            and _PROXY_TOKEN.fullmatch(proxy_token) is not None
+        ):
+            self._proxy = (_PROXY_HOST, proxy_token)
+        else:
+            raise OAuthBrokerClientError("OAuth broker proxy configuration is invalid")
+
     def request(
         self,
         *,
@@ -77,7 +93,17 @@ class FixedBrokerTransport:
             }
         ):
             raise OAuthBrokerClientError("OAuth broker endpoint is invalid")
-        connection = http.client.HTTPSConnection(parsed.hostname, timeout=HTTP_TIMEOUT_SECONDS)
+        if self._proxy is None:
+            connection = http.client.HTTPSConnection(parsed.hostname, timeout=HTTP_TIMEOUT_SECONDS)
+        else:
+            proxy_host, proxy_token = self._proxy
+            connection = http.client.HTTPSConnection(proxy_host, _PROXY_PORT, timeout=HTTP_TIMEOUT_SECONDS)
+            proxy_authorization = b64encode(f"{proxy_token}:".encode("ascii")).decode("ascii")
+            connection.set_tunnel(
+                parsed.hostname,
+                443,
+                headers={"Proxy-Authorization": f"Basic {proxy_authorization}"},
+            )
         try:
             connection.request("POST", parsed.path, body=body, headers=dict(headers))
             response = connection.getresponse()
