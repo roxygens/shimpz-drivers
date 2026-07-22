@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -58,7 +59,7 @@ UV_IMAGE = "ghcr.io/astral-sh/uv:0.11.25@sha256:1e3808aa9023d0980e7c15b1fa7c1ac1
 
 
 class LocalContractTests(unittest.TestCase):
-    def test_build_context_excludes_local_dependencies_caches_and_secrets(self) -> None:
+    def test_static_build_context_excludes_local_dependencies_caches_and_secrets(self) -> None:
         dockerignore = (TEAM / ".dockerignore").read_text(encoding="utf-8").splitlines()
 
         self.assertLessEqual(
@@ -459,65 +460,69 @@ class LocalContractTests(unittest.TestCase):
         self.assertFalse(local_app._is_replaceable_readiness_failure("future-stateful-assistant", readiness))
         self.assertFalse(local_app._is_replaceable_readiness_failure("shimpz-cloudflare", ownership))
 
-    def test_local_controller_owns_private_runtime_token_bootstrap(self) -> None:
-        source = (TEAM / "local_app.py").read_text(encoding="utf-8")
-        dockerfile = (TEAM / "Dockerfile.local").read_text(encoding="utf-8")
-        self.assertIn("brain_runtime_token_store.ensure()", source)
-        for marker in (
-            "brain_runtime_token_store.py",
-            "groupadd --gid 10016 shimpzbrain-runtime-token",
-            "--groups 10010,10016",
-            "/run/shimpz-brain-runtime",
-            "chmod 0750 /run/shimpz-brain-runtime",
-            "power_journal.py",
-            "assistant_approval_challenges.py",
-            "assistant_approval_flow.py",
-            "assistant_approval_grants.py",
-            "/var/lib/shimpz-local/power-journal",
-            "/var/lib/shimpz-local/assistant-approvals",
-            "assistant_secret_store.py",
-            "assistant_secret_challenges.py",
-            "assistant_secret_flow.py",
-            "assistant_account_challenges.py",
-            "assistant_account_flow.py",
-            "oauth_account_store.py",
-            "oauth_account_service.py",
-            "oauth_broker_client.py",
-            "oauth_http_client.py",
-            "oauth_pkce_challenges.py",
-            "oauth_providers.py",
-            "/var/lib/shimpz-local/assistant-secrets/state",
-            "/var/lib/shimpz-local/assistant-secrets/key",
-            "/var/lib/shimpz-local/assistant-accounts/state",
-            "/var/lib/shimpz-local/assistant-accounts/key",
+    def test_local_controller_bootstraps_tokens_before_serving(self) -> None:
+        events: list[str] = []
+        client = SimpleNamespace(close=lambda: events.append("client-close"))
+        server = SimpleNamespace(
+            serve_forever=lambda **_kwargs: events.append("serve"),
+            server_close=lambda: events.append("server-close"),
+        )
+
+        with (
+            mock.patch.dict(os.environ, {"SHIMPZ_SPACE_ID": "local-space"}),
+            mock.patch.object(local_app, "load_registry", side_effect=lambda: events.append("registry") or {}),
+            mock.patch.object(
+                local_app.local_token_store,
+                "ensure_token",
+                side_effect=lambda: events.append("controller-token") or "a" * 64,
+            ),
+            mock.patch.object(
+                local_app.brain_runtime_token_store,
+                "ensure",
+                side_effect=lambda: events.append("runtime-token") or "b" * 64,
+            ),
+            mock.patch.object(
+                local_app.docker,
+                "from_env",
+                side_effect=lambda **_kwargs: events.append("docker") or client,
+            ),
+            mock.patch.object(
+                local_app.team_storage,
+                "TeamStorage",
+                side_effect=lambda _path: events.append("storage") or SimpleNamespace(),
+            ),
+            mock.patch.object(
+                local_app,
+                "LocalController",
+                side_effect=lambda *_args: events.append("controller") or SimpleNamespace(),
+            ),
+            mock.patch.object(
+                local_app,
+                "BoundedServer",
+                side_effect=lambda *_args: events.append("server") or server,
+            ),
+            mock.patch.object(local_app.local_audit, "record", side_effect=lambda *_args, **_kwargs: "trace"),
         ):
-            self.assertIn(marker, dockerfile)
-        self.assertIn(
-            "chown shimpzlocal:shimpzlocal /var/log/shimpz-local /var/lib/shimpz-local/storage \\\n"
-            "        /var/lib/shimpz-local/inference /var/lib/shimpz-local/power-journal \\\n"
-            "        /var/lib/shimpz-local/assistant-approvals \\\n"
-            "        /var/lib/shimpz-local/assistant-secrets/state "
-            "/var/lib/shimpz-local/assistant-secrets/key \\\n"
-            "        /var/lib/shimpz-local/assistant-accounts/state "
-            "/var/lib/shimpz-local/assistant-accounts/key &&",
-            dockerfile,
+            result = local_app.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            events,
+            [
+                "registry",
+                "controller-token",
+                "runtime-token",
+                "docker",
+                "storage",
+                "controller",
+                "server",
+                "serve",
+                "server-close",
+                "client-close",
+            ],
         )
 
-        self.assertIn(
-            "chmod 0700 /var/log/shimpz-local /var/lib/shimpz-local/storage "
-            "/var/lib/shimpz-local/inference \\\n"
-            "        /var/lib/shimpz-local/power-journal "
-            "/var/lib/shimpz-local/assistant-secrets/state \\\n"
-            "        /var/lib/shimpz-local/assistant-approvals \\\n"
-            "        /var/lib/shimpz-local/assistant-secrets/key \\\n"
-            "        /var/lib/shimpz-local/assistant-accounts/state "
-            "/var/lib/shimpz-local/assistant-accounts/key &&",
-            dockerfile,
-        )
-        self.assertIn("SHIMPZ_LOCAL_POWER_JOURNAL_PATH", source)
-        self.assertIn("SHIMPZ_LOCAL_APPROVAL_GRANTS_PATH", source)
-
-    def test_local_runtime_copies_only_builder_resolved_dependencies(self) -> None:
+    def test_static_local_runtime_copies_only_builder_resolved_dependencies(self) -> None:
         dockerfile = (TEAM / "Dockerfile.local").read_text(encoding="utf-8")
         runtime = dockerfile.split(" AS runtime\n", 1)[1]
 

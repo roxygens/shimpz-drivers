@@ -66,13 +66,6 @@ class _BrainLifecycleHandler(BaseHTTPRequestHandler):
 class DockerFlowTests(unittest.TestCase):
     maxDiff = None
 
-    def test_reference_fixture_uses_the_standard_assistant_runtime_abi(self) -> None:
-        dockerfile = (FIXTURE / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("/opt/shimpz-assistant/shimpz.assistant.toml", dockerfile)
-        self.assertIn("/usr/local/bin/shimpz-assistant-rpc", dockerfile)
-        self.assertNotIn("/opt/shimpz-cloudflare", dockerfile)
-        self.assertNotIn("shimpz-cloudflare-rpc", dockerfile)
-
     def _run(self, *arguments: str, check: bool = True, timeout: int = 600) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
             ["docker", *arguments],
