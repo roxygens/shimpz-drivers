@@ -69,15 +69,15 @@ class OAuthBrokerClientTests(unittest.TestCase):
         self.assertNotIn("client", url)
         self.assertEqual(self.transport.requests, [])
 
-    def test_canary_callback_mode_is_named_and_closed(self) -> None:
-        client = oauth_broker_client.OAuthBrokerClient(self.transport, callback_mode="canary")
+    def test_hosted_callback_mode_is_named_and_closed(self) -> None:
+        client = oauth_broker_client.OAuthBrokerClient(self.transport, callback_mode="hosted")
         url = client.authorization_url(
             provider_id="cloudflare",
             state=STATE,
             code_challenge=CHALLENGE,
             scopes=SCOPES,
         )
-        self.assertEqual(parse_qs(urlsplit(url).query)["callback"], ["canary"])
+        self.assertEqual(parse_qs(urlsplit(url).query)["callback"], ["hosted"])
         with self.assertRaises(oauth_broker_client.OAuthBrokerClientError):
             oauth_broker_client.OAuthBrokerClient(self.transport, callback_mode="https://evil.example")
 
