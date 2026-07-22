@@ -46,11 +46,9 @@ WORKSPACE_PROJECTS_ROOT = Path(os.environ.get("SHIMPZ_WORKSPACE_PROJECTS_ROOT", 
 LISTEN_PORT = int(os.environ.get("SHIMPZ_DRIVER_PORT", "7070"))
 
 # Per-app network isolation: shimpz-caddy is connected to EVERY app's own network (it's the only
-# thing that needs to reach every app); postgres/redpanda are connected ONLY when the app's OWN
-# declared env needs them, so an app that doesn't use the bus can't even resolve `redpanda`.
+# thing that needs to reach every app); PostgreSQL is connected only when the app declares a database.
 CADDY_CONTAINER = os.environ.get("SHIMPZ_CADDY_CONTAINER", "shimpz-caddy")
 POSTGRES_CONTAINER = os.environ.get("SHIMPZ_POSTGRES_CONTAINER", "shimpz-postgres")
-REDPANDA_CONTAINER = os.environ.get("SHIMPZ_REDPANDA_CONTAINER", "shimpz-redpanda")
 
 # Shimpz L2 is a mandatory invariant, not a feature toggle. Missing means the secure default; any
 # explicit value other than the exact string "1" aborts startup before the Docker client is used.
@@ -74,7 +72,7 @@ CANDIDATE_SUFFIX = "__candidate"
 RETIRING_SUFFIX = "__retiring"
 # 40×1.5s ≈ 60s window: an app container cold-starts with a full `uv sync` into its tmpfs venv
 # (every candidate downloads its deps — nothing is cached across containers on purpose), and a
-# heavier dep set (e.g. vendored shimpzbus pulling confluent-kafka/faststream) takes 20-40s before
+# heavier dependency sets can take 20-40s before
 # uvicorn can answer. 10×1.5s ≈ 15s lost that race and rolled back a HEALTHY build. Both waiters
 # exit EARLY on success or a definitive crash (exited/restarting), so the wider window only costs
 # time on a genuinely slow start — never on a healthy or a crashed candidate.
@@ -262,11 +260,9 @@ def _write_egress_policy(token: str, egress: list[str]) -> None:
 def _no_proxy_for(req: validate.DeployRequest) -> str:
     """Hosts the app reaches DIRECTLY, never via the egress proxy.
 
-    The internal datastores, shimpz-caddy, and each declared call target's container — external HTTPS goes
-    through the proxy; these stay in-cluster.
+    PostgreSQL and shimpz-caddy stay in-cluster; external HTTPS goes through the proxy.
     """
-    hosts = ["localhost", "127.0.0.1", "postgres", "redpanda", POSTGRES_CONTAINER, REDPANDA_CONTAINER, CADDY_CONTAINER]
-    hosts += [manifests.container_name(c) for c in req.calls]
+    hosts = ["localhost", "127.0.0.1", "postgres", POSTGRES_CONTAINER, CADDY_CONTAINER]
     return ",".join(hosts)
 
 
@@ -296,8 +292,7 @@ def _safe_connect(network, container_name: str, *, aliases: list[str] | None = N
 
     `aliases` matters: compose auto-aliases services to their names on `edge`, but this network is
     created via the raw Docker API, so that alias does NOT carry over — without it apps could only
-    resolve `shimpz-postgres`, while every project's DATABASE_URL/SHIMPZ_BUS_BROKERS is written against
-    "postgres"/"redpanda".
+    resolve `shimpz-postgres`, while every project's DATABASE_URL is written against "postgres".
     """
     try:
         container = _docker.containers.get(container_name)
@@ -323,7 +318,7 @@ def _wire_network_deps(network, req: validate.DeployRequest) -> None:
     """Connect ONLY what this specific app actually declared it needs.
 
     shimpz-caddy is the one exception — every app must be reachable via Caddy, always, so it's
-    ALWAYS required. postgres/redpanda are connected (and, once declared, EQUALLY required) ONLY
+    ALWAYS required. PostgreSQL is connected (and, once declared, equally required) only
     when the app's own env says it uses them — an app that never declared DATABASE_URL can't even
     resolve `shimpz-postgres`, let alone reach it.
     """
@@ -331,52 +326,6 @@ def _wire_network_deps(network, req: validate.DeployRequest) -> None:
     _safe_connect(network, APP_EGRESS_PROXY, aliases=["app-egress-proxy"], required=True)
     if "DATABASE_URL" in req.env:
         _safe_connect(network, POSTGRES_CONTAINER, aliases=["postgres"], required=True)
-    # ANY bus env key declares bus usage: projects normally carry only SHIMPZ_BUS_SASL_* (the per-
-    # project identity from `shimpz-bus provision`) and rely on shimpzbus's default brokers
-    # (redpanda:9092) — gating on SHIMPZ_BUS_BROKERS alone left every bus-using app unable to even
-    # resolve `redpanda` (found live: the ws gateway's stream() bootstrap died on DNS).
-    if any(k == "SHIMPZ_BUS_BROKERS" or k.startswith("SHIMPZ_BUS_SASL_") for k in req.env):
-        _safe_connect(network, REDPANDA_CONTAINER, aliases=["redpanda"], required=True)
-    # Declared service calls (validate_calls): connect each PROVIDER to this app's network so
-    # `shimpzbus.call` resolves the registry's `app_<name>` hostname. required=True — you declared
-    # you call it, so a provider that isn't running aborts the deploy (same contract as
-    # postgres/redpanda above). Docker DNS resolves a container's NAME on every network it is
-    # attached to, so no alias is needed.
-    for svc in req.calls:
-        _safe_connect(network, manifests.container_name(svc), required=True)
-
-
-def _rewire_consumers(provider_app: str, provider_container) -> None:
-    """Re-attach a freshly-swapped provider to every consumer network that declared it.
-
-    A blue-green redeploy creates a NEW container object, and the old one's network attachments
-    die with it — exactly the severed-wiring class Round 127 hit with postgres. Consumers
-    recorded their declarations in SHIMPZ_CALLS (driver-injected at THEIR deploy), so the
-    edge is re-derived from live containers, never from a hand-kept list. Failure is LOUD
-    (audit result=error) but does not roll back an already-healthy, already-serving provider —
-    fleet-health's wiring check keeps screaming until the edge is restored.
-    """
-    for cont in _docker.containers.list(filters={"label": "shimpz.app"}):
-        env = cont.attrs.get("Config", {}).get("Env") or []
-        declared = next((e.split("=", 1)[1] for e in env if e.startswith("SHIMPZ_CALLS=")), "")
-        if provider_app not in declared.split(","):
-            continue
-        consumer = cont.labels.get("shimpz.app", "")
-        try:
-            network = _docker.networks.get(manifests.app_network_name(consumer))
-            network.connect(provider_container)
-        except docker.errors.APIError as exc:
-            if _already_connected(exc):
-                continue
-            audit.log(
-                "rewire",
-                provider_app,
-                result="error",
-                consumer=consumer,
-                reason=f"could not re-attach to {manifests.app_network_name(consumer)}: {exc}",
-            )
-
-
 def _teardown_app_network(name: str) -> None:
     net_name = manifests.app_network_name(name)
     try:
@@ -474,8 +423,6 @@ def _deploy(name: str, body: dict) -> dict:
 
         if old is not None:
             old.remove(force=True)
-
-        _rewire_consumers(name, candidate)
 
     trace_id = audit.log(
         "deploy",

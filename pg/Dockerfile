@@ -4,7 +4,7 @@
 # pg-driver — the ONLY container that holds SHIMPZ_PG_DSN (the Postgres superuser DSN).
 # Neither the platform Brain nor a Team sees it. Team-driver provisions a random hashed principal,
 # and each Team principal can mutate only its exact registered database set. This sidecar deliberately
-# holds no Cloudflare, Redpanda, Docker, or account credential.
+# holds no Cloudflare, Docker, or account credential.
 # The only third-party piece is postgresql-client (psql/createdb/dropdb); no Python DB driver is needed.
 # Pinned by digest (not just the `3.14-slim` tag, which can move) — SECURITY_ENGINEERING_PLAN.md
 # item 6. `docker pull python:3.14-slim` resolved to this exact digest; bump both together.

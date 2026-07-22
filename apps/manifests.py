@@ -19,7 +19,7 @@ RUNTIME_UID = 10001
 WORKSPACE_VOLUME = os.environ.get("SHIMPZ_WORKSPACE_VOLUME", "shimpz_shimpz-workspace")
 # Each app's network exists ONLY for that app — no shared bridge, so an app can never resolve or
 # reach another app's container (SECURITY_ENGINEERING_PLAN.md item 3). app.py connects shimpz-caddy
-# (always) and postgres/redpanda (only when the app's own env declares a need) to it.
+# (always) and PostgreSQL (only when the app's own env declares a database) to it.
 APP_NETWORK_PREFIX = os.environ.get("SHIMPZ_APP_NETWORK_PREFIX", "net_app_")
 # Multi-instance (R137): SHIMPZ_SUFFIX names this instance's resources; empty (the default) keeps
 # every generated name byte-identical to the single-instance era — prod is untouched by design.
@@ -68,13 +68,6 @@ def app_network_name(app_name: str) -> str:
 def build_mounts(req: DeployRequest, host_projects_root: str) -> list[docker.types.Mount]:
     host_src = f"{host_projects_root}/{req.run_subpath}"
     mounts = [docker.types.Mount(target="/app", source=host_src, type="bind", read_only=True)]
-    # Service registry, READ-ONLY (env SHIMPZ_REGISTRY=/registry): shimpzbus discover()/call() read the
-    # manifests from inside the app, but WRITES happen only at deploy time in the trusted plane
-    # (shimpz-app runs the project's register.py on the brain) — a compromised app can resolve
-    # services but can never rewrite a manifest and redirect another service's traffic. The dir
-    # is a sibling of projects/ on the same workspace volume (created by 10-shimpz-init.sh at boot).
-    host_registry = host_projects_root.removesuffix("/projects") + "/registry"
-    mounts.append(docker.types.Mount(target="/registry", source=host_registry, type="bind", read_only=True))
     if req.persist:
         mounts.append(docker.types.Mount(target="/data", source=volume_name(req.name), type="volume", read_only=False))
     return mounts
@@ -191,11 +184,6 @@ def build_container_kwargs(req: DeployRequest, host_projects_root: str, extra_en
             "HOST": CONTAINER_ALL_INTERFACES,
             "UV_PROJECT_ENVIRONMENT": "/venv",
             "HOME": CONTAINER_TMP,
-            "SHIMPZ_REGISTRY": "/registry",  # read-only service-registry mount (see build_mounts)
-            # Declared shimpzbus.call targets, driver-injected (never client-suppliable — the
-            # env allowlist has no SHIMPZ_CALLS). This is the durable record app.py's consumer
-            # re-wiring and fleet-health's wiring check both read back from the live container.
-            **({"SHIMPZ_CALLS": ",".join(req.calls)} if req.calls else {}),
             **(extra_env or {}),  # Mandatory L2 lock: the driver always supplies tokened proxy/NO_PROXY values.
         },
         "user": f"{RUNTIME_UID}:{RUNTIME_UID}",

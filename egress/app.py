@@ -64,7 +64,7 @@ def permitted(host: str, port: int) -> bool:
     `*` in the allowlist = BROAD+AUDIT mode: forward ANY host on ANY port. This is the right posture for
     a GENERAL agent — the brain reaches whatever host a task needs (Meta/Google/any API). It is NOT
     "no security": the internal datastores stay unreachable regardless (the brain is off `edge` and this
-    proxy has no route to postgres/redpanda), and EVERY CONNECT is still audited — the full egress trail.
+    proxy has no route to PostgreSQL), and EVERY CONNECT is still audited — the full egress trail.
 
     Otherwise ALLOWLIST mode: only the listed hosts, and only on :443. A `.suffix` entry matches the apex
     + any subdomain (`.anthropic.com` → `anthropic.com`, `api.anthropic.com`); a bare entry matches exactly.

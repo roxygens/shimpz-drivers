@@ -62,10 +62,6 @@ ALLOWED_ENV_KEYS = frozenset(
         "PORT",
         "HOST",
         "DATABASE_URL",
-        "SHIMPZ_BUS_BROKERS",
-        "SHIMPZ_BUS_SASL_USERNAME",
-        "SHIMPZ_BUS_SASL_PASSWORD",
-        "SHIMPZ_BUS_SASL_MECHANISM",
         "SECRET_KEY",
     }
 )
@@ -87,11 +83,6 @@ FORBIDDEN_ENV_KEYS = frozenset(
 )
 
 DSN_RE = re.compile(r"^postgres(?:ql)?(?:\+\w+)?://proj_([a-z0-9_]+):[^@]+@postgres:5432/proj_([a-z0-9_]+)$")
-# shimpz-bus provision <project> always names the SCRAM user proj_<project> (the same canonical
-# proj_<name> identity as the scoped Postgres role) — the same cross-project-credential-mismatch gate
-# as DATABASE_URL below. A project cannot declare another project's bus identity even if driver-side
-# validation were ever the only line of defense.
-BUS_USERNAME_RE = re.compile(r"^proj_([a-z0-9_]+)$")
 
 
 class ValidationError(Exception):
@@ -193,13 +184,6 @@ def validate_env(env: object, app_name: str) -> dict[str, str]:
                     f"DATABASE_URL must point at this app's own isolated database (proj_{expected} on "
                     "the local postgres service) — got a mismatched or foreign DSN"
                 )
-        if key == "SHIMPZ_BUS_SASL_USERNAME":
-            m = BUS_USERNAME_RE.match(value)
-            if not m or m.group(1) != expected:
-                raise ValidationError(
-                    f"SHIMPZ_BUS_SASL_USERNAME must be this app's own bus identity (proj_{expected}, from "
-                    "`shimpz-bus provision`) — got a mismatched or foreign username"
-                )
         out[key] = value
     return out
 
@@ -261,26 +245,6 @@ def validate_optional_port(port: object, field: str) -> int | None:
     return validate_port(port) if field != "target" else port
 
 
-def validate_calls(calls: object, app_name: str) -> list[str]:
-    """The app's DECLARED synchronous dependencies (`shimpzbus.call` targets), by app name.
-
-    Declaration is what makes cross-service reach auditable and wirable: the driver
-    connects each provider to THIS app's network (per-app isolation stays the default — no
-    flat any-app-can-reach-any-app fabric), and fleet-health re-checks the attachment every
-    turn. An undeclared call simply fails DNS, by design.
-    """
-    if calls is None:
-        return []
-    if not isinstance(calls, list) or not all(isinstance(c, str) for c in calls):
-        raise ValidationError("calls must be a list of app names")
-    for c in calls:
-        if not APP_NAME_RE.match(c):
-            raise ValidationError(f"calls entry must be an app name [A-Za-z0-9_-]{{1,40}}: {c!r}")
-        if c == app_name:
-            raise ValidationError(f"calls cannot include the app itself: {c!r}")
-    return list(dict.fromkeys(calls))  # de-dup, order-preserving
-
-
 def validate_egress(egress: object) -> list[str]:
     """The app's declared external egress hosts (its effective_egress) — the deny-by-default L2 allowlist.
 
@@ -319,9 +283,7 @@ class DeployRequest:
     run_subpath: str  # relative to the workspace projects root, e.g. "myapp" — ALWAYS the whole
     # project (never just a role subdir — see RunLocation's docstring for why)
     working_dir: str  # in-container absolute path: "/app" or "/app/backend"
-    worker: bool  # a pure bus consumer with NO HTTP surface by contract (matches shimpz-app's
-    # --worker flag) — the deploy health check must confirm "stays running", never probe HTTP
-    calls: list[str]  # declared shimpzbus.call targets (validate_calls) — drives network wiring
+    worker: bool  # a background process with no HTTP surface; health means "stays running"
     egress: list[str]  # declared external hosts (effective_egress) — the deny-by-default L2 allowlist
 
 
@@ -340,7 +302,6 @@ def validate_deploy_request(name: str, body: dict, workspace_projects_root: Path
         run_subpath=run_subpath,
         working_dir=working_dir,
         worker=bool(body.get("worker", False)),
-        calls=validate_calls(body.get("calls"), app_name),
         egress=validate_egress(body.get("egress")),
     )
 
@@ -364,7 +325,7 @@ def _validate_target(target: object, field: str) -> str:
 # The admin panel (which holds the .env secrets, never the socket) passes the new env for ONE
 # stateless capability sidecar; the driver (which holds the socket, never the .env) recreates
 # it. This positive allowlist is the security boundary: ONLY this service and its own env keys —
-# `shimpz-brain`, `postgres`, `redpanda`, `cloudflared`, and every stray key are refused BY
+# `shimpz-brain`, `postgres`, `cloudflared`, and every stray key are refused BY
 # CONSTRUCTION (a bad request can never recreate the brain or a stateful datastore, nor inject PATH).
 RECREATABLE: dict[str, frozenset[str]] = {
     "r2-driver": frozenset(
