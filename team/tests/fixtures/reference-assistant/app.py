@@ -50,10 +50,14 @@ def _power_result(power: str, power_input: dict[str, object]) -> dict[str, objec
         "total_count": 0,
         "total_pages": 0,
     }
-    return {"zones": [], "pagination": pagination} if power == "list-zones" else {
-        "records": [],
-        "pagination": pagination,
-    }
+    return (
+        {"zones": [], "pagination": pagination}
+        if power == "list-zones"
+        else {
+            "records": [],
+            "pagination": pagination,
+        }
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -90,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError
             payload = json.loads(self.rfile.read(length))
             result = _power_result(power, _power_input(payload, power))
-        except (ValueError, UnicodeError, json.JSONDecodeError):
+        except ValueError, UnicodeError, json.JSONDecodeError:
             self._send(HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "invalid input"})
             return
         self._send(HTTPStatus.OK, result)
