@@ -9,6 +9,31 @@ ASSISTANT_UID = "10001:10001"
 ASSISTANT_MEMORY = 128 * 1024 * 1024
 ASSISTANT_NANO_CPUS = 250_000_000
 ASSISTANT_PIDS = 64
+_ALL_PROXY_VARIABLES = frozenset(
+    {
+        "HTTPS_PROXY",
+        "https_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    }
+)
+_UNSUPPORTED_PROXY_VARIABLES = frozenset({"HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"})
+
+
+def egress_environment_valid(
+    environment: dict[str, str],
+    expected_proxy_environment: dict[str, str] | None,
+) -> bool:
+    """Require the exact reviewed proxy environment, or no proxy variables for offline Assistants."""
+    if expected_proxy_environment is None:
+        return not _ALL_PROXY_VARIABLES.intersection(environment)
+    return all(environment.get(key) == value for key, value in expected_proxy_environment.items()) and not (
+        _UNSUPPORTED_PROXY_VARIABLES.intersection(environment)
+    )
 
 
 def inspect_profile(

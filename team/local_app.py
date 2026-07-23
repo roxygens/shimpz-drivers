@@ -2896,24 +2896,11 @@ class LocalController:
                 "the reviewed Assistant allowed_hosts contract is invalid",
                 code="assistant-registry-drift",
             ) from exc
+        expected_proxy_environment = None
         if reviewed_hosts:
             expected_proxy_environment = self._validate_egress_policy(team_id, spec, reviewed_hosts)
             self._validate_egress_proxy_attachment(network_name)
-            proxy_environment_valid = all(
-                environment.get(key) == value for key, value in expected_proxy_environment.items()
-            ) and not {"HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"}.intersection(environment)
-        else:
-            proxy_environment_valid = not {
-                "HTTPS_PROXY",
-                "https_proxy",
-                "NO_PROXY",
-                "no_proxy",
-                "HTTP_PROXY",
-                "http_proxy",
-                "ALL_PROXY",
-                "all_proxy",
-            }.intersection(environment)
-        if not proxy_environment_valid:
+        if not local_container_policy.egress_environment_valid(environment, expected_proxy_environment):
             raise ApiProblem(
                 HTTPStatus.CONFLICT,
                 "the installed Assistant failed its isolation profile",
