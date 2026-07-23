@@ -125,7 +125,16 @@ spec = importlib.util.spec_from_file_location("team_app_hosted_test", TEAM / "ap
 app = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules[spec.name] = app
-spec.loader.exec_module(app)
+_hosted_test_state = tempfile.TemporaryDirectory()
+with mock.patch.dict(
+    os.environ,
+    {
+        "SHIMPZ_TEAM_ASSISTANT_APPROVAL_GRANTS_PATH": str(
+            Path(_hosted_test_state.name) / "assistant-approvals" / "grants.sqlite3"
+        )
+    },
+):
+    spec.loader.exec_module(app)
 
 # The loaded app keeps direct references to its fakes. Restore the process import table so discovery
 # order can never make unrelated tests import a partial Docker/client module.
@@ -787,7 +796,8 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 ),
             )
 
-        def invoke(_team_id, _token, assistant_id, _contract, _container, power, payload):
+        def invoke(_team_id, _token, assistant_id, _contract, _container, power, payload, answers):
+            self.assertEqual(answers, ())
             invoked.append((assistant_id, power, payload))
             return {"result": {"ok": True}}
 

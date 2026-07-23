@@ -26,7 +26,7 @@ import time
 import weakref
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -67,6 +67,11 @@ import strict_http
 import team_storage
 import token_store
 import validate
+from assistant_human import approval_challenges as assistant_approval_challenges
+from assistant_human import approval_flow as assistant_approval_flow
+from assistant_human import approval_grants as assistant_approval_grants
+from assistant_human import input_challenges as assistant_input_challenges
+from assistant_human import input_flow as assistant_input_flow
 
 ALL_INTERFACES = str(ipaddress.IPv4Address(0))
 
@@ -147,6 +152,12 @@ ASSISTANT_ACCOUNT_KEY_PATH = Path(
         "/var/lib/team-driver/assistant-accounts/key/aes256.key",
     )
 )
+ASSISTANT_APPROVAL_GRANTS_PATH = Path(
+    os.environ.get(
+        "SHIMPZ_TEAM_ASSISTANT_APPROVAL_GRANTS_PATH",
+        "/var/lib/team-driver/assistant-approvals/grants.sqlite3",
+    )
+)
 HEALTH_RETRIES = int(os.environ.get("SHIMPZ_HEALTH_RETRIES", "40"))
 HEALTH_DELAY_SECONDS = float(os.environ.get("SHIMPZ_HEALTH_DELAY_SECONDS", "1.5"))
 
@@ -188,6 +199,9 @@ _assistant_accounts = oauth_account_store.OAuthAccountStore(
     ASSISTANT_ACCOUNT_KEY_PATH,
 )
 _assistant_account_challenges = assistant_account_challenges.AccountChallengeStore()
+_assistant_approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
+_assistant_approval_grants = assistant_approval_grants.ApprovalGrantStore(ASSISTANT_APPROVAL_GRANTS_PATH)
+_assistant_input_challenges = assistant_input_challenges.InputChallengeStore()
 _oauth_pkce_challenges = oauth_pkce_challenges.OAuthPKCEChallengeStore()
 _oauth_http = oauth_http_client.OAuthHTTPClient()
 _cloudflare_oauth_client_id = os.environ.get("SHIMPZ_CLOUDFLARE_OAUTH_CLIENT_ID")
@@ -1384,6 +1398,8 @@ def _retain_admitted_assistant_secrets(team_id: str, app_id: str, spec: marketpl
     if pruned:
         # A paused turn may still reference a secret removed by this admitted release.
         _assistant_secret_challenges.cancel_team(team_id)
+        _assistant_input_challenges.cancel_team(team_id)
+        _assistant_approval_challenges.cancel_team(team_id)
 
 
 def _retain_admitted_assistant_accounts(team_id: str, app_id: str, spec: marketplace.AppSpec) -> None:
@@ -1459,6 +1475,8 @@ def _install_app(
                 )
             _retain_admitted_assistant_private_state(team_id, app_id, spec)
             return {"team_id": team_id, "app": app_id, "status": status, "installed": False}
+        if spec.assistant is not None:
+            _revoke_assistant_approval_grants(team_id, app_id)
         if len(_team_app_containers(team_id)) >= MAX_APPS_PER_TEAM:
             raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, f"app limit reached for {team_id!r} ({MAX_APPS_PER_TEAM})")
         key = f"app:{team_id}:{app_id}"
@@ -1537,6 +1555,8 @@ def _uninstall_app(team_id: str, app_id: str, lease: _AuthorizationLease) -> dic
         _require_current_authorization(team_id, lease, require_isolation=False)
         _assistant_secret_challenges.cancel_team(team_id)
         _assistant_account_challenges.cancel_team(team_id)
+        _assistant_input_challenges.cancel_team(team_id)
+        _assistant_approval_challenges.cancel_team(team_id)
         cleanup = _teardown_app(team_id, app_id)
         if not cleanup.complete:
             raise ApiError(
@@ -1551,6 +1571,7 @@ def _uninstall_app(team_id: str, app_id: str, lease: _AuthorizationLease) -> dic
             _assistant_accounts.delete_assistant(team_id, app_id)
         except oauth_account_store.OAuthAccountStoreError as exc:
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant account state is unavailable") from exc
+        _revoke_assistant_approval_grants(team_id, app_id)
         return {"team_id": team_id, "app": app_id, "uninstalled": True, "db_dropped": cleanup.db_dropped}
 
 
@@ -1581,6 +1602,7 @@ MAX_ASSISTANT_RPC_OUTPUT_BYTES = assistant_help.MAX_HELP_BYTES * 6 + 1024
 ASSISTANT_RPC_TIMEOUT_SECONDS = 8
 MAX_CHAT_FILES = 8
 MAX_CHAT_ASSISTANTS = 16
+CHAT_PAUSED_STATUSES = frozenset({"accounts-required", "secrets-required", "input-required", "approval-required"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1622,6 +1644,7 @@ class _PendingHostedChat:
     file_ids: tuple[str, ...]
     owner: str
     identity: tuple[object, ...]
+    answer_logs: tuple[tuple[str, tuple[object, ...]], ...] = ()
 
 
 def _hosted_secret_spec(active: _ActiveAssistant) -> _HostedAssistantSecretSpec:
@@ -1978,6 +2001,21 @@ def _raise_assistant_secret_error(exc: assistant_secret_store.AssistantSecretErr
     raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant secret state is unavailable") from exc
 
 
+def _revoke_assistant_approval_grants(team_id: str, assistant_id: str) -> None:
+    try:
+        _assistant_approval_grants.revoke_assistant(team_id, assistant_id)
+    except assistant_approval_grants.ApprovalGrantError as exc:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant approval state is unavailable") from exc
+
+
+def _revoke_team_approval_grants(team_id: str) -> bool:
+    try:
+        _assistant_approval_grants.revoke_team(team_id)
+    except assistant_approval_grants.ApprovalGrantError:
+        return False
+    return True
+
+
 def _power_secret_generations(
     team_id: str,
     active: _ActiveAssistant,
@@ -2081,6 +2119,7 @@ def _require_hosted_power_rpc_envelope(
     team_id: str,
     bindings: dict[str, _ActiveAssistant],
     request: brain_runtime_client.PowerRequest,
+    answers: tuple[object, ...] = (),
 ) -> None:
     active = bindings.get(request.assistant_id)
     if active is None:
@@ -2097,6 +2136,7 @@ def _require_hosted_power_rpc_envelope(
             request.input,
             secret_values,
             account_values,
+            answers,
         )
     except assistant_secret_flow.SecretFlowError as exc:
         raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Assistant Power input is too large") from exc
@@ -2184,6 +2224,8 @@ def _replace_assistant_secrets(
         inventory_specs = _installed_assistant_secret_specs(team_id)
         # A paused continuation is generation-bound; it must never overwrite this rotation later.
         _assistant_secret_challenges.cancel_team(team_id)
+        _assistant_input_challenges.cancel_team(team_id)
+        _assistant_approval_challenges.cancel_team(team_id)
         try:
             _assistant_secrets.put_many(team_id, assistant_id, replacements)
             return assistant_secret_flow.inventory_payload(team_id, inventory_specs, _assistant_secrets)
@@ -2214,6 +2256,7 @@ def _invoke_assistant_power(
     container,
     power: object,
     payload: object,
+    answers: tuple[object, ...] = (),
 ) -> dict[str, object]:
     if (
         not isinstance(power, str)
@@ -2252,7 +2295,7 @@ def _invoke_assistant_power(
                 "input": safe_input,
                 "secrets": secret_values,
                 "accounts": account_values,
-                "answers": [],
+                "answers": list(answers),
             },
         )
     except ApiError as exc:
@@ -2468,6 +2511,51 @@ def _hosted_private_requirements(
     return (), secrets_required
 
 
+def _hosted_approval_requirement(
+    team_id: str,
+    interactions: tuple[chat_orchestrator.HumanInteraction, ...],
+    answers_by_interrupt: dict[str, tuple[object, ...]],
+    bindings: dict[str, _ActiveAssistant],
+) -> tuple[assistant_approval_challenges.ApprovalRequirement | None, bool]:
+    if not interactions:
+        return None, False
+    if len(interactions) != 1:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant human approval request is invalid")
+    interaction = interactions[0]
+    answers = answers_by_interrupt.get(interaction.request.interrupt_id, ())
+    active = bindings.get(interaction.request.assistant_id)
+    if active is None:
+        raise ApiError(HTTPStatus.CONFLICT, "Brain requested an unavailable Assistant")
+    try:
+        requirement = assistant_approval_flow.requirement(
+            interaction,
+            active.assistant_id.replace("-", " ").title(),
+            _hosted_power_identity(active)[1],
+            len(answers),
+        )
+        granted = requirement.runs == "once" and _assistant_approval_grants.is_granted(
+            team_id,
+            requirement.assistant_id,
+            requirement.power_id,
+            requirement.assistant_image,
+            requirement.ordinal,
+        )
+    except assistant_approval_flow.ApprovalFlowError as exc:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant human approval request is invalid") from exc
+    except assistant_approval_grants.ApprovalGrantError as exc:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant approval state is unavailable") from exc
+    return requirement, granted
+
+
+def _hosted_answer_log(
+    answer_logs: tuple[tuple[str, tuple[object, ...]], ...],
+) -> dict[str, tuple[object, ...]]:
+    answers_by_interrupt = dict(answer_logs)
+    if len(answers_by_interrupt) != len(answer_logs):
+        raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "invalid chat answer log")
+    return answers_by_interrupt
+
+
 def _run_hosted_chat_segment(
     team_id: str,
     file_ids: object,
@@ -2479,13 +2567,18 @@ def _run_hosted_chat_segment(
     message: str | None = None,
     continuation: chat_orchestrator.ChatContinuation | None = None,
     expected_identity: tuple[object, ...] | None = None,
+    answer_logs: tuple[tuple[str, tuple[object, ...]], ...] = (),
 ) -> tuple[
     str,
     tuple[object, ...],
     chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension,
     tuple[assistant_account_challenges.AccountRequirement, ...],
     tuple[assistant_secret_challenges.SecretRequirement, ...],
+    tuple[chat_orchestrator.HumanInteraction, ...],
+    tuple[assistant_approval_challenges.ApprovalRequirement, ...],
+    tuple[tuple[str, tuple[object, ...]], ...],
 ]:
+    answers_by_interrupt = _hosted_answer_log(answer_logs)
     bindings: dict[str, _ActiveAssistant] = {}
     initial_identity: tuple[object, ...] = ()
     config: inference_config.InferenceConfig | None = None
@@ -2512,6 +2605,7 @@ def _run_hosted_chat_segment(
             active.container,
             request.power,
             request.input,
+            answers_by_interrupt.get(request.interrupt_id, ()),
         )
         if "suspend" in invocation:
             return power_execution.RpcSuspension(invocation["suspend"])
@@ -2557,7 +2651,12 @@ def _run_hosted_chat_segment(
             bindings,
             _hosted_power_identity,
             execute_power,
-            lambda request: _require_hosted_power_rpc_envelope(team_id, bindings, request),
+            lambda request: _require_hosted_power_rpc_envelope(
+                team_id,
+                bindings,
+                request,
+                answers_by_interrupt.get(request.interrupt_id, ()),
+            ),
             lambda request: _power_secret_generations(team_id, bindings[request.assistant_id], request.power),
             lambda request: _power_account_generations(team_id, bindings[request.assistant_id], request.power),
         )
@@ -2586,28 +2685,53 @@ def _run_hosted_chat_segment(
         if current_identity != initial_identity:
             raise ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry")
 
-    team_name, identity, outcome, requirements = chat_turn_engine.run_segment(
-        chat_turn_engine.SegmentStrategy(
-            runtime=_brain_runtime,
-            prepare=prepare,
-            validate_power=validate_power,
-            pause_for_private_inputs=pause_for_private_inputs,
-            cancelled=lambda: _token_cancelled(token),
-            validate_context=validate_context,
-            raise_problem=_raise_hosted_chat_problem,
-            finalize=require_current_credential,
-        ),
-        message=message,
-        continuation=continuation,
-        expected_identity=expected_identity,
-    )
-    return (
-        team_name,
-        identity,
-        outcome,
-        requirements.accounts,
-        requirements.secrets,
-    )
+    current_message = message
+    current_continuation = continuation
+    current_identity = expected_identity
+    while True:
+        team_name, identity, outcome, requirements = chat_turn_engine.run_segment(
+            chat_turn_engine.SegmentStrategy(
+                runtime=_brain_runtime,
+                prepare=prepare,
+                validate_power=validate_power,
+                pause_for_private_inputs=pause_for_private_inputs,
+                cancelled=lambda: _token_cancelled(token),
+                validate_context=validate_context,
+                raise_problem=_raise_hosted_chat_problem,
+                finalize=require_current_credential,
+            ),
+            message=current_message,
+            continuation=current_continuation,
+            expected_identity=current_identity,
+        )
+        approval_requirements: tuple[assistant_approval_challenges.ApprovalRequirement, ...] = ()
+        requirement, granted = _hosted_approval_requirement(
+            team_id,
+            requirements.approvals,
+            answers_by_interrupt,
+            bindings,
+        )
+        if requirement is not None and granted:
+            answers = answers_by_interrupt.get(requirement.interrupt_id, ())
+            answers_by_interrupt[requirement.interrupt_id] = (*answers, True)
+            if not isinstance(outcome, chat_orchestrator.ChatSuspension):
+                raise AssertionError("approval requirement did not suspend")
+            current_message = None
+            current_continuation = outcome.continuation
+            current_identity = identity
+            continue
+        if requirement is not None:
+            approval_requirements = (requirement,)
+        return (
+            team_name,
+            identity,
+            outcome,
+            requirements.accounts,
+            requirements.secrets,
+            requirements.inputs,
+            approval_requirements,
+            tuple(sorted(answers_by_interrupt.items())),
+        )
 
 
 def _pause_hosted_chat(
@@ -2661,6 +2785,57 @@ def _pause_hosted_connection(
     return _hosted_account_challenge_payload(challenge)
 
 
+def _pause_hosted_input(
+    team_id: str,
+    token: str,
+    outcome: chat_orchestrator.ChatSuspension,
+    requirements: tuple[chat_orchestrator.HumanInteraction, ...],
+    pending: _PendingHostedChat,
+) -> dict[str, object]:
+    if len(requirements) != 1:
+        raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "invalid human input suspension")
+    interaction = requirements[0]
+    answers = dict(pending.answer_logs).get(interaction.request.interrupt_id, ())
+    try:
+        assistant_id, contract, container = _installed_assistant(
+            team_id,
+            interaction.request.assistant_id,
+        )
+        requirement = assistant_input_flow.requirement(
+            interaction,
+            _hosted_power_identity(_ActiveAssistant(assistant_id, contract, container))[1],
+            len(answers),
+        )
+        challenge = _assistant_input_challenges.create(team_id, requirement, pending)
+    except (
+        marketplace.MarketplaceError,
+        assistant_input_challenges.InputChallengeError,
+        assistant_input_flow.InputFlowError,
+    ) as exc:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant human input request is invalid") from exc
+    if outcome.continuation != pending.continuation or not _commit_chat_terminal(team_id, token):
+        _assistant_input_challenges.cancel_team(team_id)
+        raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
+    return assistant_input_flow.challenge_payload(challenge)
+
+
+def _pause_hosted_approval(
+    team_id: str,
+    token: str,
+    outcome: chat_orchestrator.ChatSuspension,
+    requirements: tuple[assistant_approval_challenges.ApprovalRequirement, ...],
+    pending: _PendingHostedChat,
+) -> dict[str, object]:
+    try:
+        challenge = _assistant_approval_challenges.create(team_id, requirements, pending)
+    except assistant_approval_challenges.ApprovalChallengeError as exc:
+        raise ApiError(HTTPStatus.CONFLICT, "Assistant approval is already pending") from exc
+    if outcome.continuation != pending.continuation or not _commit_chat_terminal(team_id, token):
+        _assistant_approval_challenges.cancel_team(team_id)
+        raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
+    return assistant_approval_flow.challenge_payload(challenge)
+
+
 def _hosted_segment_response(
     team_id: str,
     token: str,
@@ -2672,6 +2847,9 @@ def _hosted_segment_response(
     owner: str,
     account_requirements: tuple[assistant_account_challenges.AccountRequirement, ...],
     secret_requirements: tuple[assistant_secret_challenges.SecretRequirement, ...],
+    input_requirements: tuple[chat_orchestrator.HumanInteraction, ...],
+    approval_requirements: tuple[assistant_approval_challenges.ApprovalRequirement, ...],
+    answer_logs: tuple[tuple[str, tuple[object, ...]], ...] = (),
 ) -> dict[str, object]:
     def pending(suspension: chat_orchestrator.ChatSuspension) -> _PendingHostedChat:
         return _PendingHostedChat(
@@ -2680,6 +2858,7 @@ def _hosted_segment_response(
             file_ids=file_ids,
             owner=owner,
             identity=identity,
+            answer_logs=answer_logs,
         )
 
     def complete(terminal: chat_orchestrator.ChatOutcome) -> dict[str, object]:
@@ -2691,13 +2870,10 @@ def _hosted_segment_response(
             "reply": terminal.reply[:CHAT_OUTPUT_CAP],
         }
 
-    def unsupported_input(*_args) -> object:
-        raise ValueError("human input suspension is unavailable")
-
     try:
         return chat_turn_engine.dispatch(
             outcome,
-            (account_requirements, secret_requirements, ()),
+            (account_requirements, secret_requirements, input_requirements, approval_requirements),
             pending,
             (
                 lambda suspension, requirements, state: _pause_hosted_connection(
@@ -2706,7 +2882,12 @@ def _hosted_segment_response(
                 lambda suspension, requirements, state: _pause_hosted_chat(
                     team_id, token, suspension, requirements, state
                 ),
-                unsupported_input,
+                lambda suspension, requirements, state: _pause_hosted_input(
+                    team_id, token, suspension, requirements, state
+                ),
+                lambda suspension, requirements, state: _pause_hosted_approval(
+                    team_id, token, suspension, requirements, state
+                ),
             ),
             complete,
         )
@@ -2723,7 +2904,16 @@ def _chat_in_turn(
     container,
     owner: str,
 ) -> dict[str, object]:
-    team_name, identity, outcome, account_requirements, secret_requirements = _run_hosted_chat_segment(
+    (
+        team_name,
+        identity,
+        outcome,
+        account_requirements,
+        secret_requirements,
+        input_requirements,
+        approval_requirements,
+        answer_logs,
+    ) = _run_hosted_chat_segment(
         team_id,
         file_ids,
         assistant_ids,
@@ -2743,6 +2933,9 @@ def _chat_in_turn(
         owner,
         account_requirements,
         secret_requirements,
+        input_requirements,
+        approval_requirements,
+        answer_logs,
     )
 
 
@@ -2769,12 +2962,18 @@ def _chat(
 def _pending_hosted_chat(team_id: str) -> dict[str, object] | None:
     account = _assistant_account_challenges.current(team_id)
     secret = _assistant_secret_challenges.current(team_id)
-    if account is not None and secret is not None:
+    input_challenge = _assistant_input_challenges.current(team_id)
+    approval = _assistant_approval_challenges.current(team_id)
+    if sum(item is not None for item in (account, secret, input_challenge, approval)) > 1:
         raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Team chat continuation state is unavailable")
     if account is not None:
         return _hosted_account_challenge_payload(account)
     if secret is not None:
         return assistant_secret_flow.challenge_payload(secret)
+    if input_challenge is not None:
+        return assistant_input_flow.challenge_payload(input_challenge)
+    if approval is not None:
+        return assistant_approval_flow.challenge_payload(approval)
     return None
 
 
@@ -2920,7 +3119,16 @@ def _resume_chat_accounts(
         if not isinstance(pending, _PendingHostedChat):
             raise AssertionError("shared account resume returned invalid state")
 
-        team_name, identity, outcome, account_requirements, secret_requirements = _run_hosted_chat_segment(
+        (
+            team_name,
+            identity,
+            outcome,
+            account_requirements,
+            secret_requirements,
+            input_requirements,
+            approval_requirements,
+            answer_logs,
+        ) = _run_hosted_chat_segment(
             team_id,
             list(pending.file_ids),
             pending.assistant_ids,
@@ -2929,6 +3137,7 @@ def _resume_chat_accounts(
             lease.owner,
             continuation=pending.continuation,
             expected_identity=pending.identity,
+            answer_logs=pending.answer_logs,
         )
         return _hosted_segment_response(
             team_id,
@@ -2941,6 +3150,9 @@ def _resume_chat_accounts(
             pending.owner,
             account_requirements,
             secret_requirements,
+            input_requirements,
+            approval_requirements,
+            answer_logs,
         )
 
 
@@ -2991,7 +3203,16 @@ def _submit_chat_secrets(
         except assistant_secret_store.AssistantSecretError as exc:
             _raise_assistant_secret_error(exc)
 
-        team_name, identity, outcome, account_requirements, secret_requirements = _run_hosted_chat_segment(
+        (
+            team_name,
+            identity,
+            outcome,
+            account_requirements,
+            secret_requirements,
+            input_requirements,
+            approval_requirements,
+            answer_logs,
+        ) = _run_hosted_chat_segment(
             team_id,
             list(pending.file_ids),
             pending.assistant_ids,
@@ -3000,6 +3221,7 @@ def _submit_chat_secrets(
             lease.owner,
             continuation=pending.continuation,
             expected_identity=pending.identity,
+            answer_logs=pending.answer_logs,
         )
         return _hosted_segment_response(
             team_id,
@@ -3012,6 +3234,182 @@ def _submit_chat_secrets(
             pending.owner,
             account_requirements,
             secret_requirements,
+            input_requirements,
+            approval_requirements,
+            answer_logs,
+        )
+
+
+def _submit_chat_input(
+    team_id: str,
+    body: object,
+    lease: _AuthorizationLease,
+) -> dict[str, object]:
+    challenge_id = body.get("challenge_id") if isinstance(body, dict) else None
+    try:
+        challenge = _assistant_input_challenges.get(team_id, challenge_id)
+        answer = assistant_input_flow.submitted_answer(challenge, body)
+    except assistant_input_challenges.InputChallengeNotFoundError as exc:
+        raise ApiError(HTTPStatus.CONFLICT, "Assistant input request expired; retry the message") from exc
+    except (assistant_input_challenges.InputChallengeError, assistant_input_flow.InputFlowError) as exc:
+        raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "Assistant input submission is invalid") from exc
+    pending = challenge.payload
+    if not isinstance(pending, _PendingHostedChat) or pending.owner != lease.owner:
+        raise ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry")
+
+    with _exclusive_chat_turn(team_id, lease) as (token, container):
+        *_unused, current_identity = _hosted_chat_setup(
+            team_id,
+            list(pending.file_ids),
+            pending.assistant_ids,
+            container,
+            lease.owner,
+        )
+        if current_identity != pending.identity:
+            _assistant_input_challenges.cancel_team(team_id)
+            raise ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry")
+        answer_logs = dict(pending.answer_logs)
+        existing = answer_logs.get(challenge.requirement.interrupt_id, ())
+        if len(existing) != challenge.requirement.ordinal:
+            _assistant_input_challenges.cancel_team(team_id)
+            raise ApiError(HTTPStatus.CONFLICT, "Assistant input replay changed; retry the message")
+        try:
+            claimed = _assistant_input_challenges.claim(team_id, challenge.id)
+        except assistant_input_challenges.InputChallengeNotFoundError as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "Assistant input request expired; retry the message") from exc
+        if claimed is not challenge:
+            raise ApiError(HTTPStatus.CONFLICT, "Assistant input request expired; retry the message")
+        answer_logs[challenge.requirement.interrupt_id] = (*existing, answer)
+        resumed = replace(pending, answer_logs=tuple(sorted(answer_logs.items())))
+
+        (
+            team_name,
+            identity,
+            outcome,
+            account_requirements,
+            secret_requirements,
+            input_requirements,
+            approval_requirements,
+            answer_logs,
+        ) = _run_hosted_chat_segment(
+            team_id,
+            list(resumed.file_ids),
+            resumed.assistant_ids,
+            token,
+            container,
+            lease.owner,
+            continuation=resumed.continuation,
+            expected_identity=resumed.identity,
+            answer_logs=resumed.answer_logs,
+        )
+        return _hosted_segment_response(
+            team_id,
+            token,
+            team_name,
+            identity,
+            outcome,
+            resumed.assistant_ids,
+            resumed.file_ids,
+            resumed.owner,
+            account_requirements,
+            secret_requirements,
+            input_requirements,
+            approval_requirements,
+            answer_logs,
+        )
+
+
+def _submit_chat_approval(
+    team_id: str,
+    body: object,
+    lease: _AuthorizationLease,
+) -> dict[str, object]:
+    challenge_id = body.get("challenge_id") if isinstance(body, dict) else None
+    try:
+        challenge = _assistant_approval_challenges.get(team_id, challenge_id)
+        answer = assistant_approval_flow.submitted_answer(challenge, body)
+    except assistant_approval_challenges.ApprovalChallengeNotFoundError as exc:
+        raise ApiError(HTTPStatus.CONFLICT, "Assistant approval expired; retry the message") from exc
+    except (assistant_approval_challenges.ApprovalChallengeError, assistant_approval_flow.ApprovalFlowError) as exc:
+        raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "Assistant approval submission is invalid") from exc
+    pending = challenge.payload
+    if not isinstance(pending, _PendingHostedChat) or pending.owner != lease.owner:
+        raise ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry")
+
+    with _exclusive_chat_turn(team_id, lease) as (token, container):
+        *_unused, current_identity = _hosted_chat_setup(
+            team_id,
+            list(pending.file_ids),
+            pending.assistant_ids,
+            container,
+            lease.owner,
+        )
+        if current_identity != pending.identity:
+            _assistant_approval_challenges.cancel_team(team_id)
+            raise ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry")
+        requirement = challenge.requirements[0]
+        answer_logs = dict(pending.answer_logs)
+        existing = answer_logs.get(requirement.interrupt_id, ())
+        if len(existing) != requirement.ordinal:
+            _assistant_approval_challenges.cancel_team(team_id)
+            raise ApiError(HTTPStatus.CONFLICT, "Assistant approval replay changed; retry the message")
+        try:
+            claimed = _assistant_approval_challenges.claim(team_id, challenge.id)
+            if claimed is not challenge:
+                raise assistant_approval_challenges.ApprovalChallengeNotFoundError("approval challenge is unavailable")
+            if requirement.runs == "once":
+                _assistant_approval_grants.grant_many(
+                    (
+                        assistant_approval_grants.Grant(
+                            team_id,
+                            requirement.assistant_id,
+                            requirement.power_id,
+                            requirement.assistant_image,
+                            requirement.ordinal,
+                        ),
+                    )
+                )
+        except assistant_approval_challenges.ApprovalChallengeNotFoundError as exc:
+            raise ApiError(HTTPStatus.CONFLICT, "Assistant approval expired; retry the message") from exc
+        except assistant_approval_grants.ApprovalGrantError as exc:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant approval state is unavailable") from exc
+        answer_logs[requirement.interrupt_id] = (*existing, answer)
+        resumed = replace(pending, answer_logs=tuple(sorted(answer_logs.items())))
+
+        (
+            team_name,
+            identity,
+            outcome,
+            account_requirements,
+            secret_requirements,
+            input_requirements,
+            approval_requirements,
+            answer_logs,
+        ) = _run_hosted_chat_segment(
+            team_id,
+            list(resumed.file_ids),
+            resumed.assistant_ids,
+            token,
+            container,
+            lease.owner,
+            continuation=resumed.continuation,
+            expected_identity=resumed.identity,
+            answer_logs=resumed.answer_logs,
+        )
+        return _hosted_segment_response(
+            team_id,
+            token,
+            team_name,
+            identity,
+            outcome,
+            resumed.assistant_ids,
+            resumed.file_ids,
+            resumed.owner,
+            account_requirements,
+            secret_requirements,
+            input_requirements,
+            approval_requirements,
+            answer_logs,
         )
 
 
@@ -3036,7 +3434,9 @@ def _stop_chat(team_id: str, lease: _AuthorizationLease) -> dict:
     """Cancel one Controller-owned turn and fail-stop a Power already executing."""
     secret_cancelled = _assistant_secret_challenges.cancel_team(team_id)
     account_cancelled = _assistant_account_challenges.cancel_team(team_id)
-    challenge_cancelled = secret_cancelled or account_cancelled
+    input_cancelled = _assistant_input_challenges.cancel_team(team_id)
+    approval_cancelled = _assistant_approval_challenges.cancel_team(team_id)
+    challenge_cancelled = secret_cancelled or account_cancelled or input_cancelled or approval_cancelled
     with _lock_for(team_id):
         container = _require_current_authorization(team_id, lease)
         container.reload()
@@ -3223,6 +3623,8 @@ def _teardown_inference(team_id: str) -> bool:
 
 def _teardown_assistant_secrets(team_id: str) -> bool:
     _assistant_secret_challenges.cancel_team(team_id)
+    _assistant_input_challenges.cancel_team(team_id)
+    _assistant_approval_challenges.cancel_team(team_id)
     try:
         _assistant_secrets.delete_team(team_id)
     except assistant_secret_store.AssistantSecretError:
@@ -3236,7 +3638,7 @@ def _teardown_assistant_accounts(team_id: str) -> bool:
         _assistant_accounts.delete_team(team_id)
     except oauth_account_store.OAuthAccountStoreError:
         return False
-    return True
+    return _revoke_team_approval_grants(team_id)
 
 
 def _drop_teardown_database(team_id: str, record: cleanup_state.Record) -> cleanup_state.Record | None:
@@ -3662,7 +4064,7 @@ class Handler(BaseHTTPRequestHandler):
                     container,
                     lease.owner,
                 )
-                paused = result.get("status") in {"accounts-required", "secrets-required"}
+                paused = result.get("status") in CHAT_PAUSED_STATUSES
                 terminal = (
                     {"type": str(result["status"]), **result}
                     if paused
@@ -3978,6 +4380,41 @@ class Handler(BaseHTTPRequestHandler):
             return
         raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
 
+    def _route_human_chat(
+        self,
+        method: str,
+        kind: str,
+        team_id: str,
+        principal: tuple[str, str | None],
+        lease: _AuthorizationLease,
+    ) -> None:
+        if kind == "input":
+            challenge = _assistant_input_challenges.current(team_id)
+            payload = assistant_input_flow.challenge_payload
+            submit = _submit_chat_input
+        else:
+            challenge = _assistant_approval_challenges.current(team_id)
+            payload = assistant_approval_flow.challenge_payload
+            submit = _submit_chat_approval
+        if method == "GET":
+            self._send_json(
+                HTTPStatus.OK,
+                payload(challenge) if challenge is not None else {"team_id": team_id, "status": "none"},
+                no_store=True,
+            )
+            return
+        if method == "POST":
+            _enforce_rate("chat", principal)
+            result = submit(team_id, self._read_body(), lease)
+            paused = result.get("status") in CHAT_PAUSED_STATUSES
+            self._send_json(
+                HTTPStatus.PRECONDITION_REQUIRED if paused else HTTPStatus.OK,
+                result,
+                no_store=True,
+            )
+            return
+        raise ApiError(HTTPStatus.NOT_FOUND, f"no such chat {kind} operation")
+
     def _route_chat(
         self,
         method: str,
@@ -4022,9 +4459,9 @@ class Handler(BaseHTTPRequestHandler):
                 result="ok",
                 chars_in=len(message),
                 chars_out=len(str(result.get("reply", ""))),
-                paused=result.get("status") in {"accounts-required", "secrets-required"},
+                paused=result.get("status") in CHAT_PAUSED_STATUSES,
             )
-            paused = result.get("status") in {"accounts-required", "secrets-required"}
+            paused = result.get("status") in CHAT_PAUSED_STATUSES
             self._send_json(
                 HTTPStatus.PRECONDITION_REQUIRED if paused else HTTPStatus.OK,
                 result,
@@ -4050,7 +4487,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict) or set(body) != {"challenge_id"}:
                     raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "account continuation is invalid")
                 result = _resume_chat_accounts(team_id, body["challenge_id"], lease)
-                paused = result.get("status") in {"accounts-required", "secrets-required"}
+                paused = result.get("status") in CHAT_PAUSED_STATUSES
                 self._send_json(
                     HTTPStatus.PRECONDITION_REQUIRED if paused else HTTPStatus.OK,
                     result,
@@ -4072,13 +4509,16 @@ class Handler(BaseHTTPRequestHandler):
                     self._read_body(max_bytes=MAX_ASSISTANT_SECRET_BODY_BYTES),
                     lease,
                 )
-                paused = result.get("status") in {"accounts-required", "secrets-required"}
+                paused = result.get("status") in CHAT_PAUSED_STATUSES
                 self._send_json(
                     HTTPStatus.PRECONDITION_REQUIRED if paused else HTTPStatus.OK,
                     result,
                     no_store=True,
                 )
                 return
+        if sub2 in {"input", "approval"} and len(parts) == 5:
+            self._route_human_chat(method, sub2, team_id, principal, lease)
+            return
         if method == "POST" and sub2 == "stop":
             _enforce_rate("stop", principal)
             self._send_json(HTTPStatus.OK, _stop_chat(team_id, lease))

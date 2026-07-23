@@ -33,6 +33,18 @@ class ControllerRoutingTests(unittest.TestCase):
                 "assistant-help",
                 {"team_id": "team_1", "assistant_id": "helper", "locale": "pt-BR"},
             ),
+            (
+                "GET",
+                "/v1/teams/team_1/chat/approval",
+                "chat-approval-pending",
+                {"team_id": "team_1"},
+            ),
+            (
+                "POST",
+                "/v1/teams/team_1/chat/input",
+                "chat-input-submit",
+                {"team_id": "team_1"},
+            ),
         )
         for method, path, operation, params in common:
             with self.subTest(method=method, path=path):
@@ -42,12 +54,7 @@ class ControllerRoutingTests(unittest.TestCase):
                 self.assertEqual(hosted, strict_http.ControllerRouteMatch(operation, params))
 
     def test_profile_only_routes_fail_closed_on_the_other_controller(self) -> None:
-        cases = (
-            (strict_http.HOSTED_CONTROLLER, "POST", "/v1/teams/team_1/chat/stream", "chat-stream"),
-            (strict_http.LOCAL_CONTROLLER, "GET", "/v1/teams/team_1/chat/approval", "chat-approval-pending"),
-            (strict_http.LOCAL_CONTROLLER, "GET", "/v1/teams/team_1/chat/input", "chat-input-pending"),
-            (strict_http.LOCAL_CONTROLLER, "POST", "/v1/teams/team_1/chat/input", "chat-input-submit"),
-        )
+        cases = ((strict_http.HOSTED_CONTROLLER, "POST", "/v1/teams/team_1/chat/stream", "chat-stream"),)
         for profile, method, path, operation in cases:
             with self.subTest(profile=profile, path=path):
                 match = strict_http.resolve_controller_route(profile, method, _parts(path))

@@ -316,10 +316,10 @@ CONTROLLER_ROUTES = (
         "assistant-approval-revoke",
         _LOCAL_CONTROLLER_ONLY,
     ),
-    _controller_route("GET", "/v1/teams/:team_id/chat/approval", "chat-approval-pending", _LOCAL_CONTROLLER_ONLY),
-    _controller_route("POST", "/v1/teams/:team_id/chat/approval", "chat-approval-submit", _LOCAL_CONTROLLER_ONLY),
-    _controller_route("GET", "/v1/teams/:team_id/chat/input", "chat-input-pending", _LOCAL_CONTROLLER_ONLY),
-    _controller_route("POST", "/v1/teams/:team_id/chat/input", "chat-input-submit", _LOCAL_CONTROLLER_ONLY),
+    _controller_route("GET", "/v1/teams/:team_id/chat/approval", "chat-approval-pending"),
+    _controller_route("POST", "/v1/teams/:team_id/chat/approval", "chat-approval-submit"),
+    _controller_route("GET", "/v1/teams/:team_id/chat/input", "chat-input-pending"),
+    _controller_route("POST", "/v1/teams/:team_id/chat/input", "chat-input-submit"),
 )
 
 

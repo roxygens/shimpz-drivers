@@ -78,6 +78,7 @@ COPY app.py validate.py manifests.py network_policy.py marketplace.py marketplac
      oauth_broker_client.py oauth_http_client.py oauth_pkce_challenges.py oauth_providers.py \
      team_storage.py brain_runtime_client.py brain_runtime_token_store.py chat_orchestrator.py chat_turn_engine.py inference_config.py \
      model_catalog.json egress_policy.py strict_http.py power_execution.py power_journal.py pgdriver_client.py accounts_client.py brain_credentials_client.py healthcheck.py ./
+COPY assistant_human ./assistant_human
 
 # Pre-create + own every named-volume mountpoint so the fresh (root:root) volume is writable by the
 # non-root user. /run/shimpz-teamdriver gets GROUP `shimpzteamdriver-token` so the fresh volume's
@@ -91,6 +92,7 @@ RUN mkdir -p /run/shimpz-teamdriver /var/log/team-driver /var/lib/team-driver/pg
         /var/lib/team-driver/assistant-secrets/key \
         /var/lib/team-driver/assistant-accounts/state \
         /var/lib/team-driver/assistant-accounts/key \
+        /var/lib/team-driver/assistant-approvals \
         /app-egress-policy /run/shimpz-braincred-unseal /run/shimpz-accounts-brain-resolve \
         /run/shimpz-brain-runtime \
     && chown teamdriver:shimpzteamdriver-token /run/shimpz-teamdriver && chmod 750 /run/shimpz-teamdriver \
@@ -109,6 +111,7 @@ RUN mkdir -p /run/shimpz-teamdriver /var/log/team-driver /var/lib/team-driver/pg
         /var/lib/team-driver/assistant-secrets/key \
         /var/lib/team-driver/assistant-accounts/state \
         /var/lib/team-driver/assistant-accounts/key \
+        /var/lib/team-driver/assistant-approvals \
     && chown teamdriver:shimpzapp-egress-policy /app-egress-policy \
     && chmod 0770 /app-egress-policy
 
