@@ -29,6 +29,7 @@ KIND_LABEL = "com.shimpz.local.kind"
 LOCAL_PROFILE = "single-owner-local-v1"
 
 sys.path.insert(0, str(TEAM))
+import power_execution
 from local_app import half_cpu_set
 
 
@@ -691,7 +692,7 @@ class DockerFlowTests(unittest.TestCase):
                 "/v1/teams/demo_team/assistants/shimpz-cloudflare/powers/list-zones",
                 {"page": 1, "per_page": 25},
             )
-            self.assertEqual(account_required, 409)
+            self.assertEqual(account_required, power_execution.ACCOUNT_PRECONDITION_STATUS)
             self.assertEqual(missing_account["code"], "assistant-account-unavailable")
             unknown_power, _ = self._api(
                 port,
