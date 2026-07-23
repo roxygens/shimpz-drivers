@@ -10,12 +10,16 @@ from pathlib import Path
 from unittest import mock
 
 APPS = Path(__file__).resolve().parents[1]
+PG_COPY = APPS.parent / "pg" / "stdlib_http.py"
 sys.path.insert(0, str(APPS))
 
 import stdlib_http
 
 
 class StdlibHttpTests(unittest.TestCase):
+    def test_vendored_pg_copy_is_byte_identical(self) -> None:
+        self.assertEqual(Path(stdlib_http.__file__).read_bytes(), PG_COPY.read_bytes())
+
     def test_bearer_requires_one_header_and_uses_constant_time_comparison(self) -> None:
         headers = Message()
         headers["Authorization"] = "Bearer expected"
@@ -25,7 +29,7 @@ class StdlibHttpTests(unittest.TestCase):
             wraps=stdlib_http.hmac.compare_digest,
         ) as compare:
             self.assertTrue(stdlib_http.bearer_authorized(headers, "expected"))
-        compare.assert_called_once_with("Bearer expected", "Bearer expected")
+        compare.assert_called_once_with("expected", "expected")
 
         headers["Authorization"] = "Bearer expected"
         self.assertFalse(stdlib_http.bearer_authorized(headers, "expected"))

@@ -3,18 +3,18 @@
 
 from __future__ import annotations
 
-import json
 import os
+import re
 import subprocess
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
 
 import audit
 import driver_manifest
 import pg_client
 import principal_store
+import stdlib_http
 import token_store
 import validate
 
@@ -25,11 +25,17 @@ MAX_BODY_BYTES = int(os.environ.get("SHIMPZ_PGDRIVER_MAX_BODY_BYTES", str(64 * 1
 _provisioner_token = token_store.ensure_token()
 
 
-class ApiError(Exception):
-    def __init__(self, status: HTTPStatus, message: str) -> None:
-        super().__init__(message)
-        self.status = status
-        self.message = message
+ApiError = stdlib_http.HttpError
+
+_ROUTES = (
+    stdlib_http.Route("GET", re.compile(r"^/healthz$"), "health"),
+    stdlib_http.Route("GET", re.compile(r"^/v1/driver$"), "metadata"),
+    stdlib_http.Route("POST", re.compile(r"^/v1/teams/provision$"), "team.provision"),
+    stdlib_http.Route("POST", re.compile(r"^/v1/teams/finalize$"), "team.finalize"),
+    stdlib_http.Route("POST", re.compile(r"^/v1/teams/apps/create$"), "team.app.create"),
+    stdlib_http.Route("POST", re.compile(r"^/v1/teams/apps/drop$"), "team.app.drop"),
+    stdlib_http.Route("POST", re.compile(r"^/v1/teams/drop$"), "team.drop"),
+)
 
 
 def _provision_team(body: dict) -> dict:
@@ -120,104 +126,97 @@ def _finalize_team(body: dict) -> dict:
     return {"finalized": True}
 
 
+def _http_failure(exc: Exception) -> stdlib_http.HttpFailure | None:
+    if isinstance(exc, ApiError):
+        failure = stdlib_http.HttpFailure(exc.status, exc.message, exc.message, "denied")
+    elif isinstance(exc, validate.ValidationError):
+        message = str(exc)
+        failure = stdlib_http.HttpFailure(HTTPStatus.BAD_REQUEST, message, message, "denied")
+    elif isinstance(exc, principal_store.PrincipalError):
+        failure = stdlib_http.HttpFailure(HTTPStatus.FORBIDDEN, "principal scope denied", str(exc), "denied")
+    elif isinstance(exc, principal_store.PrincipalStoreError):
+        failure = stdlib_http.HttpFailure(
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            "principal registry unavailable",
+            str(exc),
+            "error",
+        )
+    elif isinstance(exc, pg_client.PgError):
+        failure = stdlib_http.HttpFailure(
+            HTTPStatus.BAD_GATEWAY,
+            "database operation failed",
+            "database operation failed",
+            "error",
+        )
+    elif isinstance(exc, (OSError, RuntimeError, ValueError, subprocess.SubprocessError)):
+        failure = stdlib_http.HttpFailure(
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            "internal driver error",
+            type(exc).__name__,
+            "error",
+        )
+    else:
+        failure = None
+    return failure
+
+
+def _run_operation(operation: str, body: dict, token: str) -> dict:
+    if operation == "team.provision":
+        return _provision_team(body)
+    if operation == "team.finalize":
+        return _finalize_team(body)
+    if operation == "team.app.create":
+        return _create_app(body, token)
+    if operation == "team.app.drop":
+        return _drop_app(body, token)
+    return _drop_team(body, token)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"{DRIVER.id}-driver/{DRIVER.version}"
 
     def _bearer(self) -> str:
-        scheme, separator, value = self.headers.get("Authorization", "").partition(" ")
-        return value if separator and scheme == "Bearer" else ""
+        return stdlib_http.bearer_token(self.headers)
 
     def _is_provisioner(self) -> bool:
-        return validate.tokens_equal(self._bearer(), _provisioner_token)
+        return stdlib_http.bearer_authorized(self.headers, _provisioner_token)
 
     def _send_json(self, status: HTTPStatus, payload: object) -> None:
-        body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        stdlib_http.send_json(self, status, payload)
 
     def _body(self) -> dict:
-        raw_length = self.headers.get("Content-Length", "0") or "0"
-        try:
-            length = int(raw_length)
-        except ValueError as exc:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid Content-Length") from exc
-        if length < 0 or length > MAX_BODY_BYTES:
-            raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, f"request body exceeds {MAX_BODY_BYTES} bytes")
-        if length == 0:
-            return {}
-        try:
-            body = json.loads(self.rfile.read(length))
-        except json.JSONDecodeError as exc:
-            raise ApiError(HTTPStatus.BAD_REQUEST, f"invalid JSON body: {exc}") from exc
-        if not isinstance(body, dict):
-            raise ApiError(HTTPStatus.BAD_REQUEST, "JSON body must be an object")
-        return body
+        return stdlib_http.read_json_body(self.headers, self.rfile, max_bytes=MAX_BODY_BYTES)
 
     def _dispatch(self, method: str) -> None:
-        try:
-            self._route(method)
-        except ApiError as exc:
-            audit.log(method.lower(), self.path, result="denied", reason=exc.message)
-            self._send_json(exc.status, {"error": exc.message})
-        except validate.ValidationError as exc:
-            audit.log(method.lower(), self.path, result="denied", reason=str(exc))
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        except principal_store.PrincipalError as exc:
-            audit.log(method.lower(), self.path, result="denied", reason=str(exc))
-            self._send_json(HTTPStatus.FORBIDDEN, {"error": "principal scope denied"})
-        except principal_store.PrincipalStoreError as exc:
-            audit.log(method.lower(), self.path, result="error", reason=str(exc))
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "principal registry unavailable"})
-        except pg_client.PgError:
-            # PgError is deliberately secret-free, but keep both the audit and public boundary
-            # generic so a future SQL diagnostic cannot become a credential disclosure regression.
-            audit.log(method.lower(), self.path, result="error", reason="database operation failed")
-            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "database operation failed"})
-        except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
-            audit.log(method.lower(), self.path, result="error", reason=type(exc).__name__)
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal driver error"})
+        stdlib_http.dispatch(
+            lambda: self._route(method),
+            classify=_http_failure,
+            emit=lambda failure: self._emit_failure(method, failure),
+            unexpected_message="internal driver error",
+        )
+
+    def _emit_failure(self, method: str, failure: stdlib_http.HttpFailure) -> None:
+        audit.log(method.lower(), self.path, result=failure.result, reason=failure.audit_reason)
+        self._send_json(failure.status, {"error": failure.public_message})
 
     def _route(self, method: str) -> None:
-        path = urlsplit(self.path).path
-        if method == "GET" and path == DRIVER.health_path:
+        route = stdlib_http.resolve_route(_ROUTES, method, self.path)
+        if route.operation == "health":
             self._send_json(HTTPStatus.OK, {"status": "ok"})
             return
-        if method == "GET" and path == DRIVER.metadata_path:
+        if route.operation == "metadata":
             self._send_json(HTTPStatus.OK, DRIVER.public())
             return
-        if not self._bearer():
-            raise ApiError(HTTPStatus.FORBIDDEN, "bearer required")
-        if method != "POST":
-            raise ApiError(HTTPStatus.NOT_FOUND, f"no route for {method} {path}")
         body = self._body()
-        if path in {"/v1/teams/provision", "/v1/teams/finalize"}:
+        token = self._bearer()
+        if not token:
+            raise ApiError(HTTPStatus.FORBIDDEN, "bearer required")
+        if route.operation in {"team.provision", "team.finalize"}:
             if not self._is_provisioner():
                 raise ApiError(HTTPStatus.FORBIDDEN, "provisioner bearer required")
-            if path == "/v1/teams/provision":
-                result = _provision_team(body)
-                operation = "team.provision"
-            else:
-                result = _finalize_team(body)
-                operation = "team.finalize"
-            trace = audit.log(operation, body.get("team_id", "?"), result="ok")
-        else:
-            token = self._bearer()
-            if not token:
-                raise ApiError(HTTPStatus.FORBIDDEN, "tenant bearer required")
-            if path == "/v1/teams/apps/create":
-                result = _create_app(body, token)
-                trace = audit.log("team.app.create", body.get("team_id", "?"), result="ok")
-            elif path == "/v1/teams/apps/drop":
-                result = _drop_app(body, token)
-                trace = audit.log("team.app.drop", body.get("team_id", "?"), result="ok")
-            elif path == "/v1/teams/drop":
-                result = _drop_team(body, token)
-                trace = audit.log("team.drop", body.get("team_id", "?"), result="ok")
-            else:
-                raise ApiError(HTTPStatus.NOT_FOUND, f"no route for {method} {path}")
+            token = ""
+        result = _run_operation(route.operation, body, token)
+        trace = audit.log(route.operation, body.get("team_id", "?"), result="ok")
         self._send_json(HTTPStatus.OK, {**result, "trace_id": trace})
 
     def do_GET(self) -> None:
