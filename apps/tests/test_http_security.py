@@ -89,6 +89,20 @@ class HttpBodyTests(unittest.TestCase):
                     handler._body()
                 self.assertEqual(caught.exception.status, expected_status)
 
+    def test_query_parser_defaults_bare_lines_and_matches_exact_purge_key(self) -> None:
+        handler = object.__new__(self.app.Handler)
+        handler._send_json = mock.Mock()
+
+        handler.path = "/v1/apps/example/logs?lines"
+        with mock.patch.object(self.app, "_logs", return_value={"logs": ""}) as logs:
+            handler._route("GET")
+        logs.assert_called_once_with("example", 80)
+
+        handler.path = "/v1/apps/example?not_purge_volume=1"
+        with mock.patch.object(self.app, "_remove", return_value={"status": "removed"}) as remove:
+            handler._route("DELETE")
+        remove.assert_called_once_with("example", False)
+
 
 if __name__ == "__main__":
     unittest.main()

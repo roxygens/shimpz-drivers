@@ -33,6 +33,7 @@ from collections import defaultdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import audit
 import caddy_routes
@@ -655,6 +656,7 @@ class Handler(BaseHTTPRequestHandler):
     def _route(self, method: str) -> None:
         path = self.path.split("?", 1)[0]
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        parsed_query = parse_qs(query)
 
         if method == "POST" and (m := _APP_ROUTE.match(path)) and m.group(2) == "deploy":
             self._send_json(HTTPStatus.OK, _deploy(m.group(1), self._body()))
@@ -669,14 +671,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, _status(m.group(1)))
             return
         if method == "GET" and (m := _APP_ROUTE.match(path)) and m.group(2) == "logs":
-            lines = int(dict(p.split("=") for p in query.split("&") if "=" in p).get("lines", "80"))
+            lines = int(parsed_query.get("lines", ["80"])[-1])
             self._send_json(HTTPStatus.OK, _logs(m.group(1), lines))
             return
         if method == "GET" and (m := _APP_ROUTE.match(path)) and m.group(2) == "health":
             self._send_json(HTTPStatus.OK, _health(m.group(1)))
             return
         if method == "DELETE" and (m := _APP_DELETE_ROUTE.match(path)):
-            purge = "purge_volume=1" in query
+            purge = parsed_query.get("purge_volume", [])[-1:] == ["1"]
             self._send_json(HTTPStatus.OK, _remove(m.group(1), purge))
             return
         if method == "GET" and path == "/v1/apps":
