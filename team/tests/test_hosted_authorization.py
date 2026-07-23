@@ -22,6 +22,22 @@ def _container(*, container_id: str = CONTAINER_ID, owner: str = "account_1") ->
     return SimpleNamespace(id=container_id, labels=labels, attrs={"Config": {"Labels": labels}})
 
 
+def _routable_container() -> SimpleNamespace:
+    name = app.manifests.team_container_name(TEAM_ID)
+    labels = {
+        "team.driver": "1",
+        "team.id": TEAM_ID,
+        "team.owner": "account_1",
+    }
+    return SimpleNamespace(
+        id=CONTAINER_ID,
+        name=name,
+        status="running",
+        labels=labels,
+        attrs={"Name": f"/{name}", "Config": {"Labels": labels}},
+    )
+
+
 def _lease(
     *,
     container_id: str = CONTAINER_ID,
@@ -148,6 +164,32 @@ class HostedAuthorizationTests(unittest.TestCase):
 
         self.assertEqual(sent, [(HTTPStatus.FORBIDDEN, {"error": "invalid or missing credentials"})])
         wrong._route.assert_not_called()
+
+    def test_sensitive_route_drives_the_real_current_authorization_chain(self) -> None:
+        container = _routable_container()
+        handler = self._handler()
+        handler.path = f"/v1/teams/{TEAM_ID}/apps"
+        sent: list[tuple[HTTPStatus, dict]] = []
+        handler._send_json = lambda status, payload, **_kwargs: sent.append((status, payload))
+
+        with (
+            _patched(
+                _get_container=mock.Mock(return_value=container),
+                _cleanup_record=lambda _team_id: None,
+            ),
+            mock.patch.object(
+                app,
+                "_require_current_authorization",
+                wraps=app._require_current_authorization,
+            ) as require_current,
+        ):
+            handler._route("GET", ("account", "account_1"))
+
+        self.assertEqual(sent, [(HTTPStatus.OK, {"team_id": TEAM_ID, "apps": []})])
+        require_current.assert_called_once()
+        self.assertEqual(require_current.call_args.args[0], TEAM_ID)
+        self.assertEqual(require_current.call_args.args[1].container_id, CONTAINER_ID)
+        self.assertEqual(require_current.call_args.kwargs, {"require_isolation": False})
 
 
 if __name__ == "__main__":
