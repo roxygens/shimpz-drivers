@@ -48,7 +48,6 @@ import brain_runtime_token_store
 import chat_orchestrator
 import chat_turn_engine
 import cleanup_state
-import controller_routing
 import docker
 import docker.errors
 import egress_policy
@@ -3554,7 +3553,7 @@ def _hosted_route_target(
     headers: object,
     path: str,
     method: str,
-) -> tuple[strict_http.RequestTarget, controller_routing.RouteMatch]:
+) -> tuple[strict_http.RequestTarget, strict_http.ControllerRouteMatch]:
     try:
         target = strict_http.parse_routed_request(
             headers,
@@ -3565,7 +3564,7 @@ def _hosted_route_target(
         )
     except strict_http.HttpContractError as exc:
         raise ApiError(exc.status, exc.message) from exc
-    route = controller_routing.resolve(controller_routing.HOSTED, method, target.parts)
+    route = strict_http.resolve_controller_route(strict_http.HOSTED_CONTROLLER, method, target.parts)
     if route is None:
         raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} {target.path}")
     return target, route

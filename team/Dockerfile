@@ -76,7 +76,7 @@ COPY app.py validate.py manifests.py network_policy.py marketplace.py marketplac
      assistant_chat.py assistant_secret_challenges.py assistant_secret_flow.py assistant_secret_store.py local_registry.py \
      assistant_account_challenges.py assistant_account_flow.py oauth_account_store.py oauth_account_service.py \
      oauth_broker_client.py oauth_http_client.py oauth_pkce_challenges.py oauth_providers.py \
-     team_storage.py brain_runtime_client.py brain_runtime_token_store.py chat_orchestrator.py chat_turn_engine.py controller_routing.py inference_config.py \
+     team_storage.py brain_runtime_client.py brain_runtime_token_store.py chat_orchestrator.py chat_turn_engine.py inference_config.py \
      model_catalog.json egress_policy.py strict_http.py power_execution.py power_journal.py pgdriver_client.py accounts_client.py brain_credentials_client.py healthcheck.py ./
 
 # Pre-create + own every named-volume mountpoint so the fresh (root:root) volume is writable by the

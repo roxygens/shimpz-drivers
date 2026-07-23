@@ -40,7 +40,6 @@ import brain_runtime_client
 import brain_runtime_token_store
 import chat_orchestrator
 import chat_turn_engine
-import controller_routing
 import docker
 import egress_policy
 import inference_config
@@ -3962,7 +3961,7 @@ class Handler(BaseHTTPRequestHandler):
         controller = self.server.controller
         if self.command not in {"POST", "PUT"}:
             self._reject_body()
-        route = controller_routing.resolve(controller_routing.LOCAL, self.command, tuple(parts))
+        route = strict_http.resolve_controller_route(strict_http.LOCAL_CONTROLLER, self.command, tuple(parts))
         if route is None:
             raise ApiProblem(HTTPStatus.NOT_FOUND, "route not found", code="route-not-found")
 
