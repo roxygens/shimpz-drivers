@@ -2082,11 +2082,26 @@ class LocalController:
         except ApiProblem:
             self.secret_challenges.cancel_team(team_id)
             raise
-        if outcome.continuation != payload.continuation or not self._commit_chat_terminal(team_id, token):
-            self.secret_challenges.cancel_team(team_id)
-            self._delete_chat_continuation(team_id, challenge.id)
-            raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
+        self._commit_suspension(team_id, token, outcome, payload, self.secret_challenges, challenge.id)
         return self._challenge_response(challenge)
+
+    def _commit_suspension(
+        self,
+        team_id: str,
+        token: str,
+        outcome: chat_orchestrator.ChatSuspension,
+        payload: _PendingLocalChat,
+        challenge_store: object,
+        challenge_id: str,
+    ) -> None:
+        chat_turn_engine.commit_suspension(
+            outcome.continuation,
+            payload.continuation,
+            lambda: self._commit_chat_terminal(team_id, token),
+            lambda: challenge_store.cancel_team(team_id),
+            lambda: ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped"),
+            lambda: self._delete_chat_continuation(team_id, challenge_id),
+        )
 
     def _account_response(
         self,
@@ -2126,10 +2141,7 @@ class LocalController:
         except ApiProblem:
             self.account_challenges.cancel_team(team_id)
             raise
-        if outcome.continuation != payload.continuation or not self._commit_chat_terminal(team_id, token):
-            self.account_challenges.cancel_team(team_id)
-            self._delete_chat_continuation(team_id, challenge.id)
-            raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
+        self._commit_suspension(team_id, token, outcome, payload, self.account_challenges, challenge.id)
         return self._account_response(challenge)
 
     def _pause_approval(
@@ -2153,10 +2165,7 @@ class LocalController:
         except ApiProblem:
             self.approval_challenges.cancel_team(team_id)
             raise
-        if outcome.continuation != payload.continuation or not self._commit_chat_terminal(team_id, token):
-            self.approval_challenges.cancel_team(team_id)
-            self._delete_chat_continuation(team_id, challenge.id)
-            raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
+        self._commit_suspension(team_id, token, outcome, payload, self.approval_challenges, challenge.id)
         return self._approval_response(challenge)
 
     @staticmethod
@@ -2199,10 +2208,7 @@ class LocalController:
         except ApiProblem:
             self.input_challenges.cancel_team(team_id)
             raise
-        if outcome.continuation != payload.continuation or not self._commit_chat_terminal(team_id, token):
-            self.input_challenges.cancel_team(team_id)
-            self._delete_chat_continuation(team_id, challenge.id)
-            raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
+        self._commit_suspension(team_id, token, outcome, payload, self.input_challenges, challenge.id)
         return self._input_response(challenge)
 
     def _store_chat_input(

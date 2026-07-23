@@ -229,6 +229,22 @@ def suspension_gate_count(*requirements: tuple[object, ...]) -> int:
     return sum(bool(group) for group in requirements)
 
 
+def commit_suspension(
+    continuation: object,
+    pending_continuation: object,
+    commit: Callable[[], bool],
+    cancel: Callable[[], None],
+    stopped_error: Callable[[], BaseException],
+    cleanup: Callable[[], None] = lambda: None,
+) -> None:
+    """Commit one matching suspension or roll back every persisted challenge artifact."""
+    if continuation == pending_continuation and commit():
+        return
+    cancel()
+    cleanup()
+    raise stopped_error()
+
+
 def dispatch(
     outcome: chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension,
     requirements: tuple[tuple[object, ...], ...],

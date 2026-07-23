@@ -2736,10 +2736,24 @@ def _pause_hosted_chat(
         challenge = _assistant_secret_challenges.create(team_id, requirements, pending)
     except assistant_secret_challenges.SecretChallengeError as exc:
         raise ApiError(HTTPStatus.CONFLICT, "Assistant secret request is already pending") from exc
-    if outcome.continuation != pending.continuation or not _commit_chat_terminal(team_id, token):
-        _assistant_secret_challenges.cancel_team(team_id)
-        raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
+    _commit_hosted_suspension(team_id, token, outcome, pending, _assistant_secret_challenges)
     return assistant_secret_flow.challenge_payload(challenge)
+
+
+def _commit_hosted_suspension(
+    team_id: str,
+    token: str,
+    outcome: chat_orchestrator.ChatSuspension,
+    pending: _PendingHostedChat,
+    challenge_store: object,
+) -> None:
+    chat_turn_engine.commit_suspension(
+        outcome.continuation,
+        pending.continuation,
+        lambda: _commit_chat_terminal(team_id, token),
+        lambda: challenge_store.cancel_team(team_id),
+        lambda: ApiError(HTTPStatus.CONFLICT, "brain turn stopped"),
+    )
 
 
 def _hosted_account_challenge_payload(
@@ -2770,9 +2784,7 @@ def _pause_hosted_connection(
         challenge = _assistant_account_challenges.create(team_id, requirements, pending)
     except assistant_account_challenges.AccountChallengeError as exc:
         raise ApiError(HTTPStatus.CONFLICT, "Assistant account request is already pending") from exc
-    if outcome.continuation != pending.continuation or not _commit_chat_terminal(team_id, token):
-        _assistant_account_challenges.cancel_team(team_id)
-        raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
+    _commit_hosted_suspension(team_id, token, outcome, pending, _assistant_account_challenges)
     return _hosted_account_challenge_payload(challenge)
 
 
@@ -2804,9 +2816,7 @@ def _pause_hosted_input(
         assistant_input_flow.InputFlowError,
     ) as exc:
         raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant human input request is invalid") from exc
-    if outcome.continuation != pending.continuation or not _commit_chat_terminal(team_id, token):
-        _assistant_input_challenges.cancel_team(team_id)
-        raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
+    _commit_hosted_suspension(team_id, token, outcome, pending, _assistant_input_challenges)
     return assistant_input_flow.challenge_payload(challenge)
 
 
@@ -2821,9 +2831,7 @@ def _pause_hosted_approval(
         challenge = _assistant_approval_challenges.create(team_id, requirements, pending)
     except assistant_approval_challenges.ApprovalChallengeError as exc:
         raise ApiError(HTTPStatus.CONFLICT, "Assistant approval is already pending") from exc
-    if outcome.continuation != pending.continuation or not _commit_chat_terminal(team_id, token):
-        _assistant_approval_challenges.cancel_team(team_id)
-        raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
+    _commit_hosted_suspension(team_id, token, outcome, pending, _assistant_approval_challenges)
     return assistant_approval_flow.challenge_payload(challenge)
 
 

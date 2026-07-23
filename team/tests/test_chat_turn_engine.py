@@ -198,6 +198,39 @@ class SharedChatTurnEngineTest(unittest.TestCase):
                 expected_identity=("identity",),
             )
 
+    def test_matching_suspension_commits_without_rollback(self) -> None:
+        decisions: list[str] = []
+
+        chat_turn_engine.commit_suspension(
+            "continuation",
+            "continuation",
+            lambda: decisions.append("commit") is None,
+            lambda: decisions.append("cancel"),
+            lambda: RuntimeError("stopped"),
+            lambda: decisions.append("cleanup"),
+        )
+
+        self.assertEqual(decisions, ["commit"])
+
+    def test_stale_or_failed_suspension_rolls_back_before_error(self) -> None:
+        def assert_rollback(continuation: str, commit_result: bool, expected: list[str]) -> None:
+            decisions: list[str] = []
+
+            with self.assertRaisesRegex(RuntimeError, "stopped"):
+                chat_turn_engine.commit_suspension(
+                    continuation,
+                    "continuation",
+                    lambda: decisions.append("commit") is None and commit_result,
+                    lambda: decisions.append("cancel"),
+                    lambda: RuntimeError("stopped"),
+                    lambda: decisions.append("cleanup"),
+                )
+
+            self.assertEqual(decisions, expected)
+
+        assert_rollback("stale", True, ["cancel", "cleanup"])
+        assert_rollback("continuation", False, ["commit", "cancel", "cleanup"])
+
     def test_rpc_request_suspension_populates_the_input_category(self) -> None:
         strategy = self._strategy(decisions=[])
         strategy = chat_turn_engine.SegmentStrategy(
