@@ -24,11 +24,12 @@ COPY local_app.py local_registry.py local_token_store.py local_healthcheck.py te
     assistant_account_challenges.py assistant_account_flow.py oauth_account_store.py oauth_account_service.py \
     oauth_broker_client.py oauth_http_client.py oauth_pkce_challenges.py oauth_providers.py \
     assistant_chat.py brain_runtime_client.py brain_runtime_token_store.py chat_orchestrator.py chat_turn_engine.py inference_config.py \
-    local_chat_continuations.py local_chat_continuation_store.py \
+    local_chat_continuation_store.py \
     model_catalog.json \
     egress_policy.py power_execution.py power_journal.py ./
 COPY assistant_human ./assistant_human
 COPY http_boundary ./http_boundary
+COPY local_chat_continuations.py ./
 COPY local_support ./local_support
 
 # A normal source build remains possible, but cannot start until release automation supplies the
