@@ -86,13 +86,17 @@ class ProxyHandlerTest(unittest.TestCase):
         server = APP_EGRESS.Server(("127.0.0.1", 0), APP_EGRESS.Handler, bind_and_activate=False)
         accepted, peer = socket.socketpair()
         peer.settimeout(2)
-        try:
-            peer.sendall(payload)
-            server.process_request(accepted, ("127.0.0.1", 12345))
-            return peer.recv(512)
-        finally:
-            peer.close()
-            server.server_close()
+        previous_audit_path = APP_EGRESS.audit.AUDIT_PATH
+        with tempfile.TemporaryDirectory() as directory:
+            APP_EGRESS.audit.AUDIT_PATH = Path(directory) / "audit.jsonl"
+            try:
+                peer.sendall(payload)
+                server.process_request(accepted, ("127.0.0.1", 12345))
+                return peer.recv(512)
+            finally:
+                APP_EGRESS.audit.AUDIT_PATH = previous_audit_path
+                peer.close()
+                server.server_close()
 
     def test_handler_rejects_non_connect_requests(self) -> None:
         response = self._request(b"GET https://example.com HTTP/1.1\r\nHost: example.com\r\n\r\n")
