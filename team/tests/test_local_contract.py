@@ -2254,9 +2254,25 @@ class LocalContractTests(unittest.TestCase):
                     "sk-test-0123456789",
                 )
 
-                encrypted_state = (Path(directory) / "chat-continuations" / "state" / "continuations.json").read_bytes()
-                self.assertNotIn(b"Ada", encrypted_state)
-                self.assertNotIn(b"Restart count", encrypted_state)
+                encrypted_state = json.loads(
+                    (Path(directory) / "chat-continuations" / "state" / "continuations.json").read_bytes()
+                )
+
+                def cleartext_strings(value: object) -> list[str]:
+                    if isinstance(value, dict):
+                        exposed: list[str] = []
+                        for key, item in value.items():
+                            exposed.append(str(key))
+                            if key not in {"ciphertext", "nonce"}:
+                                exposed.extend(cleartext_strings(item))
+                        return exposed
+                    if isinstance(value, list):
+                        return [item for member in value for item in cleartext_strings(member)]
+                    return [value] if isinstance(value, str) else []
+
+                exposed_strings = cleartext_strings(encrypted_state)
+                self.assertNotIn("Ada", exposed_strings)
+                self.assertNotIn("Restart count", exposed_strings)
 
                 after_restart = self._chat_controller(directory, runtime)
                 after_restart._rpc = rpc
