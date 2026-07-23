@@ -24,6 +24,9 @@ import oauth_pkce_challenges
 from assistant_human import approval_challenges as assistant_approval_challenges
 from assistant_human import approval_grants as assistant_approval_grants
 from assistant_human import input_challenges as assistant_input_challenges
+from local_support import assistant_lifecycle
+from local_support.assistant_rpc import ASSISTANT_UID
+from local_support.chat_types import ActiveAssistant
 
 LOOKUP_INPUT = {"page": 1, "per_page": 25}
 LOOKUP_RESULT = {
@@ -185,7 +188,7 @@ class LocalContractCase(unittest.TestCase):
         controller._assistant_container = lambda _team_id, _assistant: container
         controller._validate_container = lambda *_args: None
         controller._active_chat_assistants = lambda _team_id, _network: (
-            local_app._ActiveAssistant(controller.registry["shimpz-cloudflare"], container.id, container),
+            ActiveAssistant(controller.registry["shimpz-cloudflare"], container.id, container),
         )
         controller._active_assistant_genesis = lambda _active: "Use only the declared Cloudflare Powers."
         controller._restore_all_chat_continuations()
@@ -261,7 +264,7 @@ class LocalContractCase(unittest.TestCase):
                 "Config": {
                     "Labels": labels,
                     "Image": OUTDATED_ASSISTANT_IMAGE,
-                    "User": local_app.ASSISTANT_UID,
+                    "User": ASSISTANT_UID,
                     "Env": [],
                 },
                 "HostConfig": {
@@ -270,11 +273,11 @@ class LocalContractCase(unittest.TestCase):
                     "SecurityOpt": ["no-new-privileges:true"],
                     "Privileged": False,
                     "NetworkMode": network_name,
-                    "Memory": local_app.ASSISTANT_MEMORY,
-                    "MemorySwap": local_app.ASSISTANT_MEMORY,
-                    "NanoCpus": local_app.ASSISTANT_NANO_CPUS,
+                    "Memory": assistant_lifecycle.ASSISTANT_MEMORY,
+                    "MemorySwap": assistant_lifecycle.ASSISTANT_MEMORY,
+                    "NanoCpus": assistant_lifecycle.ASSISTANT_NANO_CPUS,
                     "CpusetCpus": controller.cpuset_cpus,
-                    "PidsLimit": local_app.ASSISTANT_PIDS,
+                    "PidsLimit": assistant_lifecycle.ASSISTANT_PIDS,
                     "IpcMode": "private",
                     "CgroupnsMode": "private",
                     "Tmpfs": None,

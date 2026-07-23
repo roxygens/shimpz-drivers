@@ -27,6 +27,7 @@ import local_token_store
 from assistant_human import approval_challenges as assistant_approval_challenges
 from assistant_human import input_challenges as assistant_input_challenges
 from local_controller_harness import LocalContractCase
+from local_support import assistant_lifecycle
 from local_support import audit as local_audit
 from local_support import http as local_http
 from local_support.validation import validate_model_credential_headers
@@ -201,17 +202,17 @@ class LocalContractTests(LocalContractCase):
                 local_app.validate_team_name(invalid)
 
     def test_container_limits_and_stateless_recovery_are_intentionally_narrow(self) -> None:
-        self.assertEqual(local_app.ASSISTANT_NANO_CPUS, 250_000_000)
-        self.assertEqual(local_app.ASSISTANT_MEMORY, 128 * 1024 * 1024)
-        self.assertEqual(local_app.ASSISTANT_PIDS, 64)
+        self.assertEqual(assistant_lifecycle.ASSISTANT_NANO_CPUS, 250_000_000)
+        self.assertEqual(assistant_lifecycle.ASSISTANT_MEMORY, 128 * 1024 * 1024)
+        self.assertEqual(assistant_lifecycle.ASSISTANT_PIDS, 64)
         self.assertEqual(local_app.half_cpu_set(96), "0-47")
         self.assertEqual(local_app.half_cpu_set(8), "0-3")
         self.assertEqual(local_app.half_cpu_set(1), "0")
         readiness = local_app.ApiProblem(HTTPStatus.BAD_GATEWAY, "not ready", code="assistant-not-ready")
         ownership = local_app.ApiProblem(HTTPStatus.CONFLICT, "drift", code="ownership-conflict")
-        self.assertTrue(local_app._is_replaceable_readiness_failure("shimpz-cloudflare", readiness))
-        self.assertFalse(local_app._is_replaceable_readiness_failure("future-stateful-assistant", readiness))
-        self.assertFalse(local_app._is_replaceable_readiness_failure("shimpz-cloudflare", ownership))
+        self.assertTrue(assistant_lifecycle._is_replaceable_readiness_failure("shimpz-cloudflare", readiness))
+        self.assertFalse(assistant_lifecycle._is_replaceable_readiness_failure("future-stateful-assistant", readiness))
+        self.assertFalse(assistant_lifecycle._is_replaceable_readiness_failure("shimpz-cloudflare", ownership))
 
     def test_local_controller_bootstraps_tokens_before_serving(self) -> None:
         events: list[str] = []

@@ -25,7 +25,7 @@ import oauth_account_service
 import oauth_account_store
 import oauth_broker_client
 from local_support.chat_segment import SegmentRequest
-from local_support.chat_types import PendingLocalChat
+from local_support.chat_types import ActiveAssistant, PendingLocalChat
 
 TEST_ACCESS_TOKEN = "oauth-access-test-token-123456789"
 TEST_REFRESH_TOKEN = "oauth-refresh-test-token-123456789"
@@ -350,7 +350,7 @@ class LocalOAuthAccountTests(unittest.TestCase):
                 )
             )
             controller.approval_grants = SimpleNamespace()
-            active = local_app._ActiveAssistant(spec, "b" * 64)
+            active = ActiveAssistant(spec, "b" * 64)
             setup = (
                 "Team One",
                 "c" * 64,
@@ -423,7 +423,7 @@ class LocalOAuthAccountTests(unittest.TestCase):
                 Path(directory) / "key" / "aes256.key",
             )
             config = inference_config.InferenceConfig("openai", "gpt-5-nano")
-            active = local_app._ActiveAssistant(spec, "b" * 64)
+            active = ActiveAssistant(spec, "b" * 64)
             setup = ("Team One", "c" * 64, (active,), [], config)
             identity = controller._chat_identity(*setup)
             controller._chat_setup = lambda *_args: setup

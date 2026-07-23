@@ -13,6 +13,7 @@ sys.path.insert(0, str(TEAM))
 import brain_runtime_client
 import local_app
 from local_controller_harness import LocalContractCase
+from local_support.chat_types import ActiveAssistant
 from local_support.validation import MAX_CHAT_ASSISTANTS
 
 LOOKUP_INPUT = {"page": 1, "per_page": 25}
@@ -79,8 +80,8 @@ class LocalChatScopeTests(LocalContractCase):
             )
             controller.registry[account_helper.assistant_id] = account_helper
             controller._active_chat_assistants = lambda _team_id, _network: (
-                local_app._ActiveAssistant(hello, "hello-container"),
-                local_app._ActiveAssistant(account_helper, "account-helper-container"),
+                ActiveAssistant(hello, "hello-container"),
+                ActiveAssistant(account_helper, "account-helper-container"),
             )
 
             response = controller.chat(
@@ -178,9 +179,7 @@ class LocalChatScopeTests(LocalContractCase):
             controller = self._chat_controller(directory, Runtime())
             spec = controller.registry["shimpz-cloudflare"]
             generations = iter(("assistant-v1", "assistant-v2"))
-            controller._active_chat_assistants = lambda _team_id, _network: (
-                local_app._ActiveAssistant(spec, next(generations)),
-            )
+            controller._active_chat_assistants = lambda _team_id, _network: (ActiveAssistant(spec, next(generations)),)
 
             with self.assertRaises(local_app.ApiProblem) as caught:
                 controller.chat(
@@ -253,8 +252,8 @@ class LocalChatScopeTests(LocalContractCase):
             )
             controller.registry[account_helper.assistant_id] = account_helper
             controller._active_chat_assistants = lambda _team_id, _network: (
-                local_app._ActiveAssistant(hello, "hello-container"),
-                local_app._ActiveAssistant(account_helper, "account-helper-container"),
+                ActiveAssistant(hello, "hello-container"),
+                ActiveAssistant(account_helper, "account-helper-container"),
             )
             controller.invoke = lambda *_args: self.fail("an unselected Assistant Power executed")
 

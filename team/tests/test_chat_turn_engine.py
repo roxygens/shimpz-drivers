@@ -24,6 +24,7 @@ import local_registry
 import power_execution
 from local_support import chat_segment as local_chat_segment
 from local_support.chat_segment import SegmentRequest
+from local_support.chat_types import ActiveAssistant
 
 hosted_app = hosted_harness.app
 
@@ -302,7 +303,7 @@ class SharedChatTurnEngineTest(unittest.TestCase):
             secrets={},
             allowed_hosts=(),
         )
-        local_active = local_app._ActiveAssistant(local_spec, assistant_container.id)
+        local_active = ActiveAssistant(local_spec, assistant_container.id)
         request = SimpleNamespace(
             interrupt_id="interrupt-1",
             assistant_id=assistant_id,
