@@ -57,6 +57,22 @@ class PowerJournalTests(unittest.TestCase):
         with self.assertRaises(power_journal.PowerJournalUncertainError):
             reopened.begin(same, self.first)
 
+    def test_explicit_suspension_allows_replay_after_reopen(self) -> None:
+        journal = self.journal()
+        batch = journal.prepare_batch("generation-1", "thread-1", [self.first])
+        self.assertTrue(journal.begin(batch, self.first).execute)
+
+        journal.suspend(batch, self.first)
+        journal.suspend(batch, self.first)
+        journal.close()
+
+        reopened = self.journal()
+        same = reopened.prepare_batch("generation-1", "thread-1", [self.first])
+        self.assertTrue(reopened.begin(same, self.first).execute)
+        reopened.complete(same, self.first, {"replayed": True})
+        with self.assertRaises(power_journal.PowerJournalConflictError):
+            reopened.suspend(same, self.first)
+
     def test_changed_pending_batch_and_changed_completed_result_fail_closed(self) -> None:
         journal = self.journal()
         batch = journal.prepare_batch("generation-1", "thread-1", [self.first])

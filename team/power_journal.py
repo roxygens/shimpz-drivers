@@ -3,7 +3,9 @@
 The journal stores only caller-provided fingerprints and bounded Power results. Raw
 Power inputs never cross this boundary. An operation durably enters ``executing``
 before its side effect starts; finding it there again is intentionally an uncertain
-outcome and fails closed instead of risking a duplicate side effect.
+outcome and fails closed instead of risking a duplicate side effect. Only a
+successfully decoded human-interaction suspension may explicitly return it to
+``prepared`` for deterministic replay.
 """
 
 from __future__ import annotations
@@ -513,6 +515,41 @@ class PowerJournal:
                 if isinstance(exc, StopIteration):
                     raise PowerJournalCorruptionError("Power operation is missing") from exc
                 raise PowerJournalError("Power result could not be committed") from exc
+
+    def suspend(self, batch: Batch, operation: Operation) -> None:
+        """Return an explicitly suspended operation to its replayable state."""
+
+        batch = self._validate_handle(batch)
+        operation = _operation(operation)
+        if operation not in batch.operations:
+            raise PowerJournalConflictError("operation does not belong to this Power batch")
+        with self._guard:
+            self._ensure_open()
+            self._transaction()
+            try:
+                operations = self._load_batch(batch)
+                persisted = next(row for row in operations if row[1] == operation.interrupt_id)
+                state, existing = persisted[3], persisted[4]
+                if state == "prepared" and existing is None:
+                    self._commit()
+                    return
+                if state != "executing" or existing is not None:
+                    raise PowerJournalConflictError("Power operation cannot be suspended")
+                self._connection.execute(
+                    """UPDATE operations SET state = 'prepared'
+                       WHERE generation = ? AND interrupt_id = ? AND state = 'executing'""",
+                    (batch.generation, operation.interrupt_id),
+                )
+                if self._connection.execute("SELECT changes()").fetchone() != (1,):
+                    raise PowerJournalConflictError("Power operation changed before suspension")
+                self._commit()
+            except (sqlite3.Error, PowerJournalError, StopIteration) as exc:
+                self._rollback()
+                if isinstance(exc, PowerJournalError):
+                    raise
+                if isinstance(exc, StopIteration):
+                    raise PowerJournalCorruptionError("Power operation is missing") from exc
+                raise PowerJournalError("Power suspension could not be committed") from exc
 
     def delivered(self, batch: Batch) -> None:
         batch = self._validate_handle(batch)
