@@ -2410,7 +2410,7 @@ class LocalContractTests(unittest.TestCase):
         self.assertLess(events.index("admit"), events.index("start"))
         self.assertEqual(events[-4:], ["start", "validate", "ready", "genesis"])
 
-    def test_local_admission_reviews_hosts_secrets_and_power_bindings(self) -> None:
+    def test_local_admission_reviews_hosts_and_accounts(self) -> None:
         controller = object.__new__(local_app.LocalController)
         reviewed_contracts: list[local_app.assistant_manifest.ManifestContract] = []
 
@@ -2426,38 +2426,17 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(allowed_hosts, tuple(sorted(spec.allowed_hosts)))
         self.assertEqual(len(reviewed_contracts), 1)
         self.assertEqual(
-            {secret.id for secret in reviewed_contracts[0].secrets},
-            set(spec.secrets),
-        )
-        self.assertEqual(
-            dict(reviewed_contracts[0].power_secrets),
-            {power_id: tuple(sorted(power.secrets)) for power_id, power in spec.powers.items()},
-        )
-        self.assertEqual(
             {account.id: (account.provider, account.scopes) for account in reviewed_contracts[0].accounts},
             {
                 account_id: (account.provider, tuple(sorted(account.scopes)))
                 for account_id, account in spec.accounts.items()
             },
         )
-        self.assertEqual(
-            dict(reviewed_contracts[0].power_accounts),
-            {power_id: tuple(sorted(power.accounts)) for power_id, power in spec.powers.items()},
-        )
-
         exact = reviewed_contracts[0]
         account = exact.accounts[0]
-        first_power, _first_refs = next(item for item in exact.power_accounts if item[1])
         drifted = (
             replace(exact, accounts=(replace(account, provider="other"),)),
             replace(exact, accounts=(replace(account, scopes=("tweet.read",)),)),
-            replace(
-                exact,
-                power_accounts=tuple(
-                    (power_id, ()) if power_id == first_power else (power_id, refs)
-                    for power_id, refs in exact.power_accounts
-                ),
-            ),
         )
         controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
         with mock.patch.object(

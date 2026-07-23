@@ -1034,8 +1034,6 @@ class LocalController:
         try:
             reviewed = assistant_manifest.reviewed_manifest_contract(
                 allowed_hosts=spec.allowed_hosts,
-                secrets=spec.secrets,
-                powers=spec.powers,
                 accounts=spec.accounts,
             )
             return self._assistant_allowed_hosts_cache.get(container, reviewed).allowed_hosts

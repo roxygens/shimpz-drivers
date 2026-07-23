@@ -276,38 +276,17 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             self.assertEqual(app._admit_app_contract(spec, container), tuple(sorted(spec.allowed_hosts)))
         self.assertEqual(len(reviewed_contracts), 1)
         self.assertEqual(
-            {secret.id for secret in reviewed_contracts[0].secrets},
-            set(spec.assistant.secrets),
-        )
-        self.assertEqual(
-            dict(reviewed_contracts[0].power_secrets),
-            {power_id: tuple(sorted(power.secrets)) for power_id, power in spec.assistant.powers.items()},
-        )
-        self.assertEqual(
             {account.id: (account.provider, account.scopes) for account in reviewed_contracts[0].accounts},
             {
                 account_id: (account.provider, tuple(sorted(account.scopes)))
                 for account_id, account in spec.assistant.accounts.items()
             },
         )
-        self.assertEqual(
-            dict(reviewed_contracts[0].power_accounts),
-            {power_id: tuple(sorted(power.accounts)) for power_id, power in spec.assistant.powers.items()},
-        )
-
         exact = reviewed_contracts[0]
         account = exact.accounts[0]
-        first_power, _first_refs = next(item for item in exact.power_accounts if item[1])
         drifted = (
             replace(exact, accounts=(replace(account, provider="other"),)),
             replace(exact, accounts=(replace(account, scopes=("tweet.read",)),)),
-            replace(
-                exact,
-                power_accounts=tuple(
-                    (power_id, ()) if power_id == first_power else (power_id, refs)
-                    for power_id, refs in exact.power_accounts
-                ),
-            ),
         )
         with (
             _patched(_assistant_allowed_hosts_cache=app.assistant_manifest.ManifestContractCache()),

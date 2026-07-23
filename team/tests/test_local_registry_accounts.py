@@ -32,14 +32,10 @@ class LocalRegistryAccountTests(unittest.TestCase):
         self.assertEqual(
             assistant_manifest.reviewed_manifest_contract(
                 allowed_hosts=spec.allowed_hosts,
-                secrets=spec.secrets,
-                powers=spec.powers,
                 accounts=spec.accounts,
             ),
             assistant_manifest.reviewed_manifest_contract(
                 allowed_hosts=hosted.allowed_hosts,
-                secrets=hosted.assistant.secrets,
-                powers=hosted.assistant.powers,
                 accounts=hosted.assistant.accounts,
             ),
         )

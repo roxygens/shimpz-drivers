@@ -1,4 +1,3 @@
-schema_version = 2
 name = "Shimpz Cloudflare"
 summary = "List Cloudflare zones and inspect their DNS records through OAuth."
 creators = ["@roxygens"]
@@ -6,15 +5,4 @@ github = "https://github.com/TheShimpz/shimpz-cloudflare"
 allowed_hosts = ["api.cloudflare.com"]
 
 [accounts.cloudflare]
-provider = "cloudflare"
 scopes = ["zone.read", "dns.read", "offline_access"]
-
-[powers.list-zones]
-summary = "List a bounded page of Cloudflare zones and domains."
-approval = "never"
-accounts = ["cloudflare"]
-
-[powers.list-dns-records]
-summary = "List a bounded page of DNS records from one Cloudflare zone."
-approval = "never"
-accounts = ["cloudflare"]

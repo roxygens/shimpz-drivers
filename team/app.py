@@ -1665,8 +1665,6 @@ def _require_assistant_allowed_hosts(spec: marketplace.AppSpec, container) -> tu
     try:
         reviewed = assistant_manifest.reviewed_manifest_contract(
             allowed_hosts=spec.allowed_hosts,
-            secrets=contract.secrets,
-            powers=contract.powers,
             accounts=contract.accounts,
         )
         return _assistant_allowed_hosts_cache.get(container, reviewed).allowed_hosts

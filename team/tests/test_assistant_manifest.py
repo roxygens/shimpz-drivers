@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 import tarfile
 import unittest
 from pathlib import Path
@@ -16,49 +15,21 @@ FIXTURE_MANIFEST = Path(__file__).resolve().parent / "fixtures" / "reference-ass
 def manifest(
     *,
     allowed_hosts: tuple[str, ...] = ("api.example.com",),
-    secrets: dict[str, tuple[str, str]] | None = None,
-    powers: dict[str, tuple[str, ...]] | None = None,
-    accounts: dict[str, tuple[str, tuple[str, ...]]] | None = None,
-    power_accounts: dict[str, tuple[str, ...]] | None = None,
+    accounts: str = "",
+    name: str = "Fixture Assistant",
+    summary: str = "Exercise immutable admission.",
+    creators: str = '["@fixture"]',
+    github: str = "https://github.com/TheShimpz/fixture-assistant",
 ) -> bytes:
-    declarations = secrets if secrets is not None else {"api-token": ("API Token", "Token for the public API.")}
-    bindings = powers if powers is not None else {"lookup": tuple(declarations)}
-    account_declarations = accounts if accounts is not None else {}
-    account_bindings = power_accounts if power_accounts is not None else dict.fromkeys(bindings, ())
-    lines = [
-        "schema_version = 2",
-        'name = "Fixture Assistant"',
-        'summary = "Exercise immutable admission."',
-        'creators = ["@fixture"]',
-        f"allowed_hosts = {json.dumps(list(allowed_hosts))}",
-    ]
-    for secret_id, (name, summary) in declarations.items():
-        lines.extend(
-            (
-                f"[secrets.{secret_id}]",
-                f"name = {json.dumps(name)}",
-                f"summary = {json.dumps(summary)}",
-            )
-        )
-    for account_id, (provider, scopes) in account_declarations.items():
-        lines.extend(
-            (
-                f"[accounts.{account_id}]",
-                f"provider = {json.dumps(provider)}",
-                f"scopes = {json.dumps(list(scopes))}",
-            )
-        )
-    for power_id, refs in bindings.items():
-        lines.extend(
-            (
-                f"[powers.{power_id}]",
-                f"summary = {json.dumps(f'Run {power_id}.')}",
-                'approval = "never"',
-                f"secrets = {json.dumps(list(refs))}",
-                f"accounts = {json.dumps(list(account_bindings.get(power_id, ())))}",
-            )
-        )
-    return ("\n".join(lines) + "\n").encode()
+    hosts = ", ".join(f'"{host}"' for host in allowed_hosts)
+    return (
+        f'name = "{name}"\n'
+        f'summary = "{summary}"\n'
+        f"creators = {creators}\n"
+        f'github = "{github}"\n'
+        f"allowed_hosts = [{hosts}]\n"
+        f"{accounts}"
+    ).encode()
 
 
 def archive(
@@ -97,18 +68,10 @@ class Container:
 
 
 class AssistantManifestTests(unittest.TestCase):
-    def test_docker_lifecycle_fixture_matches_the_reviewed_cloudflare_contract(self):
+    def test_reference_fixture_matches_the_reviewed_cloudflare_security_intent(self) -> None:
         declared = assistant_manifest.parse_manifest_contract(FIXTURE_MANIFEST.read_bytes())
         reviewed = assistant_manifest.reviewed_manifest_contract(
             allowed_hosts=cloudflare_assistant_contract.ASSISTANT_ALLOWED_HOSTS,
-            secrets={
-                secret_id: SimpleNamespace(**metadata)
-                for secret_id, metadata in cloudflare_assistant_contract.secret_contracts().items()
-            },
-            powers={
-                power_id: SimpleNamespace(**metadata)
-                for power_id, metadata in cloudflare_assistant_contract.power_contracts().items()
-            },
             accounts={
                 account_id: SimpleNamespace(**metadata)
                 for account_id, metadata in cloudflare_assistant_contract.account_contracts().items()
@@ -117,72 +80,72 @@ class AssistantManifestTests(unittest.TestCase):
 
         self.assertEqual(declared, reviewed)
 
-    def test_manifest_limit_matches_the_public_sdk_contract(self):
-        self.assertEqual(assistant_manifest.MAX_MANIFEST_BYTES, 256 * 1024)
-        self.assertEqual(assistant_manifest.MAX_SECRET_ID_LENGTH, 64)
-
-    def test_secret_ids_share_the_encrypted_store_bound(self):
-        accepted = "s" + ("a" * 63)
-        rejected = "s" + ("a" * 64)
-
-        contract = assistant_manifest.parse_manifest_contract(
-            manifest(secrets={accepted: ("Bounded", "Exactly sixty-four characters.")})
-        )
-        self.assertEqual(contract.secrets[0].id, accepted)
-
-        for content in (
-            manifest(secrets={rejected: ("Too long", "Exceeds the store bound.")}),
-            manifest(secrets={accepted: ("Bounded", "Exactly sixty-four characters.")}).replace(
-                f'secrets = ["{accepted}"]'.encode(),
-                f'secrets = ["{rejected}"]'.encode(),
-            ),
-        ):
-            with self.subTest(content=content), self.assertRaises(assistant_manifest.ManifestError):
-                assistant_manifest.parse_manifest_contract(content)
-
-    def test_reads_and_canonicalizes_complete_security_contract(self):
+    def test_reads_reduced_manifest_and_derives_provider_from_account_id(self) -> None:
         content = manifest(
-            allowed_hosts=("cdn.example.com", "api.example.com"),
-            secrets={
-                "write-key": ("Write Key", "Authorizes reviewed writes."),
-                "read-key": ("Read Key", "Authorizes reviewed reads."),
-            },
-            powers={"write": ("write-key",), "read": ("read-key",)},
-            accounts={"social": ("cloudflare", ("zone.read", "dns.read"))},
-            power_accounts={"write": ("social",), "read": ("social",)},
+            allowed_hosts=("api.cloudflare.com",),
+            accounts='[accounts.cloudflare]\nscopes = ["zone.read", "dns.read", "offline_access"]\n',
         )
 
         contract = assistant_manifest.read_container_manifest_contract(Container("container-one", content))
 
-        self.assertEqual(contract.allowed_hosts, ("api.example.com", "cdn.example.com"))
-        self.assertEqual(
-            contract.secrets,
-            (
-                assistant_manifest.SecretDeclaration("read-key", "Read Key", "Authorizes reviewed reads."),
-                assistant_manifest.SecretDeclaration("write-key", "Write Key", "Authorizes reviewed writes."),
-            ),
-        )
+        self.assertEqual(contract.allowed_hosts, ("api.cloudflare.com",))
         self.assertEqual(
             contract.accounts,
             (
                 assistant_manifest.AccountDeclaration(
-                    "social",
                     "cloudflare",
-                    ("dns.read", "zone.read"),
+                    "cloudflare",
+                    ("dns.read", "offline_access", "zone.read"),
                 ),
             ),
         )
-        self.assertEqual(contract.power_secrets, (("read", ("read-key",)), ("write", ("write-key",))))
-        self.assertEqual(contract.power_accounts, (("read", ("social",)), ("write", ("social",))))
 
-    def test_empty_lists_are_valid_and_security_intent_is_required(self):
-        empty = manifest(allowed_hosts=(), secrets={}, powers={"hello": ()})
-        self.assertEqual(assistant_manifest.parse_manifest_contract(empty).allowed_hosts, ())
-        for content in (b'name = "No intent"\n', b"schema_version = 2\nallowed_hosts = 1\n"):
+    def test_accounts_are_optional(self) -> None:
+        contract = assistant_manifest.parse_manifest_contract(manifest(allowed_hosts=()))
+
+        self.assertEqual(contract.allowed_hosts, ())
+        self.assertEqual(contract.accounts, ())
+
+    def test_v2_manifest_fields_fail_closed(self) -> None:
+        obsolete = (
+            b"schema_version = 2\n",
+            b'[powers.lookup]\nsummary = "Lookup."\n',
+            b'[secrets.token]\nname = "Token"\nsummary = "Old."\n',
+            b'[accounts.cloudflare]\nprovider = "cloudflare"\nscopes = ["zone.read"]\n',
+        )
+
+        for addition in obsolete:
+            with self.subTest(addition=addition), self.assertRaises(assistant_manifest.ManifestError):
+                assistant_manifest.parse_manifest_contract(manifest() + addition)
+
+    def test_unknown_provider_and_unreviewed_scopes_fail_closed(self) -> None:
+        invalid = (
+            '[accounts.github]\nscopes = ["repo.read"]\n',
+            '[accounts.cloudflare]\nscopes = ["zone.write"]\n',
+            '[accounts.cloudflare]\nscopes = ["zone.read", "zone.read"]\n',
+            "[accounts.cloudflare]\nscopes = []\n",
+        )
+
+        for accounts in invalid:
+            with self.subTest(accounts=accounts), self.assertRaises(assistant_manifest.ManifestError):
+                assistant_manifest.parse_manifest_contract(manifest(accounts=accounts))
+
+    def test_public_metadata_is_required_and_bounded(self) -> None:
+        invalid = (
+            b'name = "Only a name"\n',
+            manifest(name=" Leading"),
+            manifest(summary="line\nbreak"),
+            manifest(creators="[]"),
+            manifest(creators='["fixture"]'),
+            manifest(github="http://github.com/TheShimpz/fixture"),
+            manifest() + b'homepage = "https://example.com"\n',
+        )
+
+        for content in invalid:
             with self.subTest(content=content), self.assertRaises(assistant_manifest.ManifestError):
                 assistant_manifest.parse_manifest_contract(content)
 
-    def test_unsafe_hosts_fail_closed(self):
+    def test_unsafe_hosts_fail_closed(self) -> None:
         unsafe = (
             "*.example.com",
             "https://example.com",
@@ -194,98 +157,25 @@ class AssistantManifestTests(unittest.TestCase):
             "example..com",
             "tést.example",
             "api.example.test",
-            "api.example.123",
         )
         for host in unsafe:
             with self.subTest(host=host), self.assertRaises(assistant_manifest.ManifestError):
-                assistant_manifest.canonical_allowed_hosts([host])
-        with self.assertRaises(assistant_manifest.ManifestError):
-            assistant_manifest.canonical_allowed_hosts(["api.example.com", "api.example.com"])
+                assistant_manifest.parse_manifest_contract(manifest(allowed_hosts=(host,)))
 
-    def test_invalid_text_toml_and_size_fail_closed(self):
+    def test_invalid_text_toml_size_and_credential_material_fail_closed(self) -> None:
         invalid = (
             b"",
             manifest() + b"\x00",
             b"\xff",
-            b'schema_version = 2\nallowed_hosts = ["example.com"',
+            b'name = "invalid',
             b"cloudflare" * (assistant_manifest.MAX_MANIFEST_BYTES + 1),
+            manifest() + b'access_token = "credential-value-123456"\n',
         )
         for content in invalid:
             with self.subTest(size=len(content)), self.assertRaises(assistant_manifest.ManifestError):
                 assistant_manifest.parse_manifest_contract(content)
 
-    def test_secret_declarations_and_power_references_fail_closed(self):
-        invalid = (
-            manifest(secrets={"unused": ("Unused", "Never exposed.")}, powers={"hello": ()}),
-            manifest(secrets={}, powers={"hello": ("missing",)}),
-            manifest(powers={"hello": ("api-token", "api-token")}),
-            manifest().replace(
-                b'summary = "Token for the public API."',
-                b'summary = "Token for the public API."\nvalue = "must-not-exist"',
-            ),
-            manifest() + b'api_key = "sk-examplecredentialmaterial123"\n',
-        )
-        for content in invalid:
-            with self.subTest(content=content), self.assertRaises(assistant_manifest.ManifestError):
-                assistant_manifest.parse_manifest_contract(content)
-
-    def test_account_declarations_and_power_references_fail_closed(self):
-        valid = manifest(
-            secrets={},
-            powers={"lookup": ()},
-            accounts={"cloudflare": ("cloudflare", ("dns.read", "zone.read"))},
-            power_accounts={"lookup": ("cloudflare",)},
-        )
-        contract = assistant_manifest.parse_manifest_contract(valid)
-        self.assertEqual(contract.accounts[0].provider, "cloudflare")
-        self.assertEqual(contract.accounts[0].scopes, ("dns.read", "zone.read"))
-
-        invalid = (
-            manifest(
-                secrets={},
-                powers={"lookup": ()},
-                accounts={"cloudflare": ("cloudflare", ("dns.read",))},
-                power_accounts={"lookup": ()},
-            ),
-            manifest(secrets={}, powers={"lookup": ()}, power_accounts={"lookup": ("missing",)}),
-            manifest(
-                secrets={},
-                powers={"lookup": ()},
-                accounts={"cloudflare": ("cloudflare", ("dns.read", "dns.read"))},
-                power_accounts={"lookup": ("cloudflare",)},
-            ),
-            valid.replace(b'scopes = ["dns.read", "zone.read"]', b"scopes = []"),
-            valid.replace(b'provider = "cloudflare"', b'provider = "Cloudflare"'),
-            valid.replace(b'scopes = ["dns.read", "zone.read"]', b'scopes = ["tweet/read"]'),
-            valid.replace(
-                b'scopes = ["dns.read", "zone.read"]',
-                b'scopes = ["dns.read"]\ntoken_url = "https://evil.example"',
-            ),
-        )
-        for content in invalid:
-            with self.subTest(content=content), self.assertRaises(assistant_manifest.ManifestError):
-                assistant_manifest.parse_manifest_contract(content)
-
-    def test_obsolete_connections_contract_fails_closed(self):
-        valid = manifest(
-            secrets={},
-            powers={"lookup": ()},
-            accounts={"cloudflare": ("cloudflare", ("dns.read",))},
-            power_accounts={"lookup": ("cloudflare",)},
-        )
-        for obsolete in (
-            valid.replace(b"[accounts.cloudflare]", b"[connections.cloudflare]"),
-            valid.replace(b'accounts = ["cloudflare"]', b'connections = ["cloudflare"]'),
-        ):
-            with self.subTest(obsolete=obsolete), self.assertRaises(assistant_manifest.ManifestError):
-                assistant_manifest.parse_manifest_contract(obsolete)
-
-    def test_unknown_top_level_fields_fail_closed(self):
-        for field in (b'homepage = "https://example.com"\n', b"[runtime]\nport = 8080\n"):
-            with self.subTest(field=field), self.assertRaises(assistant_manifest.ManifestError):
-                assistant_manifest.parse_manifest_contract(manifest() + field)
-
-    def test_archive_shape_and_metadata_fail_closed(self):
+    def test_archive_shape_and_metadata_fail_closed(self) -> None:
         valid = manifest()
         invalid_cases = (
             (archive(valid, name="other.toml"), {"name": "shimpz.toml", "size": len(valid), "mode": 0o444}),
@@ -313,68 +203,35 @@ class AssistantManifestTests(unittest.TestCase):
                     )()
                 )
 
-    def test_cache_compares_every_reviewed_field_and_rejects_drift(self):
+    def test_cache_compares_reviewed_hosts_and_accounts_and_rejects_drift(self) -> None:
         content = manifest(
-            allowed_hosts=("api.example.com", "cdn.example.com"),
-            secrets={"api-token": ("API Token", "Token for the public API.")},
-            powers={"lookup": ("api-token",)},
-            accounts={"social": ("cloudflare", ("dns.read", "zone.read"))},
-            power_accounts={"lookup": ("social",)},
+            allowed_hosts=("api.cloudflare.com",),
+            accounts='[accounts.cloudflare]\nscopes = ["dns.read", "zone.read"]\n',
         )
         container = Container("container-one", content)
         cache = assistant_manifest.ManifestContractCache(max_entries=1)
-
         expected = assistant_manifest.canonical_manifest_contract(
-            allowed_hosts=("cdn.example.com", "api.example.com"),
-            secret_declarations={"api-token": ("API Token", "Token for the public API.")},
-            power_secret_refs={"lookup": ("api-token",)},
-            account_declarations={"social": ("cloudflare", ("zone.read", "dns.read"))},
-            power_account_refs={"lookup": ("social",)},
+            allowed_hosts=("api.cloudflare.com",),
+            account_declarations={"cloudflare": ("zone.read", "dns.read")},
         )
+
         self.assertEqual(cache.get(container, expected), expected)
         self.assertEqual(cache.get(container, expected), expected)
         self.assertEqual(container.reads, 1)
+
         drifted = (
             assistant_manifest.canonical_manifest_contract(
-                allowed_hosts=("api.example.com", "evil.example.com"),
-                secret_declarations={"api-token": ("API Token", "Token for the public API.")},
-                power_secret_refs={"lookup": ("api-token",)},
-                account_declarations={"social": ("cloudflare", ("dns.read", "zone.read"))},
-                power_account_refs={"lookup": ("social",)},
+                allowed_hosts=("api.github.com",),
+                account_declarations={"cloudflare": ("zone.read", "dns.read")},
             ),
             assistant_manifest.canonical_manifest_contract(
-                allowed_hosts=("api.example.com", "cdn.example.com"),
-                secret_declarations={"api-token": ("Different Name", "Token for the public API.")},
-                power_secret_refs={"lookup": ("api-token",)},
-                account_declarations={"social": ("cloudflare", ("dns.read", "zone.read"))},
-                power_account_refs={"lookup": ("social",)},
-            ),
-            assistant_manifest.canonical_manifest_contract(
-                allowed_hosts=("api.example.com", "cdn.example.com"),
-                secret_declarations={"api-token": ("API Token", "Token for the public API.")},
-                power_secret_refs={"other-power": ("api-token",)},
-                account_declarations={"social": ("cloudflare", ("dns.read", "zone.read"))},
-                power_account_refs={"other-power": ("social",)},
-            ),
-            assistant_manifest.canonical_manifest_contract(
-                allowed_hosts=("api.example.com", "cdn.example.com"),
-                secret_declarations={"api-token": ("API Token", "Token for the public API.")},
-                power_secret_refs={"lookup": ("api-token",)},
-                account_declarations={"social": ("other", ("dns.read", "zone.read"))},
-                power_account_refs={"lookup": ("social",)},
-            ),
-            assistant_manifest.canonical_manifest_contract(
-                allowed_hosts=("api.example.com", "cdn.example.com"),
-                secret_declarations={"api-token": ("API Token", "Token for the public API.")},
-                power_secret_refs={"lookup": ("api-token",)},
+                allowed_hosts=("api.cloudflare.com",),
+                account_declarations={"cloudflare": ("zone.read",)},
             ),
         )
         for reviewed in drifted:
             with self.subTest(reviewed=reviewed), self.assertRaises(assistant_manifest.ManifestError):
                 cache.get(container, reviewed)
-        cache.discard(container.id)
-        cache.get(container, expected)
-        self.assertEqual(container.reads, 2)
 
 
 if __name__ == "__main__":
