@@ -128,6 +128,23 @@ def workloads_isolated() -> bool:
     return True
 
 
+def _workload_network_kinds(
+    metadata: dict,
+    team_id: str,
+    image_ids: dict[str, str],
+) -> frozenset[str] | None:
+    expected_image = _expected_workload_image(metadata, image_ids)
+    if expected_image is None or not network_policy.workload_security_valid(
+        metadata,
+        team_id,
+        REQUIRED_RUNTIME,
+        expected_image_ref=expected_image[0],
+        expected_image_id=expected_image[1],
+    ):
+        return None
+    return network_policy.workload_network_kinds(metadata, team_id)
+
+
 def _inspect_workloads(
     summaries: list,
 ) -> (
@@ -169,16 +186,7 @@ def _inspect_workloads(
             brains_by_team_id[team_id] = brains_by_team_id.get(team_id, 0) + 1
             if running:
                 running_brains.add(team_id)
-        expected_image = _expected_workload_image(metadata, image_ids)
-        if expected_image is None or not network_policy.workload_security_valid(
-            metadata,
-            team_id,
-            REQUIRED_RUNTIME,
-            expected_image_ref=expected_image[0],
-            expected_image_id=expected_image[1],
-        ):
-            return None
-        expected_kinds = network_policy.workload_network_kinds(metadata, team_id)
+        expected_kinds = _workload_network_kinds(metadata, team_id, image_ids)
         if expected_kinds is None:
             return None
         workloads[container_id] = (team_id, expected_kinds, running)
@@ -199,6 +207,55 @@ def _load_network_members(network: dict, inspections: dict[str, dict]) -> bool:
     return True
 
 
+def _team_network_ready(
+    team_id: str,
+    inspections: dict[str, dict],
+    running_brains: set[str],
+    workloads: dict[str, tuple[str, frozenset[str], bool]],
+) -> bool:
+    kind = network_policy.CORE_KIND
+    name = network_policy.network_name(team_id, kind)
+    encoded = urllib.parse.quote(name, safe="")
+    network_status, network = _docker_json(f"/networks/{encoded}")
+    if network_status != 200 or not isinstance(network, dict):
+        return False
+    if not _load_network_members(network, inspections) or not network_policy.network_members_valid(
+        network,
+        inspections,
+        team_id,
+        kind,
+        # Engine omits an intentionally stopped anchor from network inventory. Its immutable
+        # image/resource/endpoint was proved above; only a running anchor must be a live member.
+        require_brain=team_id in running_brains,
+        require_dependencies=True,
+    ):
+        return False
+    for workload_id, (workload_team_id, expected_kinds, running) in workloads.items():
+        if (
+            workload_team_id == team_id
+            and kind in expected_kinds
+            and (
+                not network_policy.workload_endpoint_valid(
+                    network,
+                    inspections[workload_id],
+                    team_id,
+                    kind,
+                )
+                or (
+                    running
+                    and not network_policy.workload_live_membership_valid(
+                        network,
+                        inspections[workload_id],
+                        team_id,
+                        kind,
+                    )
+                )
+            )
+        ):
+            return False
+    return True
+
+
 def network_topology_ready() -> bool:
     """Require exact workload posture and core-network membership for every Team."""
     status, summaries = _docker_json("/containers/json?all=1")
@@ -211,48 +268,7 @@ def network_topology_ready() -> bool:
     if any(brains_by_team_id.get(team_id) != 1 for team_id in team_ids):
         return False
 
-    for team_id in team_ids:
-        kind = network_policy.CORE_KIND
-        name = network_policy.network_name(team_id, kind)
-        encoded = urllib.parse.quote(name, safe="")
-        network_status, network = _docker_json(f"/networks/{encoded}")
-        if network_status != 200 or not isinstance(network, dict):
-            return False
-        if not _load_network_members(network, inspections) or not network_policy.network_members_valid(
-            network,
-            inspections,
-            team_id,
-            kind,
-            # Engine omits an intentionally stopped anchor from network inventory. Its immutable
-            # image/resource/endpoint was proved above; only a running anchor must be a live member.
-            require_brain=team_id in running_brains,
-            require_dependencies=True,
-        ):
-            return False
-        for workload_id, (workload_team_id, expected_kinds, running) in workloads.items():
-            if (
-                workload_team_id == team_id
-                and kind in expected_kinds
-                and (
-                    not network_policy.workload_endpoint_valid(
-                        network,
-                        inspections[workload_id],
-                        team_id,
-                        kind,
-                    )
-                    or (
-                        running
-                        and not network_policy.workload_live_membership_valid(
-                            network,
-                            inspections[workload_id],
-                            team_id,
-                            kind,
-                        )
-                    )
-                )
-            ):
-                return False
-    return True
+    return all(_team_network_ready(team_id, inspections, running_brains, workloads) for team_id in team_ids)
 
 
 def auth_gate_ready() -> bool:
