@@ -22,6 +22,7 @@ import inference_config
 import local_app
 import local_registry
 import power_execution
+from local_support import chat_segment as local_chat_segment
 from local_support.chat_segment import SegmentRequest
 
 hosted_app = hosted_harness.app
@@ -380,7 +381,7 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         controller.approval_grants = SimpleNamespace()
         turn_token = "turn-token"
 
-        with mock.patch.object(local_app.chat_turn_engine, "run_segment", side_effect=capture("local")):
+        with mock.patch.object(local_chat_segment.chat_turn_engine, "run_segment", side_effect=capture("local")):
             controller._run_chat_segment(
                 SegmentRequest(
                     team_id="team_1",

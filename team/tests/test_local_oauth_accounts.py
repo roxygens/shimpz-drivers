@@ -25,6 +25,7 @@ import oauth_account_service
 import oauth_account_store
 import oauth_broker_client
 from local_support.chat_segment import SegmentRequest
+from local_support.chat_types import PendingLocalChat
 
 TEST_ACCESS_TOKEN = "oauth-access-test-token-123456789"
 TEST_REFRESH_TOKEN = "oauth-refresh-test-token-123456789"
@@ -426,7 +427,7 @@ class LocalOAuthAccountTests(unittest.TestCase):
             setup = ("Team One", "c" * 64, (active,), [], config)
             identity = controller._chat_identity(*setup)
             controller._chat_setup = lambda *_args: setup
-            pending = local_app._PendingLocalChat(
+            pending = PendingLocalChat(
                 continuation=continuation,
                 assistant_ids=(spec.assistant_id,),
                 file_ids=(),

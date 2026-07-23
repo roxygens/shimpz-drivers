@@ -11,23 +11,28 @@ UV_IMAGE = "ghcr.io/astral-sh/uv:0.11.25@sha256:1e3808aa9023d0980e7c15b1fa7c1ac1
 
 def _runtime_import_closure(*entrypoints: str) -> set[str]:
     pending = list(entrypoints)
-    modules = set()
+    visited = set()
+    root_modules = set()
     while pending:
         module = pending.pop()
-        if module in modules:
+        if module in visited:
             continue
-        path = ROOT / f"{module}.py"
+        visited.add(module)
+        path = ROOT / f"{module.replace('.', '/')}.py"
+        if not path.is_file():
+            path = ROOT / module.replace(".", "/") / "__init__.py"
         if not path.is_file():
             continue
-        modules.add(module)
+        if "." not in module and path.parent == ROOT:
+            root_modules.add(module)
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             imported = []
             if isinstance(node, ast.Import):
-                imported = [alias.name.split(".", 1)[0] for alias in node.names]
+                imported = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom) and node.module:
-                imported = [node.module.split(".", 1)[0]]
-            pending.extend(name for name in imported if (ROOT / f"{name}.py").is_file())
-    return {f"{module}.py" for module in modules}
+                imported = [node.module, *(f"{node.module}.{alias.name}" for alias in node.names)]
+            pending.extend(imported)
+    return {f"{module}.py" for module in root_modules}
 
 
 class StaticTeamDriverImageContractTests(unittest.TestCase):
@@ -87,7 +92,12 @@ class StaticTeamDriverImageContractTests(unittest.TestCase):
         runtime = dockerfile.split(" AS runtime\n", 1)[1]
         logical_lines = re.sub(r"\\\n\s*", " ", runtime).splitlines()
         runtime_copy = next((line for line in logical_lines if line.startswith("COPY local_app.py ")), "")
-        packaged = set(re.findall(r"\b[a-z][a-z0-9_]*[.]py\b", runtime_copy))
+        packaged = {
+            filename
+            for line in logical_lines
+            if line.startswith("COPY ") and not line.startswith("COPY --from")
+            for filename in re.findall(r"\b[a-z][a-z0-9_]*[.]py\b", line)
+        }
 
         self.assertIn(f"FROM {UV_IMAGE} AS uv", dockerfile)
         self.assertIn("COPY --from=uv /uv /usr/local/bin/uv", dockerfile)
