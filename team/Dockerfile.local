@@ -24,6 +24,7 @@ COPY local_app.py local_audit.py local_registry.py local_token_store.py local_he
     assistant_account_challenges.py assistant_account_flow.py oauth_account_store.py oauth_account_service.py \
     oauth_broker_client.py oauth_http_client.py oauth_pkce_challenges.py oauth_providers.py \
     assistant_chat.py brain_runtime_client.py brain_runtime_token_store.py chat_orchestrator.py chat_turn_engine.py inference_config.py \
+    local_chat_continuations.py local_chat_continuation_store.py \
     model_catalog.json \
     egress_policy.py strict_http.py power_execution.py power_journal.py ./
 COPY assistant_human ./assistant_human
@@ -45,7 +46,8 @@ RUN groupadd --gid 10001 shimpzlocal && \
         /var/lib/shimpz-local/inference /var/lib/shimpz-local/power-journal /var/lib/shimpz-local/app-egress \
         /var/lib/shimpz-local/assistant-approvals \
         /var/lib/shimpz-local/assistant-secrets/state /var/lib/shimpz-local/assistant-secrets/key \
-        /var/lib/shimpz-local/assistant-accounts/state /var/lib/shimpz-local/assistant-accounts/key && \
+        /var/lib/shimpz-local/assistant-accounts/state /var/lib/shimpz-local/assistant-accounts/key \
+        /var/lib/shimpz-local/chat-continuations/state /var/lib/shimpz-local/chat-continuations/key && \
     chown shimpzlocal:shimpzteamdriver-token /run/shimpz-local && chmod 2750 /run/shimpz-local && \
     chown shimpzlocal:shimpzbrain-runtime-token /run/shimpz-brain-runtime && \
     chmod 0750 /run/shimpz-brain-runtime && \
@@ -53,14 +55,16 @@ RUN groupadd --gid 10001 shimpzlocal && \
         /var/lib/shimpz-local/inference /var/lib/shimpz-local/power-journal \
         /var/lib/shimpz-local/assistant-approvals \
         /var/lib/shimpz-local/assistant-secrets/state /var/lib/shimpz-local/assistant-secrets/key \
-        /var/lib/shimpz-local/assistant-accounts/state /var/lib/shimpz-local/assistant-accounts/key && \
+        /var/lib/shimpz-local/assistant-accounts/state /var/lib/shimpz-local/assistant-accounts/key \
+        /var/lib/shimpz-local/chat-continuations/state /var/lib/shimpz-local/chat-continuations/key && \
     chown shimpzlocal:shimpzapp-egress-policy /var/lib/shimpz-local/app-egress && \
     chmod 0770 /var/lib/shimpz-local/app-egress && \
     chmod 0700 /var/log/shimpz-local /var/lib/shimpz-local/storage /var/lib/shimpz-local/inference \
         /var/lib/shimpz-local/power-journal /var/lib/shimpz-local/assistant-secrets/state \
         /var/lib/shimpz-local/assistant-approvals \
         /var/lib/shimpz-local/assistant-secrets/key \
-        /var/lib/shimpz-local/assistant-accounts/state /var/lib/shimpz-local/assistant-accounts/key && \
+        /var/lib/shimpz-local/assistant-accounts/state /var/lib/shimpz-local/assistant-accounts/key \
+        /var/lib/shimpz-local/chat-continuations/state /var/lib/shimpz-local/chat-continuations/key && \
     chmod 0555 /app/local_healthcheck.py && chmod 0444 /etc/shimpz/local-assistants.json
 
 LABEL org.opencontainers.image.source="https://github.com/TheShimpz/shimpz-core" \
