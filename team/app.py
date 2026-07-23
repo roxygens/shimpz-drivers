@@ -2023,7 +2023,7 @@ def _resolve_power_secrets(
 ) -> dict[str, str]:
     power = contract.powers.get(power_id)
     if power is None:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "Assistant requested an undeclared Power")
+        raise ApiError(power_execution.UNDECLARED_POWER_STATUS, "Assistant requested an undeclared Power")
     secret_ids = tuple(getattr(power, "secrets", ()))
     if not secret_ids:
         return {}
@@ -2092,7 +2092,7 @@ def _resolve_power_accounts(
             _refresh_oauth_account,
         )
     except assistant_account_flow.AccountFlowError as exc:
-        raise ApiError(HTTPStatus.PRECONDITION_REQUIRED, "Assistant account is unavailable") from exc
+        raise ApiError(power_execution.ACCOUNT_PRECONDITION_STATUS, "Assistant account is unavailable") from exc
 
 
 def _require_hosted_power_rpc_envelope(
@@ -2238,7 +2238,7 @@ def _invoke_assistant_power(
         or assistant_chat.POWER_ID_RE.fullmatch(power) is None
         or power not in contract.powers
     ):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "Assistant requested an undeclared Power")
+        raise ApiError(power_execution.UNDECLARED_POWER_STATUS, "Assistant requested an undeclared Power")
     try:
         safe_input = marketplace.validate_power_input(assistant_id, power, payload)
     except ValueError as exc:

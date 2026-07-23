@@ -9,8 +9,14 @@ import socket
 import struct
 import time
 from collections.abc import Callable, Mapping
+from http import HTTPStatus
 
 import power_journal
+
+# A missing manifest Power is a missing resource; an unavailable connected account is an unmet
+# request precondition. Both Controllers use these statuses so their public contracts cannot drift.
+UNDECLARED_POWER_STATUS = HTTPStatus.NOT_FOUND
+ACCOUNT_PRECONDITION_STATUS = HTTPStatus.PRECONDITION_REQUIRED
 
 
 def power_operation(

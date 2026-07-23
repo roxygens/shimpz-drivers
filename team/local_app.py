@@ -1216,7 +1216,9 @@ class LocalController:
     def _resolve_power_secrets(self, team_id: str, spec: AssistantSpec, power_id: str) -> dict[str, str]:
         power = spec.powers.get(power_id)
         if power is None:
-            raise ApiProblem(HTTPStatus.NOT_FOUND, "Power is not declared", code="power-not-declared")
+            raise ApiProblem(
+                power_execution.UNDECLARED_POWER_STATUS, "Power is not declared", code="power-not-declared"
+            )
         try:
             return self.assistant_secrets.resolve_many(team_id, spec.assistant_id, power.secrets)
         except assistant_secret_store.AssistantSecretError as exc:
@@ -1279,7 +1281,7 @@ class LocalController:
             )
         except assistant_account_flow.AccountFlowError as exc:
             raise ApiProblem(
-                HTTPStatus.CONFLICT,
+                power_execution.ACCOUNT_PRECONDITION_STATUS,
                 "Assistant account is unavailable",
                 code="assistant-account-unavailable",
             ) from exc
@@ -3202,7 +3204,9 @@ class LocalController:
         spec = self._resolve(assistant_id)
         power_spec = spec.powers.get(power)
         if power_spec is None:
-            raise ApiProblem(HTTPStatus.NOT_FOUND, "Power is not declared", code="power-not-declared")
+            raise ApiProblem(
+                power_execution.UNDECLARED_POWER_STATUS, "Power is not declared", code="power-not-declared"
+            )
         try:
             safe_payload = validate_power_input(assistant_id, power, payload)
         except ValueError as exc:

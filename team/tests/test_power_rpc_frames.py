@@ -129,6 +129,35 @@ class PowerRpcFrameTests(unittest.TestCase):
                         batch.invoke(request)
         execute.assert_not_called()
 
+    def test_power_resolution_failures_have_identical_statuses(self) -> None:
+        hosted_contract = SimpleNamespace(powers={})
+        local_spec = SimpleNamespace(assistant_id="assistant", name="Assistant", powers={}, accounts={})
+
+        with self.assertRaises(app.ApiError) as hosted_secret:
+            app._resolve_power_secrets("team_1", "assistant", hosted_contract, "missing")
+        with self.assertRaises(local_app.ApiProblem) as local_secret:
+            self.local._resolve_power_secrets("team_1", local_spec, "missing")
+        self.assertEqual(
+            hosted_secret.exception.status,
+            local_secret.exception.status,
+            app.power_execution.UNDECLARED_POWER_STATUS,
+        )
+
+        hosted_active = SimpleNamespace(
+            assistant_id="assistant",
+            contract=SimpleNamespace(powers={}, secrets={}, accounts={}),
+        )
+        self.local.assistant_accounts = object()
+        with self.assertRaises(app.ApiError) as hosted_account:
+            app._resolve_power_accounts("team_1", hosted_active, "missing")
+        with self.assertRaises(local_app.ApiProblem) as local_account:
+            self.local._resolve_power_accounts("team_1", local_spec, "missing")
+        self.assertEqual(
+            hosted_account.exception.status,
+            local_account.exception.status,
+            app.power_execution.ACCOUNT_PRECONDITION_STATUS,
+        )
+
     def test_hosted_exchange_fail_stops_on_malformed_frame(self) -> None:
         with _socket_bytes(b"truncated") as raw_socket:
             stream = SimpleNamespace(_sock=raw_socket, close=lambda: None)
