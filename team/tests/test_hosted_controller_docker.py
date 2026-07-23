@@ -50,7 +50,7 @@ class HostedControllerDockerTests(unittest.TestCase):
     maxDiff = None
 
     def _run(self, *arguments: str, check: bool = True, timeout: int = 600) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(  # noqa: S603 - fixed Docker executable with test-owned arguments
+        result = subprocess.run(
             [DOCKER, *arguments],
             cwd=TEAM,
             env={**os.environ, "DOCKER_BUILDKIT": "1"},
@@ -85,7 +85,7 @@ class HostedControllerDockerTests(unittest.TestCase):
             method=method,
         )
         try:
-            response = urllib.request.urlopen(request, timeout=15)  # noqa: S310 - fixed loopback URL
+            response = urllib.request.urlopen(request, timeout=15)
         except urllib.error.HTTPError as exc:
             response = exc
         with response:
