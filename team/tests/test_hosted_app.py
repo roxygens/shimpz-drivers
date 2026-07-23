@@ -742,8 +742,14 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         )
         place_contract = types.SimpleNamespace(powers={"search": place_power})
         weather_contract = types.SimpleNamespace(powers={"current": weather_power})
-        place_container = types.SimpleNamespace(id="places-container")
-        weather_container = types.SimpleNamespace(id="weather-container")
+        place_container = types.SimpleNamespace(
+            id="places-container",
+            attrs={"Config": {"Image": "example.invalid/places@sha256:" + "1" * 64}},
+        )
+        weather_container = types.SimpleNamespace(
+            id="weather-container",
+            attrs={"Config": {"Image": "example.invalid/weather@sha256:" + "2" * 64}},
+        )
         anchor = types.SimpleNamespace(
             id=ANCHOR_ID,
             labels={"team.name": "Marketing", "team.owner": "account_1"},

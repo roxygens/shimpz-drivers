@@ -14,7 +14,6 @@ import base64
 import binascii
 import contextlib
 import functools
-import hashlib
 import hmac
 import http.client
 import ipaddress
@@ -22,9 +21,7 @@ import json
 import math
 import os
 import secrets
-import select
 import socket
-import struct
 import threading
 import time
 import weakref
@@ -54,7 +51,6 @@ import chat_orchestrator
 import cleanup_state
 import docker
 import docker.errors
-import docker.utils.socket as docker_socket
 import inference_config
 import manifests
 import marketplace
@@ -65,6 +61,7 @@ import oauth_account_store
 import oauth_http_client
 import oauth_pkce_challenges
 import pgdriver_client
+import power_execution
 import power_journal
 import team_storage
 import token_store
@@ -1719,115 +1716,28 @@ def _power_operation(
     secret_generations: tuple[tuple[str, int], ...] = (),
     account_generations: tuple[tuple[str, int], ...] = (),
 ) -> power_journal.Operation:
-    """Commit to one normalized request and private-state generation without plaintext."""
-    if not isinstance(assistant_container_id, str) or not assistant_container_id:
-        raise power_journal.PowerJournalConflictError("Assistant generation is invalid")
-    try:
-        encoded = json.dumps(
-            {
-                "approval": request.approval,
-                "assistant_container_id": assistant_container_id,
-                "assistant_id": request.assistant_id,
-                "account_generations": account_generations,
-                "input": request.input,
-                "power": request.power,
-                "secret_generations": secret_generations,
-            },
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
-        raise power_journal.PowerJournalConflictError("Power request cannot be fingerprinted") from exc
-    return power_journal.Operation(request.interrupt_id, hashlib.sha256(encoded).hexdigest())
+    spec = marketplace.APPS.get(request.assistant_id)
+    image = spec.image if spec is not None else ""
+    return power_execution.power_operation(
+        request,
+        assistant_container_id,
+        image,
+        secret_generations,
+        account_generations,
+    )
 
 
-class _HostedPowerBatch:
-    """Adapt one orchestrator suspension to the generation-scoped durable journal."""
-
-    def __init__(
-        self,
-        generation: str,
-        thread_id: str,
-        bindings: dict[str, _ActiveAssistant],
-        execute: Callable[[brain_runtime_client.PowerRequest], object],
-        preflight: Callable[[brain_runtime_client.PowerRequest], None],
-        secret_generations: Callable[
-            [brain_runtime_client.PowerRequest],
-            tuple[tuple[str, int], ...],
-        ] = lambda _request: (),
-        account_generations: Callable[
-            [brain_runtime_client.PowerRequest],
-            tuple[tuple[str, int], ...],
-        ] = lambda _request: (),
-    ) -> None:
-        self._generation = generation
-        self._thread_id = thread_id
-        self._bindings = bindings
-        self._execute = execute
-        self._preflight = preflight
-        self._secret_generations = secret_generations
-        self._account_generations = account_generations
-        self._journal: power_journal.PowerJournal | None = None
-        self._batch: power_journal.Batch | None = None
-        self._operations: dict[str, power_journal.Operation] = {}
-
-    def prepare(self, requests: tuple[brain_runtime_client.PowerRequest, ...]) -> None:
-        if self._batch is not None:
-            raise power_journal.PowerJournalConflictError("Power batch is already prepared")
-        operations: list[power_journal.Operation] = []
-        for request in requests:
-            active = self._bindings.get(request.assistant_id)
-            if active is None:
-                raise power_journal.PowerJournalConflictError("Power Assistant is unavailable")
-            self._preflight(request)
-            operations.append(
-                _power_operation(
-                    request,
-                    active.container.id,
-                    self._secret_generations(request),
-                    self._account_generations(request),
-                )
-            )
-        journal = _power_execution_journal()
-        batch = journal.prepare_batch(self._generation, self._thread_id, operations)
-        self._journal = journal
-        self._batch = batch
-        self._operations = {operation.interrupt_id: operation for operation in operations}
-
-    def invoke(self, request: brain_runtime_client.PowerRequest) -> object:
-        if self._journal is None or self._batch is None:
-            raise power_journal.PowerJournalConflictError("Power batch is not prepared")
-        operation = self._operations.get(request.interrupt_id)
-        if operation is None:
-            raise power_journal.PowerJournalConflictError("Power operation is not prepared")
-        decision = self._journal.begin(self._batch, operation)
-        if not decision.execute:
-            return decision.result
-        result = self._execute(request)
-        self._journal.complete(self._batch, operation, result)
-        return result
-
-    def delivered(self, requests: tuple[brain_runtime_client.PowerRequest, ...]) -> None:
-        if self._journal is None or self._batch is None:
-            raise power_journal.PowerJournalConflictError("Power batch is not prepared")
-        expected = tuple(operation.interrupt_id for operation in self._batch.operations)
-        if tuple(request.interrupt_id for request in requests) != expected:
-            raise power_journal.PowerJournalConflictError("Power delivery batch changed")
-        self._journal.delivered(self._batch)
-        self._journal = None
-        self._batch = None
-        self._operations = {}
+def _hosted_power_identity(active: _ActiveAssistant) -> tuple[object, object]:
+    config = getattr(active.container, "attrs", {}).get("Config", {})
+    image = config.get("Image") if isinstance(config, dict) else None
+    if not isinstance(image, str) or not image:
+        spec = marketplace.APPS.get(active.assistant_id)
+        image = spec.image if spec is not None else ""
+    return active.container.id, image
 
 
 def _close_exec_stream(stream) -> None:
-    """Close docker-py's owning HTTP response before its raw socket (Python 3.14 safe)."""
-    response = getattr(stream, "_response", None)
-    if response is not None:
-        response.close()
-    else:
-        stream.close()
+    power_execution.close_exec_stream(stream)
 
 
 def _installed_assistant(team_id: str, assistant_id: object):
@@ -1915,44 +1825,11 @@ def _select_team_assistants(
 
 
 def _read_rpc_exact(raw_socket: socket.socket, amount: int, deadline: float) -> bytes:
-    output = bytearray()
-    while len(output) < amount:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not select.select([raw_socket], [], [], remaining)[0]:
-            raise TimeoutError
-        chunk = raw_socket.recv(amount - len(output))
-        if not chunk:
-            raise EOFError
-        output.extend(chunk)
-    return bytes(output)
+    return power_execution._read_exact(raw_socket, amount, deadline)
 
 
 def _read_rpc_frames(raw_socket: socket.socket, deadline: float) -> tuple[bytes, bytes]:
-    stdout = bytearray()
-    stderr = bytearray()
-    while True:
-        try:
-            first = _read_rpc_exact(raw_socket, 1, deadline)
-        except EOFError:
-            break
-        try:
-            header = first + _read_rpc_exact(raw_socket, 7, deadline)
-        except EOFError as exc:
-            raise ValueError("truncated Assistant RPC frame header") from exc
-        stream_id, length = struct.unpack(">BxxxL", header)
-        if stream_id not in {docker_socket.STDOUT, docker_socket.STDERR}:
-            raise ValueError("invalid Assistant RPC stream")
-        if length > MAX_ASSISTANT_RPC_OUTPUT_BYTES + 1:
-            raise ValueError("oversized Assistant RPC frame")
-        try:
-            chunk = _read_rpc_exact(raw_socket, length, deadline)
-        except EOFError as exc:
-            raise ValueError("truncated Assistant RPC frame payload") from exc
-        target = stdout if stream_id == docker_socket.STDOUT else stderr
-        target.extend(chunk)
-        if len(stdout) + len(stderr) > MAX_ASSISTANT_RPC_OUTPUT_BYTES:
-            raise ValueError("oversized Assistant RPC response")
-    return bytes(stdout), bytes(stderr)
+    return power_execution.read_rpc_frames(raw_socket, deadline, MAX_ASSISTANT_RPC_OUTPUT_BYTES)
 
 
 def _register_active_power(team_id: str, token: str, container) -> None:
@@ -2163,9 +2040,7 @@ def _power_secret_generations(
         )
     except assistant_secret_store.AssistantSecretError as exc:
         raise power_journal.PowerJournalConflictError("Power secret state is unavailable") from exc
-    if any(not item.configured or item.generation is None for item in metadata):
-        raise power_journal.PowerJournalConflictError("Power secret generation is unavailable")
-    return tuple((item.id, int(item.generation)) for item in metadata)
+    return power_execution.private_generations(tuple(metadata), connected=False)
 
 
 def _resolve_power_secrets(
@@ -2210,9 +2085,7 @@ def _power_account_generations(
         )
     except oauth_account_store.OAuthAccountStoreError as exc:
         raise power_journal.PowerJournalConflictError("Power account state is unavailable") from exc
-    if any(item.status != "connected" or item.generation < 1 for item in metadata):
-        raise power_journal.PowerJournalConflictError("Power account generation is unavailable")
-    return tuple((item.id, item.generation) for item in metadata)
+    return power_execution.private_generations(tuple(metadata), connected=True)
 
 
 def _refresh_oauth_account(
@@ -2276,21 +2149,7 @@ def _require_hosted_power_rpc_envelope(
 
 
 def _contains_secret(value: object, secrets_by_id: dict[str, str]) -> bool:
-    """Detect literal secret echoes; transformed/encoded values require a separate control."""
-    secret_values = tuple(secret for secret in secrets_by_id.values() if secret)
-
-    def visit(item: object, depth: int = 0) -> bool:
-        if depth > 32:
-            return True
-        if isinstance(item, str):
-            return any(secret in item for secret in secret_values)
-        if isinstance(item, list | tuple):
-            return any(visit(child, depth + 1) for child in item)
-        if isinstance(item, dict):
-            return any(visit(key, depth + 1) or visit(child, depth + 1) for key, child in item.items())
-        return False
-
-    return bool(secret_values) and visit(value)
+    return power_execution.contains_secret(value, secrets_by_id)
 
 
 def _assistant_secret_inventory(
@@ -2597,7 +2456,7 @@ def _drive_hosted_chat(
     files: list[dict[str, object]],
     continuation: chat_orchestrator.ChatContinuation | None,
     validate_power: Callable,
-    durable_batch: _HostedPowerBatch,
+    durable_batch: power_execution.PowerBatch,
     pause_for_secrets: Callable,
     token: str,
     validate_context: Callable[[], None],
@@ -2760,10 +2619,12 @@ def _run_hosted_chat_segment(
         )
         return invocation["result"]
 
-    durable_batch = _HostedPowerBatch(
+    durable_batch = power_execution.PowerBatch(
+        _power_execution_journal,
         container.id,
         runtime_context.thread_id,
         bindings,
+        _hosted_power_identity,
         execute_power,
         lambda request: _require_hosted_power_rpc_envelope(team_id, bindings, request),
         lambda request: _power_secret_generations(

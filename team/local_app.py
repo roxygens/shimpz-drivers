@@ -15,10 +15,8 @@ import json
 import os
 import re
 import secrets
-import select
 import socket
 import stat
-import struct
 import sys
 import threading
 import time
@@ -53,6 +51,7 @@ import oauth_account_service
 import oauth_account_store
 import oauth_broker_client
 import oauth_pkce_challenges
+import power_execution
 import power_journal
 import team_storage
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
@@ -115,6 +114,7 @@ APP_EGRESS_POLICY_DIR = Path(
 )
 
 ASSISTANT_UID = "10001:10001"
+ASSISTANT_WORKDIR = str(Path("/") / "tmp")
 ASSISTANT_MEMORY = 128 * 1024 * 1024
 ASSISTANT_NANO_CPUS = 250_000_000
 ASSISTANT_PIDS = 64
@@ -205,107 +205,6 @@ def _required_active_assistant(
             code="assistant-unavailable",
         )
     return active
-
-
-def _power_operation(
-    request: brain_runtime_client.PowerRequest,
-    active: _ActiveAssistant,
-    secret_generations: tuple[tuple[str, int], ...],
-    account_generations: tuple[tuple[str, int], ...],
-) -> power_journal.Operation:
-    """Commit to a normalized request and immutable Assistant runtime, never raw journal input."""
-    if not active.container_id or not active.spec.image:
-        raise power_journal.PowerJournalConflictError("Assistant generation is invalid")
-    try:
-        encoded = json.dumps(
-            {
-                "approval": request.approval,
-                "assistant_container_id": active.container_id,
-                "assistant_id": request.assistant_id,
-                "assistant_image": active.spec.image,
-                "account_generations": account_generations,
-                "input": request.input,
-                "power": request.power,
-                "secret_generations": secret_generations,
-            },
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
-        raise power_journal.PowerJournalConflictError("Power request cannot be fingerprinted") from exc
-    return power_journal.Operation(request.interrupt_id, hashlib.sha256(encoded).hexdigest())
-
-
-class _LocalPowerBatch:
-    """Adapt one local Brain suspension to its network-generation journal."""
-
-    def __init__(
-        self,
-        journal: power_journal.PowerJournal,
-        generation: str,
-        thread_id: str,
-        bindings: dict[str, _ActiveAssistant],
-        execute: Callable[[brain_runtime_client.PowerRequest], object],
-        preflight: Callable[[brain_runtime_client.PowerRequest], None],
-        secret_generations: Callable[[brain_runtime_client.PowerRequest], tuple[tuple[str, int], ...]],
-        account_generations: Callable[[brain_runtime_client.PowerRequest], tuple[tuple[str, int], ...]],
-    ) -> None:
-        self._journal = journal
-        self._generation = generation
-        self._thread_id = thread_id
-        self._bindings = bindings
-        self._execute = execute
-        self._preflight = preflight
-        self._secret_generations = secret_generations
-        self._account_generations = account_generations
-        self._batch: power_journal.Batch | None = None
-        self._operations: dict[str, power_journal.Operation] = {}
-
-    def _operation(self, request: brain_runtime_client.PowerRequest) -> power_journal.Operation:
-        active = self._bindings.get(request.assistant_id)
-        if active is None:
-            raise power_journal.PowerJournalConflictError("Power Assistant is unavailable")
-        self._preflight(request)
-        return _power_operation(
-            request,
-            active,
-            self._secret_generations(request),
-            self._account_generations(request),
-        )
-
-    def prepare(self, requests: tuple[brain_runtime_client.PowerRequest, ...]) -> None:
-        if self._batch is not None:
-            raise power_journal.PowerJournalConflictError("Power batch is already prepared")
-        operations = [self._operation(request) for request in requests]
-        self._batch = self._journal.prepare_batch(self._generation, self._thread_id, operations)
-        self._operations = {operation.interrupt_id: operation for operation in operations}
-
-    def invoke(self, request: brain_runtime_client.PowerRequest) -> object:
-        if self._batch is None:
-            raise power_journal.PowerJournalConflictError("Power batch is not prepared")
-        operation = self._operations.get(request.interrupt_id)
-        if operation is None:
-            raise power_journal.PowerJournalConflictError("Power operation is not prepared")
-        if self._operation(request) != operation:
-            raise power_journal.PowerJournalConflictError("Power credential generation changed")
-        decision = self._journal.begin(self._batch, operation)
-        if not decision.execute:
-            return decision.result
-        result = self._execute(request)
-        self._journal.complete(self._batch, operation, result)
-        return result
-
-    def delivered(self, requests: tuple[brain_runtime_client.PowerRequest, ...]) -> None:
-        if self._batch is None:
-            raise power_journal.PowerJournalConflictError("Power batch is not prepared")
-        expected = tuple(operation.interrupt_id for operation in self._batch.operations)
-        if tuple(request.interrupt_id for request in requests) != expected:
-            raise power_journal.PowerJournalConflictError("Power delivery batch changed")
-        self._journal.delivered(self._batch)
-        self._batch = None
-        self._operations = {}
 
 
 def _is_replaceable_readiness_failure(assistant_id: str, problem: ApiProblem) -> bool:
@@ -1561,9 +1460,7 @@ class LocalController:
             )
         except assistant_secret_store.AssistantSecretError as exc:
             raise power_journal.PowerJournalConflictError("Power secret state is unavailable") from exc
-        if any(not item.configured or item.generation is None for item in metadata):
-            raise power_journal.PowerJournalConflictError("Power secret generation is unavailable")
-        return tuple((item.id, int(item.generation)) for item in metadata)
+        return power_execution.private_generations(tuple(metadata), connected=False)
 
     def _resolve_power_secrets(self, team_id: str, spec: AssistantSpec, power_id: str) -> dict[str, str]:
         power = spec.powers.get(power_id)
@@ -1599,9 +1496,7 @@ class LocalController:
             )
         except oauth_account_store.OAuthAccountStoreError as exc:
             raise power_journal.PowerJournalConflictError("Power account state is unavailable") from exc
-        if any(item.status != "connected" or item.generation < 1 for item in metadata):
-            raise power_journal.PowerJournalConflictError("Power account generation is unavailable")
-        return tuple((item.id, item.generation) for item in metadata)
+        return power_execution.private_generations(tuple(metadata), connected=True)
 
     def _refresh_oauth_account(
         self,
@@ -1662,21 +1557,7 @@ class LocalController:
 
     @staticmethod
     def _contains_secret(value: object, secrets_by_id: dict[str, str]) -> bool:
-        """Detect literal secret echoes; transformed/encoded values require a separate control."""
-        secret_values = tuple(secret for secret in secrets_by_id.values() if secret)
-
-        def visit(item: object, depth: int = 0) -> bool:
-            if depth > 32:
-                return True
-            if isinstance(item, str):
-                return any(secret in item for secret in secret_values)
-            if isinstance(item, list | tuple):
-                return any(visit(child, depth + 1) for child in item)
-            if isinstance(item, dict):
-                return any(visit(key, depth + 1) or visit(child, depth + 1) for key, child in item.items())
-            return False
-
-        return bool(secret_values) and visit(value)
+        return power_execution.contains_secret(value, secrets_by_id)
 
     def list_assistant_secrets(self, team_id: str) -> dict[str, object]:
         team_id = validate_team_id(team_id)
@@ -1975,7 +1856,7 @@ class LocalController:
         files: list[dict[str, object]],
         continuation: chat_orchestrator.ChatContinuation | None,
         validate_power: Callable,
-        durable_batch: _LocalPowerBatch,
+        durable_batch: power_execution.PowerBatch,
         pause_for_secrets: Callable,
         pause_for_approval: Callable,
         approval_granted: Callable,
@@ -2226,11 +2107,12 @@ class LocalController:
                 request.input,
             )
 
-        durable_batch = _LocalPowerBatch(
+        durable_batch = power_execution.PowerBatch(
             self.power_state,
             network_id,
             context.thread_id,
             bindings,
+            lambda active: (active.container_id, active.spec.image),
             execute_power,
             lambda request: self._require_power_rpc_envelope(team_id, bindings, request),
             lambda request: self._power_secret_generations(
@@ -3062,11 +2944,7 @@ class LocalController:
 
     @staticmethod
     def _close_exec_stream(stream) -> None:
-        response = getattr(stream, "_response", None)
-        if response is not None:
-            response.close()
-        else:
-            stream.close()
+        power_execution.close_exec_stream(stream)
 
     def _fail_stop_power(self, container) -> None:
         """Stop, then kill if needed, and prove an ambiguous local Power cannot keep running."""
@@ -3106,47 +2984,10 @@ class LocalController:
 
     @staticmethod
     def _read_exact(raw_socket: socket.socket, amount: int, deadline: float) -> bytes:
-        output = bytearray()
-        while len(output) < amount:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not select.select([raw_socket], [], [], remaining)[0]:
-                raise TimeoutError
-            chunk = raw_socket.recv(amount - len(output))
-            if not chunk:
-                raise EOFError
-            output.extend(chunk)
-        return bytes(output)
+        return power_execution._read_exact(raw_socket, amount, deadline)
 
-    def _read_rpc_frames(self, raw_socket: socket.socket, deadline: float) -> tuple[bytes, int]:
-        stdout = bytearray()
-        stderr_bytes = 0
-        while True:
-            try:
-                first = self._read_exact(raw_socket, 1, deadline)
-            except EOFError:
-                break
-            try:
-                header = first + self._read_exact(raw_socket, 7, deadline)
-            except EOFError as exc:
-                raise ValueError("truncated Docker exec frame header") from exc
-            stream_id, length = struct.unpack(">BxxxL", header)
-            if stream_id not in {1, 2}:
-                raise ValueError("invalid Docker exec stream")
-            if length > MAX_RESPONSE_BYTES + 1:
-                raise ValueError("oversized Docker exec frame")
-            try:
-                chunk = self._read_exact(raw_socket, length, deadline)
-            except EOFError as exc:
-                raise ValueError("truncated Docker exec frame payload") from exc
-            if stream_id == 1:
-                stdout.extend(chunk)
-                if len(stdout) > MAX_RESPONSE_BYTES:
-                    raise ValueError("oversized Assistant response")
-            else:
-                stderr_bytes += len(chunk)
-                if stderr_bytes > MAX_RESPONSE_BYTES:
-                    raise ValueError("oversized Assistant error")
-        return bytes(stdout), stderr_bytes
+    def _read_rpc_frames(self, raw_socket: socket.socket, deadline: float) -> tuple[bytes, bytes]:
+        return power_execution.read_rpc_frames(raw_socket, deadline, MAX_RESPONSE_BYTES)
 
     def _rpc(
         self,
@@ -3175,6 +3016,8 @@ class LocalController:
                 stderr=True,
                 privileged=False,
                 user=ASSISTANT_UID,
+                workdir=ASSISTANT_WORKDIR,
+                environment={},
             )
             exec_id = created["Id"]
             stream = self.client.api.exec_start(exec_id, socket=True)
@@ -3184,7 +3027,7 @@ class LocalController:
             raw_socket.sendall(encoded)
             raw_socket.shutdown(socket.SHUT_WR)
             deadline = time.monotonic() + RPC_TIMEOUT_SECONDS
-            stdout, stderr_bytes = self._read_rpc_frames(raw_socket, deadline)
+            stdout, stderr = self._read_rpc_frames(raw_socket, deadline)
         except TimeoutError as exc:
             self._fail_stop_power(container)
             raise ApiProblem(
@@ -3217,8 +3060,8 @@ class LocalController:
                 "Assistant Power status is ambiguous",
                 code="assistant-rpc-failed",
             )
-        if exit_code != 0 or stderr_bytes:
-            if detect_unsupported_path and exit_code == 2 and stderr_bytes == 0 and not stdout:
+        if exit_code != 0 or stderr:
+            if detect_unsupported_path and exit_code == 2 and not stdout and not stderr:
                 raise _UnsupportedAssistantRpcPathError(path)
             raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant Power failed", code="assistant-rpc-failed")
         try:

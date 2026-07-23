@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -51,8 +52,6 @@ def _socket_bytes(payload: bytes, *, pieces: tuple[int, ...] = ()):
 
 class PowerRpcFrameTests(unittest.TestCase):
     def setUp(self) -> None:
-        app.docker_socket.STDOUT = 1
-        app.docker_socket.STDERR = 2
         self.local = object.__new__(local_app.LocalController)
 
     def test_split_stdout_and_stderr_frames_are_read_exactly(self) -> None:
@@ -60,12 +59,12 @@ class PowerRpcFrameTests(unittest.TestCase):
         with _socket_bytes(payload, pieces=(1, 2, 5, 3, 7)) as hosted_socket:
             stdout, stderr = app._read_rpc_frames(hosted_socket, time.monotonic() + 1)
         with _socket_bytes(payload, pieces=(4, 1, 6, 2)) as local_socket:
-            local_stdout, local_stderr_bytes = self.local._read_rpc_frames(local_socket, time.monotonic() + 1)
+            local_stdout, local_stderr = self.local._read_rpc_frames(local_socket, time.monotonic() + 1)
 
         self.assertEqual(stdout, b'{"ok":true}')
         self.assertEqual(stderr, b"warning")
         self.assertEqual(local_stdout, stdout)
-        self.assertEqual(local_stderr_bytes, len(stderr))
+        self.assertEqual(local_stderr, stderr)
 
     def test_malformed_frames_fail_closed_in_both_readers(self) -> None:
         oversized = struct.pack(">BxxxL", 1, max(app.MAX_ASSISTANT_RPC_OUTPUT_BYTES, local_app.MAX_RESPONSE_BYTES) + 2)
@@ -87,13 +86,57 @@ class PowerRpcFrameTests(unittest.TestCase):
         with _socket_bytes(b"") as hosted_socket:
             self.assertEqual(app._read_rpc_frames(hosted_socket, time.monotonic() + 1), (b"", b""))
         with _socket_bytes(b"") as local_socket:
-            self.assertEqual(self.local._read_rpc_frames(local_socket, time.monotonic() + 1), (b"", 0))
+            self.assertEqual(self.local._read_rpc_frames(local_socket, time.monotonic() + 1), (b"", b""))
+
+    def test_both_controller_bindings_reject_the_same_generation_drift(self) -> None:
+        request = app.brain_runtime_client.PowerRequest(
+            "interrupt-1", "assistant", "lookup", {"query": "safe"}, "none"
+        )
+        generation = [1]
+        execute = mock.Mock(return_value={"ok": True})
+        image = "example.invalid/assistant@sha256:" + "a" * 64
+        bindings = (
+            (
+                SimpleNamespace(container=SimpleNamespace(id="container-1"), image=image),
+                lambda item: (item.container.id, item.image),
+            ),
+            (
+                SimpleNamespace(container_id="container-1", spec=SimpleNamespace(image=image)),
+                lambda item: (item.container_id, item.spec.image),
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            for index, (binding, identity) in enumerate(bindings):
+                with self.subTest(adapter=index):
+                    journal = app.power_journal.PowerJournal(Path(directory) / f"journal-{index}.sqlite3")
+                    self.addCleanup(journal.close)
+                    batch = app.power_execution.PowerBatch(
+                        journal,
+                        "generation-1",
+                        "thread-1",
+                        {"assistant": binding},
+                        identity,
+                        execute,
+                        lambda _request: None,
+                        lambda _request: (("secret", generation[0]),),
+                    )
+                    generation[0] = 1
+                    batch.prepare((request,))
+                    generation[0] = 2
+                    with self.assertRaisesRegex(
+                        app.power_journal.PowerJournalConflictError,
+                        "Power credential generation changed",
+                    ):
+                        batch.invoke(request)
+        execute.assert_not_called()
 
     def test_hosted_exchange_fail_stops_on_malformed_frame(self) -> None:
         with _socket_bytes(b"truncated") as raw_socket:
             stream = SimpleNamespace(_sock=raw_socket, close=lambda: None)
+            create = mock.Mock(return_value={"Id": "exec-1"})
             api = SimpleNamespace(
-                exec_create=lambda *_args, **_kwargs: {"Id": "exec-1"},
+                exec_create=create,
                 exec_start=lambda *_args, **_kwargs: stream,
             )
             fail_stop = mock.Mock()
@@ -116,12 +159,15 @@ class PowerRpcFrameTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_GATEWAY)
         fail_stop.assert_called_once_with("team_1", container)
+        self.assertEqual(create.call_args.kwargs["workdir"], app.manifests.CONTAINER_TMP)
+        self.assertEqual(create.call_args.kwargs["environment"], {})
 
     def test_local_exchange_fail_stops_on_malformed_frame(self) -> None:
         with _socket_bytes(b"truncated") as raw_socket:
             stream = SimpleNamespace(_sock=raw_socket, close=lambda: None)
+            create = mock.Mock(return_value={"Id": "exec-1"})
             api = SimpleNamespace(
-                exec_create=lambda *_args, **_kwargs: {"Id": "exec-1"},
+                exec_create=create,
                 exec_start=lambda *_args, **_kwargs: stream,
             )
             controller = object.__new__(local_app.LocalController)
@@ -140,6 +186,8 @@ class PowerRpcFrameTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_GATEWAY)
         controller._fail_stop_power.assert_called_once()
+        self.assertEqual(create.call_args.kwargs["workdir"], local_app.ASSISTANT_WORKDIR)
+        self.assertEqual(create.call_args.kwargs["environment"], {})
 
 
 if __name__ == "__main__":
