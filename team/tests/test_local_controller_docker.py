@@ -209,6 +209,8 @@ class DockerFlowTests(unittest.TestCase):
         inference_volume = f"shimpz-local-inference-{unique}"
         power_journal_volume = f"shimpz-local-power-journal-{unique}"
         approval_state_volume = f"shimpz-local-approval-state-{unique}"
+        continuation_state_volume = f"shimpz-local-continuation-state-{unique}"
+        continuation_key_volume = f"shimpz-local-continuation-key-{unique}"
         egress_policy_volume = f"shimpz-local-egress-policy-{unique}"
         egress_audit_volume = f"shimpz-local-egress-audit-{unique}"
         space_id = f"test-space-{unique}"
@@ -325,6 +327,8 @@ class DockerFlowTests(unittest.TestCase):
             self._run("volume", "create", inference_volume)
             self._run("volume", "create", power_journal_volume)
             self._run("volume", "create", approval_state_volume)
+            self._run("volume", "create", continuation_state_volume)
+            self._run("volume", "create", continuation_key_volume)
             self._run("volume", "create", egress_policy_volume)
             self._run("volume", "create", egress_audit_volume)
             self._run("network", "create", outbound_network)
@@ -417,6 +421,10 @@ class DockerFlowTests(unittest.TestCase):
                 "--volume",
                 f"{approval_state_volume}:/var/lib/shimpz-local/assistant-approvals",
                 "--volume",
+                f"{continuation_state_volume}:/var/lib/shimpz-local/chat-continuations/state",
+                "--volume",
+                f"{continuation_key_volume}:/var/lib/shimpz-local/chat-continuations/key",
+                "--volume",
                 f"{egress_policy_volume}:/var/lib/shimpz-local/app-egress",
                 "--env",
                 f"SHIMPZ_SPACE_ID={space_id}",
@@ -449,6 +457,19 @@ class DockerFlowTests(unittest.TestCase):
                 "print(oct(stat.S_IMODE(s.st_mode)),s.st_uid,s.st_gid,s.st_nlink)",
             ).stdout.strip()
             self.assertEqual(approval_mode, "0o600 10001 10001 1")
+            continuation_files = self._run(
+                "exec",
+                controller,
+                "/opt/venv/bin/python",
+                "-c",
+                "import os,stat,time; from local_chat_continuation_store import EncryptedContinuationStore; "
+                "s=EncryptedContinuationStore(); "
+                "s.put('demo_team','input','0'*32,int(time.time())+60,['thread:test'],b'opaque'); "
+                "paths=(s.state_path,s.key_path); "
+                "print(' '.join(f'{oct(stat.S_IMODE(p.stat().st_mode))}:{p.stat().st_uid}:{p.stat().st_gid}' "
+                "for p in paths))",
+            ).stdout.strip()
+            self.assertEqual(continuation_files, "0o600:10001:10001 0o600:10001:10001")
 
             unauthenticated, _ = self._api(port, None, "GET", "/v1/assistants")
             self.assertEqual(unauthenticated, 401)
@@ -906,6 +927,8 @@ class DockerFlowTests(unittest.TestCase):
                 inference_volume,
                 power_journal_volume,
                 approval_state_volume,
+                continuation_state_volume,
+                continuation_key_volume,
                 egress_policy_volume,
                 egress_audit_volume,
             )
