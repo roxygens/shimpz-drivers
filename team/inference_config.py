@@ -9,7 +9,7 @@ import re
 import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import TypedDict
 
 ROOT = Path(os.environ.get("SHIMPZ_TEAM_INFERENCE_DIR", "/var/lib/team-driver/inference"))
 SCHEMA = 1
@@ -21,19 +21,16 @@ class ProviderDefinition(TypedDict):
     models: frozenset[str]
 
 
+_MODEL_CATALOG = json.loads(Path(__file__).with_name("model_catalog.json").read_text(encoding="utf-8"))
 PROVIDERS: dict[str, ProviderDefinition] = {
-    "openai": {
-        "title": "OpenAI",
-        "default_model": "gpt-5.6-terra",
-        "models": frozenset({"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"}),
-    },
-    "anthropic": {
-        "title": "Anthropic",
-        "default_model": "claude-sonnet-5",
-        "models": frozenset({"claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"}),
-    },
+    provider["id"]: {
+        "title": provider["title"],
+        "default_model": provider["default_model"],
+        "models": frozenset(model["id"] for model in provider["models"]),
+    }
+    for provider in _MODEL_CATALOG["providers"]
 }
-DEFAULT_PROVIDER = "openai"
+DEFAULT_PROVIDER = _MODEL_CATALOG["default_provider"]
 MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
 TEAM_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 
@@ -44,7 +41,7 @@ class InferenceConfigError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class InferenceConfig:
-    provider: Literal["anthropic", "openai"]
+    provider: str
     model: str
 
 

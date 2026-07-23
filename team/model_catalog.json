@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "default_provider": "openai",
+  "providers": [
+    {
+      "id": "openai",
+      "title": "OpenAI",
+      "default_model": "gpt-5.6-terra",
+      "credential_validation": {
+        "host": "api.openai.com",
+        "path": "/v1/models"
+      },
+      "models": [
+        {
+          "id": "gpt-5.6-sol",
+          "title": "GPT-5.6 Sol",
+          "input_usd_per_million_cents": 500,
+          "output_usd_per_million_cents": 3000
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "title": "GPT-5.6 Terra",
+          "input_usd_per_million_cents": 250,
+          "output_usd_per_million_cents": 1500
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "title": "GPT-5.6 Luna",
+          "input_usd_per_million_cents": 100,
+          "output_usd_per_million_cents": 600
+        },
+        {
+          "id": "gpt-5.5",
+          "title": "GPT-5.5",
+          "input_usd_per_million_cents": 500,
+          "output_usd_per_million_cents": 3000
+        }
+      ]
+    },
+    {
+      "id": "anthropic",
+      "title": "Anthropic",
+      "default_model": "claude-sonnet-5",
+      "credential_validation": {
+        "host": "api.anthropic.com",
+        "path": "/v1/models"
+      },
+      "models": [
+        {
+          "id": "claude-fable-5",
+          "title": "Claude Fable 5",
+          "input_usd_per_million_cents": 1000,
+          "output_usd_per_million_cents": 5000
+        },
+        {
+          "id": "claude-opus-4-8",
+          "title": "Claude Opus 4.8",
+          "input_usd_per_million_cents": 500,
+          "output_usd_per_million_cents": 2500
+        },
+        {
+          "id": "claude-sonnet-5",
+          "title": "Claude Sonnet 5",
+          "input_usd_per_million_cents": 300,
+          "output_usd_per_million_cents": 1500
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "title": "Claude Haiku 4.5",
+          "input_usd_per_million_cents": 100,
+          "output_usd_per_million_cents": 500
+        }
+      ]
+    }
+  ]
+}

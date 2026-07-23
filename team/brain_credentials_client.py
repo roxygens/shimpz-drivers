@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from inference_config import PROVIDERS as MODEL_PROVIDERS
 
 ACCOUNTS_URL = os.environ.get("SHIMPZ_ACCOUNTS_URL", "http://accounts:7079")
 RESOLVE_TOKEN_FILE = Path(
@@ -44,7 +45,7 @@ DELIVERY_SALT_BYTES = 16
 DELIVERY_NONCE_BYTES = 12
 DELIVERY_KEY_BYTES = 32
 MAX_SECRET_BYTES = 64 * 1024
-SUPPORTED_PROVIDERS = frozenset({"anthropic", "openai"})
+SUPPORTED_PROVIDERS = frozenset(MODEL_PROVIDERS)
 SUPPORTED_AUTH_TYPE = "api_key"
 
 
