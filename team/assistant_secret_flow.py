@@ -46,6 +46,7 @@ def require_power_rpc_envelope(
             "input": power_input,
             "secrets": dict(secret_values),
             "accounts": dict(account_values or {}),
+            "answers": [],
         }
     )
 

@@ -2252,6 +2252,7 @@ def _invoke_assistant_power(
                 "input": safe_input,
                 "secrets": secret_values,
                 "accounts": account_values,
+                "answers": [],
             },
         )
     except ApiError as exc:

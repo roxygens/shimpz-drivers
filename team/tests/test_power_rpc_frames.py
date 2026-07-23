@@ -66,6 +66,22 @@ class PowerRpcFrameTests(unittest.TestCase):
         self.assertEqual(local_stdout, stdout)
         self.assertEqual(local_stderr, stderr)
 
+    def test_rpc_response_distinguishes_results_and_suspensions(self) -> None:
+        self.assertEqual(
+            app.power_execution.decode_rpc_response(b'{"result":{"ok":true}}'),
+            {"ok": True},
+        )
+        suspension = app.power_execution.decode_rpc_response(b'{"suspend":{"ordinal":0,"kind":"request"}}')
+        self.assertIsInstance(suspension, app.power_execution.RpcSuspension)
+        self.assertEqual(suspension.payload, {"ordinal": 0, "kind": "request"})
+        for invalid in (
+            b'{"ok":true}',
+            b'{"result":{},"suspend":{}}',
+            b'{"suspend":"invalid"}',
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(app.power_execution.RpcExchangeError):
+                app.power_execution.decode_rpc_response(invalid)
+
     def test_malformed_frames_fail_closed_in_both_readers(self) -> None:
         oversized = struct.pack(">BxxxL", 1, max(app.MAX_ASSISTANT_RPC_OUTPUT_BYTES, local_app.MAX_RESPONSE_BYTES) + 2)
         cases = (

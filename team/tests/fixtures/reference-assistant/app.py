@@ -14,10 +14,10 @@ ZONE_ID = re.compile(r"[0-9a-f]{32}\Z")
 
 
 def _power_input(payload: object, power: str) -> dict[str, object]:
-    if not isinstance(payload, dict) or set(payload) != {"input", "secrets", "accounts"}:
+    if not isinstance(payload, dict) or set(payload) != {"input", "secrets", "accounts", "answers"}:
         raise ValueError
     power_input = payload["input"]
-    if not isinstance(power_input, dict) or payload["secrets"] != {}:
+    if not isinstance(power_input, dict) or payload["secrets"] != {} or payload["answers"] != []:
         raise ValueError
     accounts = payload["accounts"]
     if not isinstance(accounts, dict) or set(accounts) != {"cloudflare"}:

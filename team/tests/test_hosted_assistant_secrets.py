@@ -238,6 +238,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 "input": ZONE_INPUT,
                 "secrets": {"x-bearer-token": SECRET_VALUES["x-bearer-token"]},
                 "accounts": {},
+                "answers": [],
             },
         )
 
@@ -255,6 +256,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
                     )
                 },
                 "accounts": {},
+                "answers": [],
             },
         )
         state = self.secret_store.state_path.read_text(encoding="utf-8")

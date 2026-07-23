@@ -9,6 +9,7 @@ import socket
 import struct
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from http import HTTPStatus
 
 import power_journal
@@ -140,6 +141,28 @@ class RpcExchangeError(RuntimeError):
         self.kind = kind
 
 
+@dataclass(frozen=True, slots=True)
+class RpcSuspension:
+    """One SDK-requested deterministic replay suspension."""
+
+    payload: dict[str, object]
+
+
+def decode_rpc_response(raw: bytes) -> object:
+    """Decode the closed result-or-suspend stdout protocol."""
+    try:
+        response = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RpcExchangeError("invalid-result") from exc
+    if not isinstance(response, dict) or len(response) != 1:
+        raise RpcExchangeError("invalid-result")
+    if set(response) == {"result"}:
+        return response["result"]
+    if set(response) == {"suspend"} and isinstance(response["suspend"], dict):
+        return RpcSuspension(response["suspend"])
+    raise RpcExchangeError("invalid-result")
+
+
 def rpc_exchange(
     api: object,
     container_id: str,
@@ -207,10 +230,7 @@ def rpc_exchange(
             raise RpcExchangeError("unsupported-path")
         cancelled(None)
         raise RpcExchangeError("failed")
-    try:
-        return json.loads(bytes(stdout))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise RpcExchangeError("invalid-result") from exc
+    return decode_rpc_response(bytes(stdout))
 
 
 def private_generations(metadata: tuple[object, ...], *, connected: bool) -> tuple[tuple[str, int], ...]:

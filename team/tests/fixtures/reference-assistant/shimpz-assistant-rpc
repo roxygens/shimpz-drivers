@@ -49,7 +49,7 @@ def main() -> int:
         decoded = json.loads(output)
         if not isinstance(decoded, dict):
             return 3
-        sys.stdout.buffer.write(json.dumps(decoded, separators=(",", ":")).encode("utf-8"))
+        sys.stdout.buffer.write(json.dumps({"result": decoded}, separators=(",", ":")).encode("utf-8"))
     except OSError, ValueError, json.JSONDecodeError:
         return 3
     else:

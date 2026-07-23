@@ -138,6 +138,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
                     "accounts": {
                         "cloudflare": {"type": "oauth2-bearer", "access_token": ACCESS_TOKEN},
                     },
+                    "answers": [],
                 }
             ],
         )

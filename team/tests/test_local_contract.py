@@ -1300,6 +1300,7 @@ class LocalContractTests(unittest.TestCase):
                                 "access_token": TEST_ACCOUNT_ACCESS_TOKEN,
                             }
                         },
+                        "answers": [],
                     },
                 )
             ],

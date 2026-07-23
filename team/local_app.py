@@ -3231,6 +3231,7 @@ class LocalController:
                         "input": safe_payload,
                         "secrets": secret_values,
                         "accounts": account_values,
+                        "answers": [],
                     },
                 )
             except ApiProblem:
