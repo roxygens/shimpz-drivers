@@ -1140,14 +1140,6 @@ class LocalController:
         except assistant_secret_store.AssistantSecretError as exc:
             self._raise_secret_problem(exc)
 
-    @staticmethod
-    def _raise_account_problem(exc: oauth_account_store.OAuthAccountStoreError) -> None:
-        raise ApiProblem(
-            HTTPStatus.SERVICE_UNAVAILABLE,
-            "Assistant account state is unavailable",
-            code="assistant-account-state-unavailable",
-        ) from exc
-
     def _delete_assistant_account_state(self, team_id: str, assistant_id: str) -> None:
         try:
             self.assistant_accounts.delete_assistant(team_id, assistant_id)
