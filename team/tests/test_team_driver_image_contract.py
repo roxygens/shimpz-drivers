@@ -102,6 +102,7 @@ class StaticTeamDriverImageContractTests(unittest.TestCase):
         self.assertIn(f"FROM {UV_IMAGE} AS uv", dockerfile)
         self.assertIn("COPY --from=uv /uv /usr/local/bin/uv", dockerfile)
         self.assertIn("COPY --from=dependencies /opt/venv /opt/venv", runtime)
+        self.assertIn("COPY container_policy ./container_policy", runtime)
         self.assertEqual(packaged, _runtime_import_closure("local_app", "local_healthcheck"))
         self.assertIn("model_catalog.json", runtime_copy)
         self.assertIn("/var/lib/shimpz-local/chat-continuations/state", runtime)

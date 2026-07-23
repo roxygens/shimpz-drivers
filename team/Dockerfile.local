@@ -28,6 +28,7 @@ COPY local_app.py local_registry.py local_token_store.py local_healthcheck.py te
     model_catalog.json \
     egress_policy.py power_execution.py power_journal.py ./
 COPY assistant_human ./assistant_human
+COPY container_policy ./container_policy
 COPY http_boundary ./http_boundary
 COPY local_chat_continuations.py ./
 COPY local_support ./local_support
