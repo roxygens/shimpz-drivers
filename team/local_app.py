@@ -3121,15 +3121,22 @@ class LocalController:
         stderr_bytes = 0
         while True:
             try:
-                header = self._read_exact(raw_socket, 8, deadline)
+                first = self._read_exact(raw_socket, 1, deadline)
             except EOFError:
                 break
+            try:
+                header = first + self._read_exact(raw_socket, 7, deadline)
+            except EOFError as exc:
+                raise ValueError("truncated Docker exec frame header") from exc
             stream_id, length = struct.unpack(">BxxxL", header)
             if stream_id not in {1, 2}:
                 raise ValueError("invalid Docker exec stream")
             if length > MAX_RESPONSE_BYTES + 1:
                 raise ValueError("oversized Docker exec frame")
-            chunk = self._read_exact(raw_socket, length, deadline)
+            try:
+                chunk = self._read_exact(raw_socket, length, deadline)
+            except EOFError as exc:
+                raise ValueError("truncated Docker exec frame payload") from exc
             if stream_id == 1:
                 stdout.extend(chunk)
                 if len(stdout) > MAX_RESPONSE_BYTES:

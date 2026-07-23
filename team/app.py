@@ -1932,15 +1932,22 @@ def _read_rpc_frames(raw_socket: socket.socket, deadline: float) -> tuple[bytes,
     stderr = bytearray()
     while True:
         try:
-            header = _read_rpc_exact(raw_socket, 8, deadline)
+            first = _read_rpc_exact(raw_socket, 1, deadline)
         except EOFError:
             break
+        try:
+            header = first + _read_rpc_exact(raw_socket, 7, deadline)
+        except EOFError as exc:
+            raise ValueError("truncated Assistant RPC frame header") from exc
         stream_id, length = struct.unpack(">BxxxL", header)
         if stream_id not in {docker_socket.STDOUT, docker_socket.STDERR}:
             raise ValueError("invalid Assistant RPC stream")
         if length > MAX_ASSISTANT_RPC_OUTPUT_BYTES + 1:
             raise ValueError("oversized Assistant RPC frame")
-        chunk = _read_rpc_exact(raw_socket, length, deadline)
+        try:
+            chunk = _read_rpc_exact(raw_socket, length, deadline)
+        except EOFError as exc:
+            raise ValueError("truncated Assistant RPC frame payload") from exc
         target = stdout if stream_id == docker_socket.STDOUT else stderr
         target.extend(chunk)
         if len(stdout) + len(stderr) > MAX_ASSISTANT_RPC_OUTPUT_BYTES:
