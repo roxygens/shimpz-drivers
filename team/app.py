@@ -2568,16 +2568,7 @@ def _run_hosted_chat_segment(
     continuation: chat_orchestrator.ChatContinuation | None = None,
     expected_identity: tuple[object, ...] | None = None,
     answer_logs: tuple[tuple[str, tuple[object, ...]], ...] = (),
-) -> tuple[
-    str,
-    tuple[object, ...],
-    chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension,
-    tuple[assistant_account_challenges.AccountRequirement, ...],
-    tuple[assistant_secret_challenges.SecretRequirement, ...],
-    tuple[chat_orchestrator.HumanInteraction, ...],
-    tuple[assistant_approval_challenges.ApprovalRequirement, ...],
-    tuple[tuple[str, tuple[object, ...]], ...],
-]:
+) -> chat_turn_engine.SegmentResult:
     answers_by_interrupt = _hosted_answer_log(answer_logs)
     bindings: dict[str, _ActiveAssistant] = {}
     initial_identity: tuple[object, ...] = ()
@@ -2722,7 +2713,7 @@ def _run_hosted_chat_segment(
             continue
         if requirement is not None:
             approval_requirements = (requirement,)
-        return (
+        return chat_turn_engine.SegmentResult(
             team_name,
             identity,
             outcome,
@@ -2839,17 +2830,10 @@ def _pause_hosted_approval(
 def _hosted_segment_response(
     team_id: str,
     token: str,
-    team_name: str,
-    identity: tuple[object, ...],
-    outcome: chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension,
+    segment: chat_turn_engine.SegmentResult,
     assistant_ids: tuple[str, ...],
     file_ids: tuple[str, ...],
     owner: str,
-    account_requirements: tuple[assistant_account_challenges.AccountRequirement, ...],
-    secret_requirements: tuple[assistant_secret_challenges.SecretRequirement, ...],
-    input_requirements: tuple[chat_orchestrator.HumanInteraction, ...],
-    approval_requirements: tuple[assistant_approval_challenges.ApprovalRequirement, ...],
-    answer_logs: tuple[tuple[str, tuple[object, ...]], ...] = (),
 ) -> dict[str, object]:
     def pending(suspension: chat_orchestrator.ChatSuspension) -> _PendingHostedChat:
         return _PendingHostedChat(
@@ -2857,8 +2841,8 @@ def _hosted_segment_response(
             assistant_ids=assistant_ids,
             file_ids=file_ids,
             owner=owner,
-            identity=identity,
-            answer_logs=answer_logs,
+            identity=segment.identity,
+            answer_logs=segment.answer_logs,
         )
 
     def complete(terminal: chat_orchestrator.ChatOutcome) -> dict[str, object]:
@@ -2866,14 +2850,14 @@ def _hosted_segment_response(
             raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
         return {
             "team_id": team_id,
-            "team_name": team_name,
+            "team_name": segment.team_name,
             "reply": terminal.reply[:CHAT_OUTPUT_CAP],
         }
 
     try:
         return chat_turn_engine.dispatch(
-            outcome,
-            (account_requirements, secret_requirements, input_requirements, approval_requirements),
+            segment.outcome,
+            segment.requirement_groups(),
             pending,
             (
                 lambda suspension, requirements, state: _pause_hosted_connection(
@@ -2904,16 +2888,7 @@ def _chat_in_turn(
     container,
     owner: str,
 ) -> dict[str, object]:
-    (
-        team_name,
-        identity,
-        outcome,
-        account_requirements,
-        secret_requirements,
-        input_requirements,
-        approval_requirements,
-        answer_logs,
-    ) = _run_hosted_chat_segment(
+    segment = _run_hosted_chat_segment(
         team_id,
         file_ids,
         assistant_ids,
@@ -2925,17 +2900,10 @@ def _chat_in_turn(
     return _hosted_segment_response(
         team_id,
         token,
-        team_name,
-        identity,
-        outcome,
+        segment,
         assistant_ids,
         tuple(file_ids) if isinstance(file_ids, list) else (),
         owner,
-        account_requirements,
-        secret_requirements,
-        input_requirements,
-        approval_requirements,
-        answer_logs,
     )
 
 
@@ -3119,16 +3087,7 @@ def _resume_chat_accounts(
         if not isinstance(pending, _PendingHostedChat):
             raise AssertionError("shared account resume returned invalid state")
 
-        (
-            team_name,
-            identity,
-            outcome,
-            account_requirements,
-            secret_requirements,
-            input_requirements,
-            approval_requirements,
-            answer_logs,
-        ) = _run_hosted_chat_segment(
+        segment = _run_hosted_chat_segment(
             team_id,
             list(pending.file_ids),
             pending.assistant_ids,
@@ -3142,17 +3101,10 @@ def _resume_chat_accounts(
         return _hosted_segment_response(
             team_id,
             token,
-            team_name,
-            identity,
-            outcome,
+            segment,
             pending.assistant_ids,
             pending.file_ids,
             pending.owner,
-            account_requirements,
-            secret_requirements,
-            input_requirements,
-            approval_requirements,
-            answer_logs,
         )
 
 
@@ -3203,16 +3155,7 @@ def _submit_chat_secrets(
         except assistant_secret_store.AssistantSecretError as exc:
             _raise_assistant_secret_error(exc)
 
-        (
-            team_name,
-            identity,
-            outcome,
-            account_requirements,
-            secret_requirements,
-            input_requirements,
-            approval_requirements,
-            answer_logs,
-        ) = _run_hosted_chat_segment(
+        segment = _run_hosted_chat_segment(
             team_id,
             list(pending.file_ids),
             pending.assistant_ids,
@@ -3226,17 +3169,10 @@ def _submit_chat_secrets(
         return _hosted_segment_response(
             team_id,
             token,
-            team_name,
-            identity,
-            outcome,
+            segment,
             pending.assistant_ids,
             pending.file_ids,
             pending.owner,
-            account_requirements,
-            secret_requirements,
-            input_requirements,
-            approval_requirements,
-            answer_logs,
         )
 
 
@@ -3282,16 +3218,7 @@ def _submit_chat_input(
         answer_logs[challenge.requirement.interrupt_id] = (*existing, answer)
         resumed = replace(pending, answer_logs=tuple(sorted(answer_logs.items())))
 
-        (
-            team_name,
-            identity,
-            outcome,
-            account_requirements,
-            secret_requirements,
-            input_requirements,
-            approval_requirements,
-            answer_logs,
-        ) = _run_hosted_chat_segment(
+        segment = _run_hosted_chat_segment(
             team_id,
             list(resumed.file_ids),
             resumed.assistant_ids,
@@ -3305,17 +3232,10 @@ def _submit_chat_input(
         return _hosted_segment_response(
             team_id,
             token,
-            team_name,
-            identity,
-            outcome,
+            segment,
             resumed.assistant_ids,
             resumed.file_ids,
             resumed.owner,
-            account_requirements,
-            secret_requirements,
-            input_requirements,
-            approval_requirements,
-            answer_logs,
         )
 
 
@@ -3376,16 +3296,7 @@ def _submit_chat_approval(
         answer_logs[requirement.interrupt_id] = (*existing, answer)
         resumed = replace(pending, answer_logs=tuple(sorted(answer_logs.items())))
 
-        (
-            team_name,
-            identity,
-            outcome,
-            account_requirements,
-            secret_requirements,
-            input_requirements,
-            approval_requirements,
-            answer_logs,
-        ) = _run_hosted_chat_segment(
+        segment = _run_hosted_chat_segment(
             team_id,
             list(resumed.file_ids),
             resumed.assistant_ids,
@@ -3399,17 +3310,10 @@ def _submit_chat_approval(
         return _hosted_segment_response(
             team_id,
             token,
-            team_name,
-            identity,
-            outcome,
+            segment,
             resumed.assistant_ids,
             resumed.file_ids,
             resumed.owner,
-            account_requirements,
-            secret_requirements,
-            input_requirements,
-            approval_requirements,
-            answer_logs,
         )
 
 

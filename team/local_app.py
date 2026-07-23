@@ -1887,16 +1887,7 @@ class LocalController:
         continuation: chat_orchestrator.ChatContinuation | None = None,
         expected_identity: tuple[object, ...] | None = None,
         answer_logs: tuple[tuple[str, tuple[object, ...]], ...] = (),
-    ) -> tuple[
-        str,
-        tuple[object, ...],
-        chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension,
-        tuple[assistant_account_challenges.AccountRequirement, ...],
-        tuple[assistant_secret_challenges.SecretRequirement, ...],
-        tuple[chat_orchestrator.HumanInteraction, ...],
-        tuple[assistant_approval_challenges.ApprovalRequirement, ...],
-        tuple[tuple[str, tuple[object, ...]], ...],
-    ]:
+    ) -> chat_turn_engine.SegmentResult:
         answers_by_interrupt = dict(answer_logs)
         if len(answers_by_interrupt) != len(answer_logs):
             raise ApiProblem(
@@ -2059,7 +2050,7 @@ class LocalController:
                     current_identity = identity
                     continue
                 approval_requirements = (requirement,)
-            return (
+            return chat_turn_engine.SegmentResult(
                 team_name,
                 identity,
                 outcome,
@@ -2445,17 +2436,10 @@ class LocalController:
         self,
         team_id: str,
         token: str,
-        team_name: str,
-        identity: tuple[object, ...],
-        outcome: chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension,
+        segment: chat_turn_engine.SegmentResult,
         assistant_ids: tuple[str, ...],
         file_ids: tuple[str, ...],
         provider: str,
-        account_requirements: tuple[assistant_account_challenges.AccountRequirement, ...],
-        secret_requirements: tuple[assistant_secret_challenges.SecretRequirement, ...],
-        input_requirements: tuple[chat_orchestrator.HumanInteraction, ...],
-        approval_requirements: tuple[assistant_approval_challenges.ApprovalRequirement, ...],
-        answer_logs: tuple[tuple[str, tuple[object, ...]], ...] = (),
     ) -> dict[str, object]:
         def pending(suspension: chat_orchestrator.ChatSuspension) -> _PendingLocalChat:
             return _PendingLocalChat(
@@ -2463,20 +2447,20 @@ class LocalController:
                 assistant_ids=assistant_ids,
                 file_ids=file_ids,
                 provider=provider,
-                identity=identity,
-                answer_logs=answer_logs,
+                identity=segment.identity,
+                answer_logs=segment.answer_logs,
             )
 
         def complete(terminal: chat_orchestrator.ChatOutcome) -> dict[str, object]:
             self._delete_chat_continuation(team_id)
             if not self._commit_chat_terminal(team_id, token):
                 raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
-            return {"team_id": team_id, "team_name": team_name, "reply": terminal.reply}
+            return {"team_id": team_id, "team_name": segment.team_name, "reply": terminal.reply}
 
         try:
             return chat_turn_engine.dispatch(
-                outcome,
-                (account_requirements, secret_requirements, input_requirements, approval_requirements),
+                segment.outcome,
+                segment.requirement_groups(),
                 pending,
                 (
                     lambda suspension, requirements, state: self._pause_account(
@@ -2532,16 +2516,7 @@ class LocalController:
             pending = self._pending_chat_continuation(team_id)
             if pending is not None:
                 return pending
-            (
-                team_name,
-                identity,
-                outcome,
-                account_requirements,
-                secret_requirements,
-                input_requirements,
-                approval_requirements,
-                answer_logs,
-            ) = self._run_chat_segment(
+            segment = self._run_chat_segment(
                 team_id,
                 file_ids,
                 assistant_ids,
@@ -2553,17 +2528,10 @@ class LocalController:
             return self._segment_response(
                 team_id,
                 token,
-                team_name,
-                identity,
-                outcome,
+                segment,
                 assistant_ids,
                 tuple(file_ids),
                 provider,
-                account_requirements,
-                secret_requirements,
-                input_requirements,
-                approval_requirements,
-                answer_logs,
             )
 
     def resume_chat_accounts(
@@ -2631,16 +2599,7 @@ class LocalController:
                 pending = admission.pending
                 if not isinstance(pending, _PendingLocalChat):
                     raise AssertionError("shared account resume returned invalid state")
-            (
-                team_name,
-                identity,
-                outcome,
-                account_requirements,
-                secret_requirements,
-                input_requirements,
-                approval_requirements,
-                answer_logs,
-            ) = self._run_chat_segment(
+            segment = self._run_chat_segment(
                 team_id,
                 list(pending.file_ids),
                 pending.assistant_ids,
@@ -2654,17 +2613,10 @@ class LocalController:
             return self._segment_response(
                 team_id,
                 token,
-                team_name,
-                identity,
-                outcome,
+                segment,
                 pending.assistant_ids,
                 pending.file_ids,
                 provider,
-                account_requirements,
-                secret_requirements,
-                input_requirements,
-                approval_requirements,
-                answer_logs,
             )
 
     def submit_chat_secrets(
@@ -2683,16 +2635,7 @@ class LocalController:
             # The active-turn token exists before the one-use secret challenge is consumed. Stop,
             # uninstall, and rotation therefore cannot observe an unowned persisted continuation.
             pending = self._store_chat_secrets(team_id, challenge_id, provider, body)
-            (
-                team_name,
-                identity,
-                outcome,
-                account_requirements,
-                secret_requirements,
-                input_requirements,
-                approval_requirements,
-                answer_logs,
-            ) = self._run_chat_segment(
+            segment = self._run_chat_segment(
                 team_id,
                 list(pending.file_ids),
                 pending.assistant_ids,
@@ -2706,17 +2649,10 @@ class LocalController:
             return self._segment_response(
                 team_id,
                 token,
-                team_name,
-                identity,
-                outcome,
+                segment,
                 pending.assistant_ids,
                 pending.file_ids,
                 provider,
-                account_requirements,
-                secret_requirements,
-                input_requirements,
-                approval_requirements,
-                answer_logs,
             )
 
     def submit_chat_input(
@@ -2730,16 +2666,7 @@ class LocalController:
         challenge_id = body.get("challenge_id") if isinstance(body, dict) else None
         with self._exclusive_chat_turn(team_id) as token:
             pending = self._store_chat_input(team_id, challenge_id, provider, body)
-            (
-                team_name,
-                identity,
-                outcome,
-                account_requirements,
-                secret_requirements,
-                input_requirements,
-                approval_requirements,
-                answer_logs,
-            ) = self._run_chat_segment(
+            segment = self._run_chat_segment(
                 team_id,
                 list(pending.file_ids),
                 pending.assistant_ids,
@@ -2753,17 +2680,10 @@ class LocalController:
             return self._segment_response(
                 team_id,
                 token,
-                team_name,
-                identity,
-                outcome,
+                segment,
                 pending.assistant_ids,
                 pending.file_ids,
                 provider,
-                account_requirements,
-                secret_requirements,
-                input_requirements,
-                approval_requirements,
-                answer_logs,
             )
 
     def submit_chat_approval(
@@ -2779,16 +2699,7 @@ class LocalController:
             # Install the active-turn token before consuming the challenge. Stop can now always
             # cancel either the pending challenge or this exact continuation; no unowned gap exists.
             pending = self._store_chat_approval(team_id, challenge_id, provider, body)
-            (
-                team_name,
-                identity,
-                outcome,
-                account_requirements,
-                secret_requirements,
-                input_requirements,
-                approval_requirements,
-                answer_logs,
-            ) = self._run_chat_segment(
+            segment = self._run_chat_segment(
                 team_id,
                 list(pending.file_ids),
                 pending.assistant_ids,
@@ -2802,17 +2713,10 @@ class LocalController:
             return self._segment_response(
                 team_id,
                 token,
-                team_name,
-                identity,
-                outcome,
+                segment,
                 pending.assistant_ids,
                 pending.file_ids,
                 provider,
-                account_requirements,
-                secret_requirements,
-                input_requirements,
-                approval_requirements,
-                answer_logs,
             )
 
     def stop_chat(self, team_id: str) -> dict[str, object]:

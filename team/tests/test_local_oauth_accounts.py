@@ -17,6 +17,7 @@ sys.path.insert(0, str(TEAM))
 import assistant_account_challenges
 import brain_runtime_client
 import chat_orchestrator
+import chat_turn_engine
 import inference_config
 import local_app
 import local_registry
@@ -372,10 +373,10 @@ class LocalOAuthAccountTests(unittest.TestCase):
                 message="List my Cloudflare zones",
             )
 
-        self.assertIsInstance(result[2], chat_orchestrator.ChatSuspension)
-        self.assertEqual(len(result[3]), 1)
-        self.assertEqual(result[3][0].accounts[0][0], "cloudflare")
-        self.assertEqual(result[4:], ((), (), (), ()))
+        self.assertIsInstance(result.outcome, chat_orchestrator.ChatSuspension)
+        self.assertEqual(len(result.accounts), 1)
+        self.assertEqual(result.accounts[0].accounts[0][0], "cloudflare")
+        self.assertEqual((result.secrets, result.inputs, result.approvals, result.answer_logs), ((), (), (), ()))
 
     def test_account_resume_is_one_use_and_returns_completed_turn(self) -> None:
         registry = self._registry()
@@ -442,7 +443,7 @@ class LocalOAuthAccountTests(unittest.TestCase):
                     expires_in=3600,
                 ),
             )
-            controller._run_chat_segment = lambda *_args, **_kwargs: (
+            controller._run_chat_segment = lambda *_args, **_kwargs: chat_turn_engine.SegmentResult(
                 "Team One",
                 identity,
                 chat_orchestrator.ChatOutcome("Done", ()),

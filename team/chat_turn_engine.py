@@ -39,6 +39,23 @@ class PreparedSegment:
 
 
 @dataclass(frozen=True, slots=True)
+class SegmentResult:
+    """Named result of one Controller segment, including its single suspension gate."""
+
+    team_name: str
+    identity: tuple[object, ...]
+    outcome: chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension
+    accounts: tuple[object, ...]
+    secrets: tuple[object, ...]
+    inputs: tuple[object, ...]
+    approvals: tuple[object, ...]
+    answer_logs: tuple[tuple[str, tuple[object, ...]], ...]
+
+    def requirement_groups(self) -> tuple[tuple[object, ...], ...]:
+        return self.accounts, self.secrets, self.inputs, self.approvals
+
+
+@dataclass(frozen=True, slots=True)
 class SegmentStrategy:
     """Hosted/local adapters for state and errors that intentionally differ."""
 
