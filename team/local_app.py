@@ -59,6 +59,7 @@ from assistant_human import approval_flow as assistant_approval_flow
 from assistant_human import approval_grants as assistant_approval_grants
 from assistant_human import input_challenges as assistant_input_challenges
 from assistant_human import input_flow as assistant_input_flow
+from container_policy import local as local_container_policy
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from docker.types import LogConfig, Ulimit
 from http_boundary import local
@@ -66,7 +67,6 @@ from http_boundary import strict as strict_http
 from local_registry import (
     AssistantSpec,
     RegistryError,
-    is_digest_ref,
     load_registry,
     validate_power_input,
     validate_power_output,
@@ -122,11 +122,11 @@ APP_EGRESS_POLICY_DIR = Path(
     )
 )
 
-ASSISTANT_UID = "10001:10001"
+ASSISTANT_UID = local_container_policy.ASSISTANT_UID
 ASSISTANT_WORKDIR = str(Path("/") / "tmp")
-ASSISTANT_MEMORY = 128 * 1024 * 1024
-ASSISTANT_NANO_CPUS = 250_000_000
-ASSISTANT_PIDS = 64
+ASSISTANT_MEMORY = local_container_policy.ASSISTANT_MEMORY
+ASSISTANT_NANO_CPUS = local_container_policy.ASSISTANT_NANO_CPUS
+ASSISTANT_PIDS = local_container_policy.ASSISTANT_PIDS
 READINESS_RECOVERY_ASSISTANTS = frozenset({"shimpz-cloudflare"})
 STORAGE_ROOT = Path("/var/lib/shimpz-local/storage")
 INFERENCE_ROOT = Path("/var/lib/shimpz-local/inference")
@@ -341,9 +341,6 @@ def _raise_egress_problem(exc: egress_policy.EgressPolicyError) -> NoReturn:
         "Assistant egress policy storage is unavailable",
         code="egress-policy-unavailable",
     ) from exc
-
-
-_environment_map = egress_policy.environment_map
 
 
 def _serialize_against_local_team_chat(
@@ -2865,55 +2862,24 @@ class LocalController:
         network_name: str,
     ) -> tuple[dict, dict[str, str]]:
         container.reload()
-        attrs = container.attrs
-        config = attrs.get("Config") or {}
-        host = attrs.get("HostConfig") or {}
-        labels = config.get("Labels") or {}
-        installed_image = labels.get(IMAGE_LABEL)
         expected_labels = self._assistant_labels(team_id, spec)
         expected_labels.pop(IMAGE_LABEL)
-        security_options = host.get("SecurityOpt") or []
-        networks = (attrs.get("NetworkSettings") or {}).get("Networks") or {}
-        environment = _environment_map(config.get("Env"))
-        if (
-            environment is None
-            or not self._labels_include(labels, expected_labels)
-            or container.name != self._container_name(team_id, spec.assistant_id)
-            or not is_digest_ref(installed_image)
-            or config.get("Image") != installed_image
-            or installed_image.rpartition("@sha256:")[0] != spec.image.rpartition("@sha256:")[0]
-            or config.get("User") != ASSISTANT_UID
-            or host.get("ReadonlyRootfs") is not True
-            or "ALL" not in (host.get("CapDrop") or [])
-            or not any(str(option).startswith("no-new-privileges") for option in security_options)
-            or any("seccomp=unconfined" in str(option) for option in security_options)
-            or host.get("Privileged") is not False
-            or host.get("NetworkMode") != network_name
-            or host.get("Memory") != ASSISTANT_MEMORY
-            or host.get("MemorySwap") != ASSISTANT_MEMORY
-            or host.get("NanoCpus") != ASSISTANT_NANO_CPUS
-            or host.get("CpusetCpus") != self.cpuset_cpus
-            or host.get("PidsLimit") != ASSISTANT_PIDS
-            or host.get("IpcMode") != "private"
-            or host.get("CgroupnsMode") != "private"
-            or host.get("Tmpfs") not in (None, {})
-            or host.get("AutoRemove") is not False
-            or (host.get("RestartPolicy") or {}).get("Name") not in {"", "no"}
-            or (host.get("LogConfig") or {}).get("Type") != "json-file"
-            or (host.get("LogConfig") or {}).get("Config") != {"max-file": "2", "max-size": "1m"}
-            or host.get("PortBindings") not in (None, {})
-            or host.get("Binds") not in (None, [])
-            or host.get("Devices") not in (None, [])
-            or host.get("DeviceRequests") not in (None, [])
-            or attrs.get("Mounts") not in (None, [])
-            or set(networks) != {network_name}
-        ):
+        admitted = local_container_policy.inspect_profile(
+            container.attrs,
+            container.name,
+            expected_labels,
+            self._container_name(team_id, spec.assistant_id),
+            spec.image,
+            network_name,
+            self.cpuset_cpus,
+        )
+        if admitted is None:
             raise ApiProblem(
                 HTTPStatus.CONFLICT,
                 "the installed Assistant failed its isolation profile",
                 code="assistant-isolation-drift",
             )
-        return config, environment
+        return admitted
 
     def _validate_container_egress(
         self,
