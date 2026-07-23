@@ -7,7 +7,6 @@ not the client that acts on its output.
 
 from __future__ import annotations
 
-import hashlib
 import re
 import secrets
 
@@ -16,6 +15,7 @@ PROJECT_NAME_RE = re.compile(r"^[a-z0-9_]{1,58}$")
 TEAM_ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 APP_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 PRINCIPAL_TOKEN_RE = re.compile(r"^[a-f0-9]{64}$")
+DATABASE_NAMESPACE_RE = re.compile(r"^[a-f0-9]{12}$")
 
 
 class ValidationError(Exception):
@@ -63,10 +63,11 @@ def team_project(team_id: str) -> str:
     return f"team_{validate_team_id(team_id)}"
 
 
-def team_app_project(team_id: str, app_id: str) -> str:
-    digest = hashlib.sha256(validate_team_id(team_id).encode()).hexdigest()[:10]
+def team_app_project(database_namespace: str, app_id: str) -> str:
+    if not isinstance(database_namespace, str) or DATABASE_NAMESPACE_RE.fullmatch(database_namespace) is None:
+        raise ValidationError("database namespace must be 48-bit lowercase hex")
     app = validate_app_id(app_id).replace("-", "_")
-    return f"team_{digest}_{app}"
+    return f"team_{database_namespace}_{app}"
 
 
 def tokens_equal(left: str, right: str) -> bool:

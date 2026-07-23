@@ -36,8 +36,12 @@ def _provision_team(body: dict) -> dict:
     team_id = validate.validate_team_id(body.get("team_id"))
     principal_token = validate.validate_principal_token(body.get("principal_token"))
     project = validate.team_project(team_id)
+    database = pg_client.dbname(project)
     with pg_client.mutation_lock():
-        result = pg_client.create_db_and_role(project)
+        result = pg_client.create_db_and_role(
+            project,
+            allow_existing=principal_store.owns_database(team_id, database),
+        )
         try:
             principal_store.register(team_id, principal_token, pg_client.dbname(project))
         except (principal_store.PrincipalError, principal_store.PrincipalStoreError) as registry_error:
@@ -56,13 +60,13 @@ def _provision_team(body: dict) -> dict:
 def _create_app(body: dict, token: str) -> dict:
     team_id = validate.validate_team_id(body.get("team_id"))
     app_id = validate.validate_app_id(body.get("app_id"))
-    project = validate.team_app_project(team_id, app_id)
-    database = pg_client.dbname(project)
     with pg_client.mutation_lock():
         scoped = principal_store.databases(token, team_id)
+        project = validate.team_app_project(principal_store.database_namespace(token, team_id), app_id)
+        database = pg_client.dbname(project)
         if database not in scoped and pg_client.project_resources_exist(project):
             raise principal_store.PrincipalError("unregistered App database artifacts already exist")
-        result = pg_client.create_db_and_role(project)
+        result = pg_client.create_db_and_role(project, allow_existing=database in scoped)
         try:
             principal_store.add_database(token, team_id, database)
         except (principal_store.PrincipalError, principal_store.PrincipalStoreError) as registry_error:
@@ -81,10 +85,11 @@ def _create_app(body: dict, token: str) -> dict:
 def _drop_app(body: dict, token: str) -> dict:
     team_id = validate.validate_team_id(body.get("team_id"))
     app_id = validate.validate_app_id(body.get("app_id"))
-    project = validate.team_app_project(team_id, app_id)
-    database = pg_client.dbname(project)
     with pg_client.mutation_lock():
-        if database not in principal_store.databases(token, team_id):
+        scoped = principal_store.databases(token, team_id)
+        project = validate.team_app_project(principal_store.database_namespace(token, team_id), app_id)
+        database = pg_client.dbname(project)
+        if database not in scoped:
             # A response-lost retry and a declared no-DB App both reach this branch. Succeed only
             # after Postgres itself proves neither exact artifact exists; registry drift fails closed.
             if pg_client.project_resources_exist(project):

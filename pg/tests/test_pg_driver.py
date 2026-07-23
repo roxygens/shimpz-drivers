@@ -56,10 +56,11 @@ class PgDriverTests(unittest.TestCase):
 
     def test_team_app_and_principal_identifiers_are_server_derived(self) -> None:
         self.assertEqual(validate.team_project("captain_01"), "team_captain_01")
-        first = validate.team_app_project("captain_01", "notification-center")
-        second = validate.team_app_project("captain_02", "notification-center")
+        first = validate.team_app_project("a" * 12, "notification-center")
+        second = validate.team_app_project("b" * 12, "notification-center")
         self.assertTrue(first.startswith("team_") and first.endswith("_notification_center"))
         self.assertNotEqual(first, second)
+        self.assertLessEqual(len(pg_client.dbname(validate.team_app_project("f" * 12, "a" * 40))), 63)
 
         token = "a" * 64
         self.assertEqual(validate.validate_principal_token(token), token)
@@ -138,6 +139,7 @@ class PgDriverTests(unittest.TestCase):
         main_database = "proj_team_alpha"
         app_database = "proj_team_hash_application"
         principal_store.register("alpha", token_a, main_database)
+        namespace_a = principal_store.database_namespace(token_a, "alpha")
 
         stored = principal_store.STATE_PATH.read_text(encoding="utf-8")
         self.assertNotIn(token_a, stored)
@@ -155,6 +157,10 @@ class PgDriverTests(unittest.TestCase):
         with self.assertRaises(principal_store.PrincipalError):
             principal_store.databases(token_a, "alpha")
         self.assertEqual(principal_store.databases(token_b, "alpha"), {main_database})
+        self.assertEqual(principal_store.database_namespace(token_b, "alpha"), namespace_a)
+
+        principal_store.register("beta", token_a, "proj_team_beta")
+        self.assertNotEqual(principal_store.database_namespace(token_a, "beta"), namespace_a)
 
     def test_team_drop_is_idempotent_until_finalization(self) -> None:
         token = "c" * 64
@@ -197,8 +203,8 @@ class PgDriverTests(unittest.TestCase):
         token = "e" * 64
         team_id = "attacker"
         app_id = "notification-center"
-        project = validate.team_app_project(team_id, app_id)
         principal_store.register(team_id, token, "proj_team_attacker")
+        project = validate.team_app_project(principal_store.database_namespace(token, team_id), app_id)
 
         with (
             mock.patch.object(pg_client, "project_resources_exist", return_value=True) as exists,
@@ -214,9 +220,9 @@ class PgDriverTests(unittest.TestCase):
         token = "f" * 64
         team_id = "alpha"
         app_id = "notification-center"
-        project = validate.team_app_project(team_id, app_id)
-        database = pg_client.dbname(project)
         principal_store.register(team_id, token, "proj_team_alpha")
+        project = validate.team_app_project(principal_store.database_namespace(token, team_id), app_id)
+        database = pg_client.dbname(project)
         principal_store.add_database(token, team_id, database)
         provisioned = pg_client.ProvisionResult("postgresql://redacted", False, False)
 
@@ -227,8 +233,25 @@ class PgDriverTests(unittest.TestCase):
             result = app._create_app({"team_id": team_id, "app_id": app_id}, token)
 
         exists.assert_not_called()
-        create.assert_called_once_with(project)
+        create.assert_called_once_with(project, allow_existing=True)
         self.assertEqual(result, {"database_url": "postgresql://redacted", "created": False})
+
+    def test_client_refuses_foreign_or_incomplete_existing_resources(self) -> None:
+        with (
+            mock.patch.object(pg_client, "_role_exists", return_value=True),
+            mock.patch.object(pg_client, "_db_exists", return_value=True),
+            mock.patch.object(pg_client, "_psql") as psql,
+            self.assertRaisesRegex(pg_client.PgError, "without registry ownership"),
+        ):
+            pg_client.create_db_and_role("team_foreign_app")
+        psql.assert_not_called()
+
+        with (
+            mock.patch.object(pg_client, "_role_exists", return_value=True),
+            mock.patch.object(pg_client, "_db_exists", return_value=False),
+            self.assertRaisesRegex(pg_client.PgError, "are incomplete"),
+        ):
+            pg_client.create_db_and_role("team_incomplete_app")
 
     def test_manifest_is_closed_and_public_metadata_contains_no_credentials(self) -> None:
         manifest = driver_manifest.load()

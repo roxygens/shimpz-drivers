@@ -127,15 +127,19 @@ def _cleanup_created_resources(project: str, *, database_created: bool, role_cre
         raise PgError("; ".join(failures))
 
 
-def create_db_and_role(project: str) -> ProvisionResult:
+def create_db_and_role(project: str, *, allow_existing: bool = False) -> ProvisionResult:
     with mutation_lock():
         db = dbname(project)
         role = db
         pw = role_password(project)
         role_existed = _role_exists(role)
         database_existed = _db_exists(db)
-        if database_existed and not role_existed:
-            raise PgError(f'database "{db}" exists without its expected owner role')
+        if role_existed != database_existed:
+            raise PgError(f'Postgres resources for "{db}" are incomplete')
+        if database_existed and not allow_existing:
+            raise PgError(f'Postgres resources for "{db}" already exist without registry ownership')
+        if allow_existing and not database_existed:
+            raise PgError(f'registered Postgres resources for "{db}" are missing')
 
         role_created = False
         database_created = False
