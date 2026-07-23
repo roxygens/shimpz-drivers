@@ -45,6 +45,7 @@ import validate
 
 WORKSPACE_PROJECTS_ROOT = Path(os.environ.get("SHIMPZ_WORKSPACE_PROJECTS_ROOT", "/workspace-root/projects"))
 LISTEN_PORT = int(os.environ.get("SHIMPZ_DRIVER_PORT", "7070"))
+MAX_BODY_BYTES = 96 * 1024
 
 # Per-app network isolation: shimpz-caddy is connected to EVERY app's own network (it's the only
 # thing that needs to reach every app); PostgreSQL is connected only when the app declares a database.
@@ -613,7 +614,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _body(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw_length = self.headers.get("Content-Length", "0") or "0"
+        try:
+            length = int(raw_length)
+        except ValueError as exc:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid Content-Length") from exc
+        if length < 0 or length > MAX_BODY_BYTES:
+            raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request body is too large")
         if length == 0:
             return {}
         raw = self.rfile.read(length)
