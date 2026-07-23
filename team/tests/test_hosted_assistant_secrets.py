@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
 import sys
 import tempfile
@@ -210,7 +211,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 {item["id"] for item in requirement["secrets"]},
                 set(SECRET_VALUES),
             )
-            serialized = app.json.dumps(challenge)
+            serialized = json.dumps(challenge)
             for secret in SECRET_VALUES.values():
                 self.assertNotIn(secret, serialized)
             self.assertNotIn("private-value", serialized)
@@ -262,7 +263,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
         for secret in SECRET_VALUES.values():
             self.assertNotIn(secret, state)
             self.assertNotIn(secret.encode(), journal)
-            self.assertNotIn(secret, app.json.dumps(result))
+            self.assertNotIn(secret, json.dumps(result))
         inventory = app.assistant_secret_flow.inventory_payload(
             TEAM_ID,
             [app._hosted_secret_spec(self.active)],
@@ -494,7 +495,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
         self.assertEqual(stored["primary-token"], replacement)
         self.assertEqual(stored["secondary-token"], original["secondary-token"])
         self.assertIsNone(self.challenge_store.current(TEAM_ID))
-        serialized = app.json.dumps(response)
+        serialized = json.dumps(response)
         for value in (*original.values(), replacement, "must-not-commit", "attacker-controlled"):
             self.assertNotIn(value, serialized)
         metadata = {item["id"]: item for item in response["assistants"][0]["secrets"]}

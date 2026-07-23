@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import sys
 import tempfile
 import types
@@ -141,7 +142,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 }
             ],
         )
-        serialized = app.json.dumps(payload)
+        serialized = json.dumps(payload)
         self.assertNotIn(ACCESS_TOKEN, serialized)
         self.assertNotIn("refresh-token", serialized)
         self.assertNotIn("generation", serialized)
@@ -381,7 +382,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 "challenge_id": challenge.id,
             },
         )
-        serialized = app.json.dumps({"started": started, "completed": completed})
+        serialized = json.dumps({"started": started, "completed": completed})
         for forbidden in (
             "provider-code-value",
             "browser-session-binding-value",

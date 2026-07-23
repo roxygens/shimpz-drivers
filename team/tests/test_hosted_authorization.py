@@ -151,7 +151,7 @@ class HostedAuthorizationTests(unittest.TestCase):
         wrong = self._handler(("Authorization", "Bearer wrong"))
 
         self.assertEqual(operator._principal(), ("operator", None))
-        with mock.patch.object(app.accounts_client, "verify", return_value="account_1") as verify:
+        with mock.patch.object(app.hosted_http.accounts_client, "verify", return_value="account_1") as verify:
             self.assertEqual(account._principal(), ("account", "account_1"))
         verify.assert_called_once_with("account-session")
 

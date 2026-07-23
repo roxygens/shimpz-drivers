@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import tempfile
 import types
@@ -51,9 +52,9 @@ class HostedHttpBoundaryTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-            app.strict_http.hmac,
+            app.hosted_http.strict_http.hmac,
             "compare_digest",
-            wraps=app.strict_http.hmac.compare_digest,
+            wraps=app.hosted_http.strict_http.hmac.compare_digest,
         ) as compare:
             self.assertEqual(accepted._principal(), ("operator", None))
             self.assertIsNone(wrong._principal())
@@ -455,7 +456,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         self.assertIn(("Cache-Control", "no-store"), stream.headers)
         self.assertEqual(chunked[size:], b"\r\n0\r\n\r\n")
         self.assertEqual(
-            app.json.loads(encoded_event),
+            json.loads(encoded_event),
             {
                 "type": "done",
                 "team_id": "team_1",
