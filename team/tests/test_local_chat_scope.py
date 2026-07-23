@@ -13,6 +13,7 @@ sys.path.insert(0, str(TEAM))
 import brain_runtime_client
 import local_app
 from local_controller_harness import LocalContractCase
+from local_support.validation import MAX_CHAT_ASSISTANTS
 
 LOOKUP_INPUT = {"page": 1, "per_page": 25}
 LOOKUP_RESULT = {
@@ -144,7 +145,7 @@ class LocalChatScopeTests(LocalContractCase):
             invalid = (
                 ["shimpz-cloudflare", "shimpz-cloudflare"],
                 ["bad_assistant"],
-                [f"helper-{index}" for index in range(local_app.MAX_CHAT_ASSISTANTS + 1)],
+                [f"helper-{index}" for index in range(MAX_CHAT_ASSISTANTS + 1)],
             )
             for assistant_ids in invalid:
                 with self.subTest(assistant_ids=assistant_ids), self.assertRaises(local_app.ApiProblem) as caught:

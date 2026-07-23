@@ -20,7 +20,6 @@ import assistant_secret_challenges
 import brain_runtime_client
 import inference_config
 import local_app
-import local_audit
 import local_chat_continuation_store
 import local_healthcheck
 import local_registry
@@ -28,6 +27,7 @@ import local_token_store
 from assistant_human import approval_challenges as assistant_approval_challenges
 from assistant_human import input_challenges as assistant_input_challenges
 from local_controller_harness import LocalContractCase
+from local_support import audit as local_audit
 
 LOOKUP_INPUT = {"page": 1, "per_page": 25}
 LOOKUP_RESULT = {
