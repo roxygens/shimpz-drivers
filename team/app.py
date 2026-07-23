@@ -1131,9 +1131,7 @@ def _egress_store() -> egress_policy.EgressPolicyStore:
 
 def _raise_egress_error(exc: egress_policy.EgressPolicyError) -> None:
     status = (
-        HTTPStatus.CONFLICT
-        if isinstance(exc, egress_policy.EgressPolicyDriftError)
-        else HTTPStatus.SERVICE_UNAVAILABLE
+        HTTPStatus.CONFLICT if isinstance(exc, egress_policy.EgressPolicyDriftError) else HTTPStatus.SERVICE_UNAVAILABLE
     )
     raise ApiError(status, "installed Assistant egress policy failed its contract") from exc
 

@@ -126,9 +126,7 @@ class PowerBatch:
             self._journal = None
 
 
-def private_generations(
-    metadata: tuple[object, ...], *, connected: bool
-) -> tuple[tuple[str, int], ...]:
+def private_generations(metadata: tuple[object, ...], *, connected: bool) -> tuple[tuple[str, int], ...]:
     """Project only usable positive generations from secret or account metadata."""
     if connected:
         valid = all(getattr(item, "status", None) == "connected" for item in metadata)

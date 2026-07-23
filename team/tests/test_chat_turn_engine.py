@@ -27,6 +27,7 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         outcome = app.chat_orchestrator.ChatOutcome(reply="same decision", powers=())
         controller = object.__new__(local_app.LocalController)
         controller.brain_runtime = object()
+
         def callback(*_args) -> bool:
             return False
 

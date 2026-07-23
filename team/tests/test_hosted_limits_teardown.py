@@ -30,11 +30,14 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
 
     def test_capacity_reservations_count_inflight_memory_and_release(self) -> None:
         empty_usage = app._MemoryUsage(total=0, by_owner={})
-        with _patched(
-            _memory_usage=lambda **_kwargs: empty_usage,
-            GLOBAL_MEMORY_BUDGET_BYTES=100,
-            OWNER_MEMORY_BUDGET_BYTES=100,
-        ), app._reserve_capacity("team:one", "account_1", 60, team_slot=False):
+        with (
+            _patched(
+                _memory_usage=lambda **_kwargs: empty_usage,
+                GLOBAL_MEMORY_BUDGET_BYTES=100,
+                OWNER_MEMORY_BUDGET_BYTES=100,
+            ),
+            app._reserve_capacity("team:one", "account_1", 60, team_slot=False),
+        ):
             self.assertIn("team:one", app._capacity_reservations)
             with (
                 self.assertRaises(app.ApiError) as exhausted,
@@ -47,14 +50,15 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
 
     def test_capacity_rejects_duplicate_inflight_resource(self) -> None:
         empty_usage = app._MemoryUsage(total=0, by_owner={})
-        with _patched(
-            _memory_usage=lambda **_kwargs: empty_usage,
-            GLOBAL_MEMORY_BUDGET_BYTES=100,
-            OWNER_MEMORY_BUDGET_BYTES=100,
-        ), app._reserve_capacity(
-            "team:one", "account_1", 10, team_slot=False
-        ), self.assertRaises(app.ApiError) as duplicate, app._reserve_capacity(
-            "team:one", "account_1", 10, team_slot=False
+        with (
+            _patched(
+                _memory_usage=lambda **_kwargs: empty_usage,
+                GLOBAL_MEMORY_BUDGET_BYTES=100,
+                OWNER_MEMORY_BUDGET_BYTES=100,
+            ),
+            app._reserve_capacity("team:one", "account_1", 10, team_slot=False),
+            self.assertRaises(app.ApiError) as duplicate,
+            app._reserve_capacity("team:one", "account_1", 10, team_slot=False),
         ):
             self.fail("a duplicate reservation was admitted")
 

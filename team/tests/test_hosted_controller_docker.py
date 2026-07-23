@@ -32,7 +32,7 @@ class _AccountsHandler(BaseHTTPRequestHandler):
         try:
             token = json.loads(self.rfile.read(length))["token"]
             account_id = self.sessions[token]
-        except (KeyError, TypeError, json.JSONDecodeError):
+        except KeyError, TypeError, json.JSONDecodeError:
             status = HTTPStatus.FORBIDDEN
             payload = {"error": "invalid session"}
         else:

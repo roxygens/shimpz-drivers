@@ -36,7 +36,7 @@ def verify(token: str) -> str | None:
         conn.request("POST", path, json.dumps({"token": token}), {"Content-Type": "application/json"})
         resp = conn.getresponse()
         data = json.loads(resp.read() or b"{}")
-    except (OSError, ValueError, http.client.HTTPException):
+    except OSError, ValueError, http.client.HTTPException:
         return None
     finally:
         if conn is not None:
