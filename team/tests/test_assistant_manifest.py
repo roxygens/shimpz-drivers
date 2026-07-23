@@ -277,6 +277,27 @@ class AssistantManifestTests(unittest.TestCase):
             with self.subTest(size=len(raw)), self.assertRaises(assistant_manifest.ManifestError):
                 assistant_manifest.parse_machine_contract(raw, reviewed.accounts)
 
+    def test_machine_contract_loader_rejects_open_top_level_and_nested_schemas(self) -> None:
+        reviewed = assistant_manifest.load_reviewed_catalog()["shimpz-cloudflare"]
+        open_contracts = []
+        for schema_name in ("input_schema", "output_schema"):
+            contract = json.loads(json.dumps(reviewed.machine_contract))
+            contract["powers"][0][schema_name].pop("additionalProperties")
+            open_contracts.append((schema_name, contract))
+        nested = json.loads(json.dumps(reviewed.machine_contract))
+        nested["powers"][0]["output_schema"]["properties"]["pagination"].pop("additionalProperties")
+        open_contracts.append(("nested output schema", nested))
+
+        for label, contract in open_contracts:
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(
+                    assistant_manifest.ManifestError,
+                    "must close every object",
+                ),
+            ):
+                assistant_manifest.parse_machine_contract(json.dumps(contract).encode(), reviewed.accounts)
+
     def test_machine_contract_cache_reads_once_and_requires_exact_review(self) -> None:
         reviewed = assistant_manifest.load_reviewed_catalog()["shimpz-cloudflare"]
         raw = json.dumps(reviewed.machine_contract, separators=(",", ":")).encode()

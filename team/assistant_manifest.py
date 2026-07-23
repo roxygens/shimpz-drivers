@@ -223,6 +223,17 @@ def _machine_schema(value: object, *, kind: str) -> dict[str, Any]:
     encoded = json.dumps(value, allow_nan=False, separators=(",", ":")).encode()
     if len(encoded) > 128 * 1024:
         raise ManifestError(f"Assistant Power {kind} schema is too large")
+    pending: list[object] = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            schema_type = item.get("type")
+            permits_object = schema_type == "object" or (isinstance(schema_type, list) and "object" in schema_type)
+            if permits_object and item.get("additionalProperties") is not False:
+                raise ManifestError(f"Assistant Power {kind} schema must close every object")
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
     return value
 
 
