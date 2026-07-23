@@ -14,6 +14,7 @@ import secrets
 import sys
 import threading
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
 from typing import NoReturn
@@ -121,6 +122,24 @@ LOCAL_CHAT_CONTINUATIONS_KEY_PATH = Path(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class LocalControllerDependencies:
+    inference_store: inference_config.InferenceConfigStore | None = None
+    brain_runtime: brain_runtime_client.BrainRuntimeClient | None = None
+    power_state: power_journal.PowerJournal | None = None
+    assistant_secrets: assistant_secret_store.AssistantSecretStore | None = None
+    secret_challenges: assistant_secret_challenges.SecretChallengeStore | None = None
+    assistant_accounts: oauth_account_store.OAuthAccountStore | None = None
+    account_challenges: assistant_account_challenges.AccountChallengeStore | None = None
+    oauth_pkce: oauth_pkce_challenges.OAuthPKCEChallengeStore | None = None
+    oauth_broker: oauth_broker_client.OAuthBrokerClient | None = None
+    oauth_service: oauth_account_service.BrokeredOAuthAccountService | None = None
+    approval_challenges: assistant_approval_challenges.ApprovalChallengeStore | None = None
+    approval_grants: assistant_approval_grants.ApprovalGrantStore | None = None
+    input_challenges: assistant_input_challenges.InputChallengeStore | None = None
+    chat_continuations: local_chat_continuation_store.EncryptedContinuationStore | None = None
+
+
 class LocalController(
     LocalAssistantLifecycleMixin,
     LocalAssistantResourcesMixin,
@@ -141,55 +160,52 @@ class LocalController(
         space_id: str,
         registry: dict[str, AssistantSpec],
         storage: team_storage.TeamStorage,
-        inference_store: inference_config.InferenceConfigStore | None = None,
-        brain_runtime: brain_runtime_client.BrainRuntimeClient | None = None,
-        power_state: power_journal.PowerJournal | None = None,
-        assistant_secrets: assistant_secret_store.AssistantSecretStore | None = None,
-        secret_challenges: assistant_secret_challenges.SecretChallengeStore | None = None,
-        assistant_accounts: oauth_account_store.OAuthAccountStore | None = None,
-        account_challenges: assistant_account_challenges.AccountChallengeStore | None = None,
-        oauth_pkce: oauth_pkce_challenges.OAuthPKCEChallengeStore | None = None,
-        oauth_broker: oauth_broker_client.OAuthBrokerClient | None = None,
-        oauth_service: oauth_account_service.BrokeredOAuthAccountService | None = None,
-        approval_challenges: assistant_approval_challenges.ApprovalChallengeStore | None = None,
-        approval_grants: assistant_approval_grants.ApprovalGrantStore | None = None,
-        input_challenges: assistant_input_challenges.InputChallengeStore | None = None,
-        chat_continuations: local_chat_continuation_store.EncryptedContinuationStore | None = None,
+        dependencies: LocalControllerDependencies | None = None,
     ) -> None:
+        dependencies = dependencies or LocalControllerDependencies()
         self.client = client
         self.space_id = validate_space_id(space_id)
         self.registry = registry
         self.storage = storage
-        self.inference_store = inference_store or inference_config.InferenceConfigStore(INFERENCE_ROOT)
-        self.brain_runtime = brain_runtime or brain_runtime_client.BrainRuntimeClient()
+        self.inference_store = dependencies.inference_store or inference_config.InferenceConfigStore(INFERENCE_ROOT)
+        self.brain_runtime = dependencies.brain_runtime or brain_runtime_client.BrainRuntimeClient()
         self.power_state = (
-            power_state if power_state is not None else power_journal.PowerJournal(LOCAL_POWER_JOURNAL_PATH)
+            dependencies.power_state
+            if dependencies.power_state is not None
+            else power_journal.PowerJournal(LOCAL_POWER_JOURNAL_PATH)
         )
-        self.assistant_secrets = assistant_secrets or assistant_secret_store.AssistantSecretStore()
-        self.secret_challenges = secret_challenges or assistant_secret_challenges.SecretChallengeStore()
-        self.assistant_accounts = assistant_accounts or oauth_account_store.OAuthAccountStore()
-        self.account_challenges = account_challenges or assistant_account_challenges.AccountChallengeStore()
-        self.oauth_pkce = oauth_pkce or oauth_pkce_challenges.OAuthPKCEChallengeStore()
-        self.oauth_broker = oauth_broker or oauth_broker_client.OAuthBrokerClient(
+        self.assistant_secrets = dependencies.assistant_secrets or assistant_secret_store.AssistantSecretStore()
+        self.secret_challenges = dependencies.secret_challenges or assistant_secret_challenges.SecretChallengeStore()
+        self.assistant_accounts = dependencies.assistant_accounts or oauth_account_store.OAuthAccountStore()
+        self.account_challenges = (
+            dependencies.account_challenges or assistant_account_challenges.AccountChallengeStore()
+        )
+        self.oauth_pkce = dependencies.oauth_pkce or oauth_pkce_challenges.OAuthPKCEChallengeStore()
+        self.oauth_broker = dependencies.oauth_broker or oauth_broker_client.OAuthBrokerClient(
             transport=oauth_broker_client.FixedBrokerTransport(
                 proxy_host=os.environ.get("SHIMPZ_OAUTH_BROKER_PROXY_HOST"),
                 proxy_token=os.environ.get("SHIMPZ_OAUTH_BROKER_PROXY_TOKEN"),
             ),
             callback_mode=os.environ.get("SHIMPZ_OAUTH_CALLBACK_MODE", "loopback"),
         )
-        self.oauth_service = oauth_service or oauth_account_service.BrokeredOAuthAccountService(
+        self.oauth_service = dependencies.oauth_service or oauth_account_service.BrokeredOAuthAccountService(
             challenge=self.oauth_pkce,
             store=self.assistant_accounts,
             broker=self.oauth_broker,
         )
-        self.approval_challenges = approval_challenges or assistant_approval_challenges.ApprovalChallengeStore()
-        self.approval_grants = approval_grants or assistant_approval_grants.ApprovalGrantStore(
+        self.approval_challenges = (
+            dependencies.approval_challenges or assistant_approval_challenges.ApprovalChallengeStore()
+        )
+        self.approval_grants = dependencies.approval_grants or assistant_approval_grants.ApprovalGrantStore(
             LOCAL_APPROVAL_GRANTS_PATH
         )
-        self.input_challenges = input_challenges or assistant_input_challenges.InputChallengeStore()
-        self.chat_continuations = chat_continuations or local_chat_continuation_store.EncryptedContinuationStore(
-            LOCAL_CHAT_CONTINUATIONS_STATE_PATH,
-            LOCAL_CHAT_CONTINUATIONS_KEY_PATH,
+        self.input_challenges = dependencies.input_challenges or assistant_input_challenges.InputChallengeStore()
+        self.chat_continuations = (
+            dependencies.chat_continuations
+            or local_chat_continuation_store.EncryptedContinuationStore(
+                LOCAL_CHAT_CONTINUATIONS_STATE_PATH,
+                LOCAL_CHAT_CONTINUATIONS_KEY_PATH,
+            )
         )
         self._assistant_genesis_cache = assistant_genesis.GenesisCache()
         self._assistant_allowed_hosts_cache = assistant_manifest.ManifestContractCache()

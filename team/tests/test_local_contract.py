@@ -289,9 +289,11 @@ class LocalContractTests(LocalContractCase):
             "local-space",
             self._registry(image),
             SimpleNamespace(),
-            brain_runtime=SimpleNamespace(),
-            power_state=injected,
-            approval_grants=approval_grants,
+            local_app.LocalControllerDependencies(
+                brain_runtime=SimpleNamespace(),
+                power_state=injected,
+                approval_grants=approval_grants,
+            ),
         )
 
         self.assertIs(controller.power_state, injected)
