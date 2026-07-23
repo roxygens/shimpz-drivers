@@ -84,6 +84,9 @@ class ContractContainer:
 
 
 class AssistantManifestTests(unittest.TestCase):
+    def test_reads_the_sdk_baked_v3_manifest_path(self) -> None:
+        self.assertEqual(assistant_manifest.MANIFEST_PATH, "/opt/shimpz/shimpz.toml")
+
     def test_reference_fixture_matches_the_reviewed_cloudflare_security_intent(self) -> None:
         declared = assistant_manifest.parse_manifest_contract(FIXTURE_MANIFEST.read_bytes())
         reviewed_assistant = assistant_manifest.load_reviewed_catalog()["shimpz-cloudflare"]

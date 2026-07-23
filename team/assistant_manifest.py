@@ -20,7 +20,7 @@ import oauth_providers
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
-MANIFEST_PATH = "/opt/shimpz-assistant/shimpz.toml"
+MANIFEST_PATH = "/opt/shimpz/shimpz.toml"
 CONTRACT_PATH = "/opt/shimpz/shimpz.contract.json"
 CATALOG_PATH = Path(__file__).with_name("assistant_catalog.json")
 MAX_MANIFEST_BYTES = 256 * 1024
