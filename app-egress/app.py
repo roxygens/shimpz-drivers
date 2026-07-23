@@ -188,10 +188,10 @@ class Handler(socketserver.BaseRequestHandler):
                 upstream.close()
             self._reply(cli, 502)
             audit.log("connect", f"{host}:{port}", result="error", reason=str(exc), app=token[:12])
-            return
-        audit.log("connect", f"{host}:{port}", result="ok", app=token[:12])
-        self._reply(cli, 200)
-        self._tunnel(cli, upstream)
+        else:
+            audit.log("connect", f"{host}:{port}", result="ok", app=token[:12])
+            self._reply(cli, 200)
+            self._tunnel(cli, upstream)
 
     @staticmethod
     def _read_request(sock: socket.socket) -> str | None:
