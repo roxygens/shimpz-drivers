@@ -55,28 +55,37 @@ def _pending_endpoint(*dns_names: str) -> dict:
 def _container(
     container_id: str,
     name: str,
-    *,
-    labels: dict[str, str] | None = None,
-    networks: dict[str, dict] | None = None,
-    host_config: dict | None = None,
-    user: str = "",
-    apparmor: str = "docker-default",
-    mounts: list[dict] | None = None,
-    image_ref: str = "",
-    image_id: str = "",
-    hostname: str = "",
-    running: bool = True,
+    **attributes: object,
 ) -> dict:
+    allowed = {
+        "labels",
+        "networks",
+        "host_config",
+        "user",
+        "apparmor",
+        "mounts",
+        "image_ref",
+        "image_id",
+        "hostname",
+        "running",
+    }
+    if set(attributes) - allowed:
+        raise ValueError("unknown container fixture attribute")
     return {
         "Id": container_id,
         "Name": f"/{name}",
-        "Config": {"Labels": labels or {}, "User": user, "Image": image_ref, "Hostname": hostname},
-        "Image": image_id,
-        "HostConfig": host_config or {},
-        "NetworkSettings": {"Networks": networks or {}},
-        "AppArmorProfile": apparmor,
-        "Mounts": mounts or [],
-        "State": {"Running": running},
+        "Config": {
+            "Labels": attributes.get("labels") or {},
+            "User": attributes.get("user", ""),
+            "Image": attributes.get("image_ref", ""),
+            "Hostname": attributes.get("hostname", ""),
+        },
+        "Image": attributes.get("image_id", ""),
+        "HostConfig": attributes.get("host_config") or {},
+        "NetworkSettings": {"Networks": attributes.get("networks") or {}},
+        "AppArmorProfile": attributes.get("apparmor", "docker-default"),
+        "Mounts": attributes.get("mounts") or [],
+        "State": {"Running": attributes.get("running", True)},
     }
 
 
