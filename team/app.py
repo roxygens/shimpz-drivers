@@ -1898,18 +1898,20 @@ def _assistant_rpc_exchange(
     try:
         try:
             return power_execution.rpc_exchange(
-                _docker.api,
                 container.id,
                 [command, method, path],
-                user="10001:10001",
-                workdir=manifests.CONTAINER_TMP,
-                encoded=encoded,
-                timeout=ASSISTANT_RPC_TIMEOUT_SECONDS,
-                maximum=MAX_ASSISTANT_RPC_OUTPUT_BYTES,
-                transport_errors=(docker.errors.DockerException,),
-                fail_stop=lambda: _fail_stop_power(team_id, container),
-                cancelled=lambda exc: _raise_if_rpc_cancelled(token, exc),
-                close_stream=close_stream,
+                encoded,
+                power_execution.RpcExchangeStrategy(
+                    api=_docker.api,
+                    user="10001:10001",
+                    workdir=manifests.CONTAINER_TMP,
+                    timeout=ASSISTANT_RPC_TIMEOUT_SECONDS,
+                    maximum=MAX_ASSISTANT_RPC_OUTPUT_BYTES,
+                    transport_errors=(docker.errors.DockerException,),
+                    fail_stop=lambda: _fail_stop_power(team_id, container),
+                    cancelled=lambda exc: _raise_if_rpc_cancelled(token, exc),
+                    close_stream=close_stream,
+                ),
                 detect_unsupported_path=detect_unsupported_path,
             )
         except power_execution.RpcExchangeError as exc:

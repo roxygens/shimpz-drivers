@@ -215,72 +215,82 @@ def decode_rpc_response(raw: bytes) -> object:
     raise RpcExchangeError("invalid-result")
 
 
+@dataclass(frozen=True, slots=True)
+class RpcExchangeStrategy:
+    api: object
+    user: str
+    workdir: str
+    timeout: float
+    maximum: int
+    transport_errors: tuple[type[BaseException], ...]
+    fail_stop: Callable[[], None]
+    cancelled: Callable[[BaseException | None], None]
+    close_stream: Callable[[object], None]
+
+
 def rpc_exchange(
-    api: object,
     container_id: str,
     argv: list[str],
     encoded: bytes,
+    strategy: RpcExchangeStrategy,
     *,
-    user: str,
-    workdir: str,
-    timeout: float,
-    maximum: int,
-    transport_errors: tuple[type[BaseException], ...],
-    fail_stop: Callable[[], None],
-    cancelled: Callable[[BaseException | None], None],
-    close_stream: Callable[[object], None],
     detect_unsupported_path: bool = False,
 ) -> object:
     """Execute one bounded Docker RPC with shared fail-stop and framing decisions."""
+    transport_errors = strategy.transport_errors
     stream = None
     try:
         try:
-            created = api.exec_create(
+            created = strategy.api.exec_create(
                 container_id,
                 argv,
                 stdin=True,
                 stdout=True,
                 stderr=True,
                 privileged=False,
-                user=user,
-                workdir=workdir,
+                user=strategy.user,
+                workdir=strategy.workdir,
                 environment={},
             )
             exec_id = created["Id"]
-            stream = api.exec_start(exec_id, socket=True)
+            stream = strategy.api.exec_start(exec_id, socket=True)
             raw_socket = getattr(stream, "_sock", None)
             if raw_socket is None:
                 raise OSError("Docker attach socket cannot half-close stdin")
             raw_socket.sendall(encoded)
             raw_socket.shutdown(socket.SHUT_WR)
-            stdout, stderr = read_rpc_frames(raw_socket, time.monotonic() + timeout, maximum)
+            stdout, stderr = read_rpc_frames(
+                raw_socket,
+                time.monotonic() + strategy.timeout,
+                strategy.maximum,
+            )
         except TimeoutError as exc:
-            fail_stop()
-            cancelled(exc)
+            strategy.fail_stop()
+            strategy.cancelled(exc)
             raise RpcExchangeError("timeout") from exc
         except (*transport_errors, OSError, ValueError, KeyError) as exc:
-            fail_stop()
-            cancelled(exc)
+            strategy.fail_stop()
+            strategy.cancelled(exc)
             raise RpcExchangeError("failed") from exc
     finally:
         if stream is not None:
-            close_stream(stream)
+            strategy.close_stream(stream)
 
     try:
-        details = api.exec_inspect(exec_id)
+        details = strategy.api.exec_inspect(exec_id)
     except transport_errors as exc:
-        fail_stop()
-        cancelled(exc)
+        strategy.fail_stop()
+        strategy.cancelled(exc)
         raise RpcExchangeError("ambiguous") from exc
     exit_code = details.get("ExitCode")
     if not isinstance(exit_code, int):
-        fail_stop()
-        cancelled(None)
+        strategy.fail_stop()
+        strategy.cancelled(None)
         raise RpcExchangeError("ambiguous")
     if exit_code != 0 or stderr:
         if detect_unsupported_path and exit_code == 2 and not stdout and not stderr:
             raise RpcExchangeError("unsupported-path")
-        cancelled(None)
+        strategy.cancelled(None)
         raise RpcExchangeError("failed")
     return decode_rpc_response(bytes(stdout))
 

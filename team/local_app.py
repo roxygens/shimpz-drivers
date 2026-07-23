@@ -3015,18 +3015,20 @@ class LocalController:
 
         try:
             return power_execution.rpc_exchange(
-                self.client.api,
                 container.id,
                 [spec.rpc_command, method, path],
-                user=ASSISTANT_UID,
-                workdir=ASSISTANT_WORKDIR,
-                encoded=encoded,
-                timeout=RPC_TIMEOUT_SECONDS,
-                maximum=MAX_RESPONSE_BYTES,
-                transport_errors=(DockerException,),
-                fail_stop=lambda: self._fail_stop_power(container),
-                cancelled=lambda _exc: None,
-                close_stream=close_stream,
+                encoded,
+                power_execution.RpcExchangeStrategy(
+                    api=self.client.api,
+                    user=ASSISTANT_UID,
+                    workdir=ASSISTANT_WORKDIR,
+                    timeout=RPC_TIMEOUT_SECONDS,
+                    maximum=MAX_RESPONSE_BYTES,
+                    transport_errors=(DockerException,),
+                    fail_stop=lambda: self._fail_stop_power(container),
+                    cancelled=lambda _exc: None,
+                    close_stream=close_stream,
+                ),
                 detect_unsupported_path=detect_unsupported_path,
             )
         except power_execution.RpcExchangeError as exc:
