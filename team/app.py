@@ -48,6 +48,7 @@ import brain_credentials_client
 import brain_runtime_client
 import brain_runtime_token_store
 import chat_orchestrator
+import chat_turn_engine
 import cleanup_state
 import docker
 import docker.errors
@@ -2462,30 +2463,17 @@ def _drive_hosted_chat(
     validate_context: Callable[[], None],
 ) -> chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension:
     try:
-        if continuation is None:
-            return chat_orchestrator.run_until_pause(
-                _brain_runtime,
-                runtime_context,
-                assistant_chat.build_prompt(message, files),
-                validate_power,
-                durable_batch.invoke,
-                prepare_batch=durable_batch.prepare,
-                batch_delivered=durable_batch.delivered,
-                pause_before_batch=pause_for_secrets,
-                cancelled=lambda: _token_cancelled(token),
-                validate_context=validate_context,
-            )
-        return chat_orchestrator.continue_after_pause(
+        return chat_turn_engine.drive(
             _brain_runtime,
             runtime_context,
+            message,
+            files,
             continuation,
             validate_power,
-            durable_batch.invoke,
-            prepare_batch=durable_batch.prepare,
-            batch_delivered=durable_batch.delivered,
-            pause_before_batch=pause_for_secrets,
-            cancelled=lambda: _token_cancelled(token),
-            validate_context=validate_context,
+            durable_batch,
+            pause_for_secrets,
+            lambda: _token_cancelled(token),
+            validate_context,
         )
     except power_journal.PowerJournalError as exc:
         raise ApiError(
@@ -2676,7 +2664,7 @@ def _run_hosted_chat_segment(
     require_current_credential()
     if (
         isinstance(outcome, chat_orchestrator.ChatSuspension)
-        and sum(bool(item) for item in (account_requirements, secret_requirements)) != 1
+        and chat_turn_engine.suspension_gate_count(account_requirements, secret_requirements) != 1
     ):
         raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "invalid chat suspension")
     return team_name, initial_identity, outcome, account_requirements, secret_requirements
@@ -2733,6 +2721,55 @@ def _pause_hosted_connection(
     return _hosted_account_challenge_payload(challenge)
 
 
+def _hosted_segment_response(
+    team_id: str,
+    token: str,
+    team_name: str,
+    identity: tuple[object, ...],
+    outcome: chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension,
+    assistant_ids: tuple[str, ...],
+    file_ids: tuple[str, ...],
+    owner: str,
+    account_requirements: tuple[assistant_account_challenges.AccountRequirement, ...],
+    secret_requirements: tuple[assistant_secret_challenges.SecretRequirement, ...],
+) -> dict[str, object]:
+    def pending(suspension: chat_orchestrator.ChatSuspension) -> _PendingHostedChat:
+        return _PendingHostedChat(
+            continuation=suspension.continuation,
+            assistant_ids=assistant_ids,
+            file_ids=file_ids,
+            owner=owner,
+            identity=identity,
+        )
+
+    def complete(terminal: chat_orchestrator.ChatOutcome) -> dict[str, object]:
+        if not _commit_chat_terminal(team_id, token):
+            raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
+        return {
+            "team_id": team_id,
+            "team_name": team_name,
+            "reply": terminal.reply[:CHAT_OUTPUT_CAP],
+        }
+
+    try:
+        return chat_turn_engine.dispatch(
+            outcome,
+            (account_requirements, secret_requirements),
+            pending,
+            (
+                lambda suspension, requirements, state: _pause_hosted_connection(
+                    team_id, token, suspension, requirements, state
+                ),
+                lambda suspension, requirements, state: _pause_hosted_chat(
+                    team_id, token, suspension, requirements, state
+                ),
+            ),
+            complete,
+        )
+    except ValueError as exc:
+        raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc)) from exc
+
+
 def _chat_in_turn(
     team_id: str,
     message: str,
@@ -2751,36 +2788,18 @@ def _chat_in_turn(
         owner,
         message=message,
     )
-    if isinstance(outcome, chat_orchestrator.ChatSuspension):
-        pending = _PendingHostedChat(
-            continuation=outcome.continuation,
-            assistant_ids=assistant_ids,
-            file_ids=tuple(file_ids) if isinstance(file_ids, list) else (),
-            owner=owner,
-            identity=identity,
-        )
-        if account_requirements:
-            return _pause_hosted_connection(
-                team_id,
-                token,
-                outcome,
-                account_requirements,
-                pending,
-            )
-        return _pause_hosted_chat(
-            team_id,
-            token,
-            outcome,
-            secret_requirements,
-            pending,
-        )
-    if not _commit_chat_terminal(team_id, token):
-        raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
-    return {
-        "team_id": team_id,
-        "team_name": team_name,
-        "reply": outcome.reply[:CHAT_OUTPUT_CAP],
-    }
+    return _hosted_segment_response(
+        team_id,
+        token,
+        team_name,
+        identity,
+        outcome,
+        assistant_ids,
+        tuple(file_ids) if isinstance(file_ids, list) else (),
+        owner,
+        account_requirements,
+        secret_requirements,
+    )
 
 
 def _chat(
@@ -2965,36 +2984,18 @@ def _resume_chat_accounts(
             continuation=pending.continuation,
             expected_identity=pending.identity,
         )
-        if isinstance(outcome, chat_orchestrator.ChatSuspension):
-            next_pending = _PendingHostedChat(
-                continuation=outcome.continuation,
-                assistant_ids=pending.assistant_ids,
-                file_ids=pending.file_ids,
-                owner=pending.owner,
-                identity=identity,
-            )
-            if account_requirements:
-                return _pause_hosted_connection(
-                    team_id,
-                    token,
-                    outcome,
-                    account_requirements,
-                    next_pending,
-                )
-            return _pause_hosted_chat(
-                team_id,
-                token,
-                outcome,
-                secret_requirements,
-                next_pending,
-            )
-        if not _commit_chat_terminal(team_id, token):
-            raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
-        return {
-            "team_id": team_id,
-            "team_name": team_name,
-            "reply": outcome.reply[:CHAT_OUTPUT_CAP],
-        }
+        return _hosted_segment_response(
+            team_id,
+            token,
+            team_name,
+            identity,
+            outcome,
+            pending.assistant_ids,
+            pending.file_ids,
+            pending.owner,
+            account_requirements,
+            secret_requirements,
+        )
 
 
 def _submit_chat_secrets(
@@ -3054,36 +3055,18 @@ def _submit_chat_secrets(
             continuation=pending.continuation,
             expected_identity=pending.identity,
         )
-        if isinstance(outcome, chat_orchestrator.ChatSuspension):
-            next_pending = _PendingHostedChat(
-                continuation=outcome.continuation,
-                assistant_ids=pending.assistant_ids,
-                file_ids=pending.file_ids,
-                owner=pending.owner,
-                identity=identity,
-            )
-            if account_requirements:
-                return _pause_hosted_connection(
-                    team_id,
-                    token,
-                    outcome,
-                    account_requirements,
-                    next_pending,
-                )
-            return _pause_hosted_chat(
-                team_id,
-                token,
-                outcome,
-                secret_requirements,
-                next_pending,
-            )
-        if not _commit_chat_terminal(team_id, token):
-            raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped")
-        return {
-            "team_id": team_id,
-            "team_name": team_name,
-            "reply": outcome.reply[:CHAT_OUTPUT_CAP],
-        }
+        return _hosted_segment_response(
+            team_id,
+            token,
+            team_name,
+            identity,
+            outcome,
+            pending.assistant_ids,
+            pending.file_ids,
+            pending.owner,
+            account_requirements,
+            secret_requirements,
+        )
 
 
 def _stop_active_power(team_id: str, token: str | None) -> bool:

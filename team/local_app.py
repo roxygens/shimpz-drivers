@@ -33,7 +33,6 @@ import assistant_account_flow
 import assistant_approval_challenges
 import assistant_approval_flow
 import assistant_approval_grants
-import assistant_chat
 import assistant_genesis
 import assistant_help
 import assistant_manifest
@@ -43,6 +42,7 @@ import assistant_secret_store
 import brain_runtime_client
 import brain_runtime_token_store
 import chat_orchestrator
+import chat_turn_engine
 import docker
 import inference_config
 import local_audit
@@ -190,7 +190,7 @@ class _LocalChatRequirements:
     approvals: tuple[assistant_approval_challenges.ApprovalRequirement, ...] = ()
 
     def suspension_gate_count(self) -> int:
-        return sum(bool(item) for item in (self.accounts, self.secrets, self.approvals))
+        return chat_turn_engine.suspension_gate_count(self.accounts, self.secrets, self.approvals)
 
 
 def _required_active_assistant(
@@ -1864,34 +1864,19 @@ class LocalController:
         validate_context: Callable[[], None],
     ) -> chat_orchestrator.ChatOutcome | chat_orchestrator.ChatSuspension:
         try:
-            if continuation is None:
-                return chat_orchestrator.run_until_pause(
-                    self.brain_runtime,
-                    context,
-                    assistant_chat.build_prompt(message, files),
-                    validate_power,
-                    durable_batch.invoke,
-                    prepare_batch=durable_batch.prepare,
-                    batch_delivered=durable_batch.delivered,
-                    pause_before_batch=pause_for_secrets,
-                    pause_for_approval=pause_for_approval,
-                    approval_granted=approval_granted,
-                    cancelled=cancelled,
-                    validate_context=validate_context,
-                )
-            return chat_orchestrator.continue_after_pause(
+            return chat_turn_engine.drive(
                 self.brain_runtime,
                 context,
+                message,
+                files,
                 continuation,
                 validate_power,
-                durable_batch.invoke,
-                prepare_batch=durable_batch.prepare,
-                batch_delivered=durable_batch.delivered,
-                pause_before_batch=pause_for_secrets,
+                durable_batch,
+                pause_for_secrets,
+                cancelled,
+                validate_context,
                 pause_for_approval=pause_for_approval,
                 approval_granted=approval_granted,
-                cancelled=cancelled,
-                validate_context=validate_context,
             )
         except power_journal.PowerJournalError as exc:
             raise ApiProblem(
@@ -2385,22 +2370,40 @@ class LocalController:
         secret_requirements: tuple[assistant_secret_challenges.SecretRequirement, ...],
         approval_requirements: tuple[assistant_approval_challenges.ApprovalRequirement, ...],
     ) -> dict[str, object]:
-        if isinstance(outcome, chat_orchestrator.ChatSuspension):
-            pending = _PendingLocalChat(
-                continuation=outcome.continuation,
+        def pending(suspension: chat_orchestrator.ChatSuspension) -> _PendingLocalChat:
+            return _PendingLocalChat(
+                continuation=suspension.continuation,
                 assistant_ids=assistant_ids,
                 file_ids=file_ids,
                 provider=provider,
                 identity=identity,
             )
-            if account_requirements:
-                return self._pause_account(team_id, token, outcome, account_requirements, pending)
-            if secret_requirements:
-                return self._pause_chat(team_id, token, outcome, secret_requirements, pending)
-            return self._pause_approval(team_id, token, outcome, approval_requirements, pending)
-        if not self._commit_chat_terminal(team_id, token):
-            raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
-        return {"team_id": team_id, "team_name": team_name, "reply": outcome.reply}
+
+        def complete(terminal: chat_orchestrator.ChatOutcome) -> dict[str, object]:
+            if not self._commit_chat_terminal(team_id, token):
+                raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
+            return {"team_id": team_id, "team_name": team_name, "reply": terminal.reply}
+
+        try:
+            return chat_turn_engine.dispatch(
+                outcome,
+                (account_requirements, secret_requirements, approval_requirements),
+                pending,
+                (
+                    lambda suspension, requirements, state: self._pause_account(
+                        team_id, token, suspension, requirements, state
+                    ),
+                    lambda suspension, requirements, state: self._pause_chat(
+                        team_id, token, suspension, requirements, state
+                    ),
+                    lambda suspension, requirements, state: self._pause_approval(
+                        team_id, token, suspension, requirements, state
+                    ),
+                ),
+                complete,
+            )
+        except ValueError as exc:
+            raise ApiProblem(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc), code="internal-error") from exc
 
     def chat(
         self,

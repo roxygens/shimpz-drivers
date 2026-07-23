@@ -24,7 +24,7 @@ COPY local_app.py local_audit.py local_registry.py local_token_store.py local_he
     assistant_account_challenges.py assistant_account_flow.py oauth_account_store.py oauth_account_service.py \
     oauth_broker_client.py oauth_http_client.py oauth_pkce_challenges.py oauth_providers.py \
     assistant_approval_challenges.py assistant_approval_flow.py assistant_approval_grants.py \
-    assistant_chat.py brain_runtime_client.py brain_runtime_token_store.py chat_orchestrator.py inference_config.py \
+    assistant_chat.py brain_runtime_client.py brain_runtime_token_store.py chat_orchestrator.py chat_turn_engine.py inference_config.py \
     power_execution.py power_journal.py ./
 
 # A normal source build remains possible, but cannot start until release automation supplies the
