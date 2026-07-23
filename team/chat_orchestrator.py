@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import brain_runtime_client
+import power_execution
 
 MAX_POWER_ROUNDS = 8
 
@@ -53,6 +54,15 @@ class ChatContinuation:
 class ChatSuspension:
     continuation: ChatContinuation
     requests: tuple[brain_runtime_client.PowerRequest, ...]
+    interaction: HumanInteraction | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HumanInteraction:
+    """One exact Power call site that requested deterministic human replay."""
+
+    request: brain_runtime_client.PowerRequest
+    payload: dict[str, object]
 
 
 PowerInvoker = Callable[[brain_runtime_client.PowerRequest], object]
@@ -158,23 +168,39 @@ def _drive(
                     requests=batch,
                 )
             raise ApprovalRequiredError(unapproved[0])
-        seen_interrupts.update(batch_interrupts)
         prepare_batch(batch)
         results: dict[str, object] = {}
+        batch_invoked: list[InvokedPower] = []
         for request in batch:
             if cancelled():
                 raise ChatStoppedError("chat turn stopped")
             validate_context()
-            results[request.interrupt_id] = invoke_power(request)
-            invoked.append(InvokedPower(assistant_id=request.assistant_id, power=request.power))
+            result = invoke_power(request)
+            if isinstance(result, power_execution.RpcSuspension):
+                if result.payload.get("kind") not in {"request", "approval"}:
+                    raise ChatOrchestrationError("Power requested an invalid human interaction")
+                return ChatSuspension(
+                    continuation=ChatContinuation(
+                        turn=turn,
+                        seen_interrupts=tuple(sorted(seen_interrupts)),
+                        invoked=tuple(invoked),
+                        round_index=_round,
+                    ),
+                    requests=batch,
+                    interaction=HumanInteraction(request, result.payload),
+                )
+            results[request.interrupt_id] = result
+            batch_invoked.append(InvokedPower(assistant_id=request.assistant_id, power=request.power))
 
         validate_context()
+        seen_interrupts.update(batch_interrupts)
         resumed = runtime.resume(context, results)
         if resumed.status == "power-required" and not seen_interrupts.isdisjoint(
             request.interrupt_id for request in resumed.powers
         ):
             raise ChatOrchestrationError("Brain repeated a Power interrupt across rounds")
         batch_delivered(batch)
+        invoked.extend(batch_invoked)
         turn = resumed
 
     raise ChatOrchestrationError("Brain did not complete the chat turn")

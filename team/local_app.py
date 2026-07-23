@@ -1574,6 +1574,8 @@ class LocalController:
                         self._active_power_containers.pop(team_id, None)
             if self._chat_cancelled(token):
                 raise chat_orchestrator.ChatStoppedError("chat turn stopped")
+        if "suspend" in invocation:
+            return power_execution.RpcSuspension(invocation["suspend"])
         return invocation["result"]
 
     @staticmethod
@@ -3251,7 +3253,8 @@ class LocalController:
             **secret_values,
             **{f"account:{account_id}": envelope["access_token"] for account_id, envelope in account_values.items()},
         }
-        if self._contains_secret(raw_result, private_values):
+        inspected_result = raw_result.payload if isinstance(raw_result, power_execution.RpcSuspension) else raw_result
+        if self._contains_secret(inspected_result, private_values):
             local_audit.record(
                 "assistant-power",
                 result="error",
@@ -3264,6 +3267,15 @@ class LocalController:
                 "the Assistant returned an unsafe result",
                 code="assistant-secret-exposure",
             )
+        if isinstance(raw_result, power_execution.RpcSuspension):
+            local_audit.record(
+                "assistant-power",
+                result="ok",
+                team_id=team_id,
+                assistant=assistant_id,
+                detail=f"suspended:{power}",
+            )
+            return {"assistant": assistant_id, "power": power, "suspend": raw_result.payload}
         try:
             result = validate_power_output(assistant_id, power, raw_result)
         except ValueError as exc:

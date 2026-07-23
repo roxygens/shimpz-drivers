@@ -145,6 +145,37 @@ class PowerRpcFrameTests(unittest.TestCase):
                         batch.invoke(request)
         execute.assert_not_called()
 
+    def test_power_batch_replays_an_explicit_rpc_suspension(self) -> None:
+        request = app.brain_runtime_client.PowerRequest(
+            "interrupt-1",
+            "assistant",
+            "lookup",
+            {"query": "safe"},
+            "none",
+        )
+        suspension = app.power_execution.RpcSuspension({"ordinal": 0, "kind": "request"})
+        execute = mock.Mock(side_effect=(suspension, {"ok": True}))
+        binding = SimpleNamespace(container=SimpleNamespace(id="container-1"), image="image@sha256:" + "a" * 64)
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = app.power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
+            self.addCleanup(journal.close)
+            batch = app.power_execution.PowerBatch(
+                journal,
+                "generation-1",
+                "thread-1",
+                {"assistant": binding},
+                lambda item: (item.container.id, item.image),
+                execute,
+                lambda _request: None,
+            )
+            batch.prepare((request,))
+
+            self.assertIs(batch.invoke(request), suspension)
+            self.assertEqual(batch.invoke(request), {"ok": True})
+
+        self.assertEqual(execute.call_count, 2)
+
     def test_power_resolution_failures_have_identical_statuses(self) -> None:
         hosted_contract = SimpleNamespace(powers={})
         local_spec = SimpleNamespace(assistant_id="assistant", name="Assistant", powers={}, accounts={})

@@ -20,6 +20,7 @@ import chat_turn_engine
 import inference_config
 import local_app
 import local_registry
+import power_execution
 import test_hosted_app as hosted_harness
 
 hosted_app = hosted_harness.app
@@ -79,6 +80,22 @@ class _Batch:
     @staticmethod
     def delivered(_requests) -> None:
         raise AssertionError("a suspended batch must not be delivered")
+
+
+class _InteractionBatch:
+    @staticmethod
+    def prepare(_requests) -> None:
+        return None
+
+    @staticmethod
+    def invoke(_request):
+        return power_execution.RpcSuspension(
+            {"ordinal": 0, "kind": "request", "request_type": "str"}
+        )
+
+    @staticmethod
+    def delivered(_requests) -> None:
+        raise AssertionError("an interactive batch must not be delivered")
 
 
 class SharedChatTurnEngineTest(unittest.TestCase):
@@ -164,6 +181,37 @@ class SharedChatTurnEngineTest(unittest.TestCase):
             lambda _outcome: "complete",
         )
         self.assertEqual(dispatched, "inputs")
+
+    def test_rpc_request_suspension_populates_the_input_category(self) -> None:
+        strategy = self._strategy(local=True, decisions=[])
+        strategy = chat_turn_engine.SegmentStrategy(
+            runtime=strategy.runtime,
+            prepare=lambda: chat_turn_engine.PreparedSegment(
+                "Team",
+                ("identity",),
+                _context(),
+                [],
+                _InteractionBatch(),
+            ),
+            validate_power=strategy.validate_power,
+            pause_for_private_inputs=lambda _requests, _requirements: False,
+            cancelled=strategy.cancelled,
+            validate_context=strategy.validate_context,
+            raise_problem=strategy.raise_problem,
+            pause_for_approval=lambda _requests, _requirements: False,
+            approval_granted=lambda _request: True,
+        )
+
+        _, _, outcome, requirements = chat_turn_engine.run_segment(
+            strategy,
+            message="ask",
+            continuation=None,
+            expected_identity=("identity",),
+        )
+
+        self.assertIsInstance(outcome, chat_orchestrator.ChatSuspension)
+        self.assertEqual(requirements.inputs, (outcome.interaction,))
+        self.assertEqual(requirements.approvals, ())
 
     def test_hosted_and_local_controllers_build_equivalent_real_segment_strategies(self) -> None:
         assistant_id = "shimpz-cloudflare"

@@ -117,6 +117,9 @@ class PowerBatch:
         if not decision.execute:
             return decision.result
         result = self._execute(request)
+        if isinstance(result, RpcSuspension):
+            self._journal.suspend(self._batch, operation)
+            return result
         self._journal.complete(self._batch, operation, result)
         return result
 

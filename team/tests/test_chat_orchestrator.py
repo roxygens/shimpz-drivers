@@ -116,6 +116,45 @@ class ChatOrchestratorTests(unittest.TestCase):
             (chat_orchestrator.InvokedPower(assistant_id="hello-pulse", power="hello"),),
         )
 
+    def test_power_human_interaction_pauses_and_replays_the_whole_batch(self):
+        runtime = FakeRuntime([suspended(), completed("Answered.")])
+        interactions = iter(
+            (
+                chat_orchestrator.power_execution.RpcSuspension(
+                    {"ordinal": 0, "kind": "request", "request_type": "str"}
+                ),
+                {"answer": "Ada"},
+            )
+        )
+        prepared = []
+
+        paused = chat_orchestrator.run_until_pause(
+            runtime,
+            context(),
+            "Ask first",
+            accept_input,
+            lambda _request: next(interactions),
+            prepare_batch=lambda batch: prepared.append(batch),
+        )
+
+        self.assertIsInstance(paused, chat_orchestrator.ChatSuspension)
+        self.assertEqual(paused.interaction.request.interrupt_id, "interrupt-1")
+        self.assertEqual(paused.interaction.payload["kind"], "request")
+        self.assertEqual(runtime.resumes, [])
+
+        outcome = chat_orchestrator.continue_after_pause(
+            runtime,
+            context(),
+            paused.continuation,
+            accept_input,
+            lambda _request: next(interactions),
+            prepare_batch=lambda batch: prepared.append(batch),
+        )
+        self.assertIsInstance(outcome, chat_orchestrator.ChatOutcome)
+        self.assertEqual(outcome.reply, "Answered.")
+        self.assertEqual(len(prepared), 2)
+        self.assertEqual(len(outcome.powers), 1)
+
     def test_pause_happens_after_full_validation_and_before_any_side_effect(self):
         requests = (
             suspended(interrupt_id="first").powers[0],

@@ -2269,7 +2269,8 @@ def _invoke_assistant_power(
         **secret_values,
         **{f"account:{account_id}": envelope["access_token"] for account_id, envelope in account_values.items()},
     }
-    if _contains_secret(raw_result, private_values):
+    inspected_result = raw_result.payload if isinstance(raw_result, power_execution.RpcSuspension) else raw_result
+    if _contains_secret(inspected_result, private_values):
         audit.log(
             "assistant_power",
             team_id,
@@ -2279,6 +2280,16 @@ def _invoke_assistant_power(
             reason="secret-exposure",
         )
         raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Power exposed protected data")
+    if isinstance(raw_result, power_execution.RpcSuspension):
+        audit.log(
+            "assistant_power",
+            team_id,
+            result="ok",
+            phase="suspended",
+            assistant=assistant_id,
+            power=power,
+        )
+        return {"assistant": assistant_id, "power": power, "suspend": raw_result.payload}
     try:
         result = marketplace.validate_power_output(assistant_id, power, raw_result)
     except ValueError as exc:
@@ -2504,6 +2515,8 @@ def _run_hosted_chat_segment(
             request.power,
             request.input,
         )
+        if "suspend" in invocation:
+            return power_execution.RpcSuspension(invocation["suspend"])
         return invocation["result"]
 
     def prepare() -> chat_turn_engine.PreparedSegment:

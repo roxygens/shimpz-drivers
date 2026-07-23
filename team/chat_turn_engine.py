@@ -196,7 +196,7 @@ def drive(
     if strategy.approval_granted is not None:
         hooks["approval_granted"] = strategy.approval_granted
     if continuation is None:
-        return chat_orchestrator.run_until_pause(
+        outcome = chat_orchestrator.run_until_pause(
             strategy.runtime,
             segment.context,
             assistant_chat.build_prompt(message, segment.files),
@@ -204,14 +204,21 @@ def drive(
             segment.durable_batch.invoke,
             **hooks,
         )
-    return chat_orchestrator.continue_after_pause(
-        strategy.runtime,
-        segment.context,
-        continuation,
-        strategy.validate_power,
-        segment.durable_batch.invoke,
-        **hooks,
-    )
+    else:
+        outcome = chat_orchestrator.continue_after_pause(
+            strategy.runtime,
+            segment.context,
+            continuation,
+            strategy.validate_power,
+            segment.durable_batch.invoke,
+            **hooks,
+        )
+    if isinstance(outcome, chat_orchestrator.ChatSuspension) and outcome.interaction is not None:
+        if outcome.interaction.payload["kind"] == "request":
+            requirements.inputs = (outcome.interaction,)
+        else:
+            requirements.approvals = (outcome.interaction,)
+    return outcome
 
 
 def suspension_gate_count(*requirements: tuple[object, ...]) -> int:
