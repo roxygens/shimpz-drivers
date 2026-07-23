@@ -101,6 +101,14 @@ class StaticTeamDriverImageContractTests(unittest.TestCase):
         self.assertNotIn("curl", runtime)
         self.assertNotIn("/usr/local/bin/uv", runtime)
 
+    def test_reference_image_exposes_the_sdk_baked_manifest_contract(self) -> None:
+        dockerfile = (ROOT / "tests" / "fixtures" / "reference-assistant" / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("tests/fixtures/reference-assistant/shimpz.toml /opt/shimpz/shimpz.toml", dockerfile)
+        self.assertIn('contract=catalog["assistants"]["shimpz-cloudflare"]["contract"]', dockerfile)
+        self.assertIn('/opt/shimpz/shimpz.contract.json").write_text', dockerfile)
+        self.assertIn("/opt/shimpz/shimpz.toml /opt/shimpz/shimpz.contract.json", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

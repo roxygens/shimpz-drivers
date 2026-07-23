@@ -262,7 +262,9 @@ class DockerFlowTests(unittest.TestCase):
                 "--load",
                 "--tag",
                 fixture_tag,
-                str(FIXTURE),
+                "--file",
+                str(FIXTURE / "Dockerfile"),
+                str(TEAM),
             )
             fixture_id = self._run("image", "inspect", "--format", "{{.Id}}", fixture_tag).stdout.strip()
 
