@@ -28,6 +28,8 @@ from assistant_human import approval_challenges as assistant_approval_challenges
 from assistant_human import input_challenges as assistant_input_challenges
 from local_controller_harness import LocalContractCase
 from local_support import audit as local_audit
+from local_support import http as local_http
+from local_support.validation import validate_model_credential_headers
 
 LOOKUP_INPUT = {"page": 1, "per_page": 25}
 LOOKUP_RESULT = {
@@ -390,11 +392,11 @@ class LocalContractTests(LocalContractCase):
         self.assertIn(malformed.id, controller._blocked_power_workloads)
 
     def test_large_upload_admission_is_single_slot(self) -> None:
-        self.assertTrue(local_app._FILE_UPLOAD_SLOTS.acquire(blocking=False))
+        self.assertTrue(local_http._FILE_UPLOAD_SLOTS.acquire(blocking=False))
         try:
-            self.assertFalse(local_app._FILE_UPLOAD_SLOTS.acquire(blocking=False))
+            self.assertFalse(local_http._FILE_UPLOAD_SLOTS.acquire(blocking=False))
         finally:
-            local_app._FILE_UPLOAD_SLOTS.release()
+            local_http._FILE_UPLOAD_SLOTS.release()
 
     def test_inference_configuration_persists_only_provider_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -424,7 +426,7 @@ class LocalContractTests(LocalContractCase):
     def test_private_model_headers_are_closed_and_never_echoed(self) -> None:
         key = "sk-test-0123456789"
         self.assertEqual(
-            local_app.validate_model_credential_headers(["openai"], [key]),
+            validate_model_credential_headers(["openai"], [key]),
             ("openai", key),
         )
         invalid = (
@@ -438,7 +440,7 @@ class LocalContractTests(LocalContractCase):
         )
         for providers, keys in invalid:
             with self.subTest(providers=providers, keys=len(keys)), self.assertRaises(local_app.ApiProblem) as caught:
-                local_app.validate_model_credential_headers(providers, keys)
+                validate_model_credential_headers(providers, keys)
             self.assertNotIn(key, str(caught.exception))
 
     def test_private_chat_route_reads_key_from_header_not_json(self) -> None:
