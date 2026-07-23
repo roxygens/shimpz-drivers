@@ -75,10 +75,7 @@ def _challenge_id(value: object) -> str:
 
 
 def _bindings(value: object) -> tuple[str, ...]:
-    if (
-        not isinstance(value, Iterable)
-        or isinstance(value, str | bytes | Mapping)
-    ):
+    if not isinstance(value, Iterable) or isinstance(value, str | bytes | Mapping):
         raise ContinuationStoreError("continuation bindings are invalid")
     result: list[str] = []
     for item in value:
@@ -392,11 +389,7 @@ class EncryptedContinuationStore:
             previous = records.get(team)
             if previous is None and len(records) >= self._capacity:
                 raise ContinuationStoreError("continuation capacity reached")
-            generation = (
-                int(previous["generation"]) + 1
-                if isinstance(previous, dict)
-                else 1
-            )
+            generation = int(previous["generation"]) + 1 if isinstance(previous, dict) else 1
             nonce = os.urandom(12)
             ciphertext = AESGCM(self._key(allow_create=not records)).encrypt(
                 nonce,

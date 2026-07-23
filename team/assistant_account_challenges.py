@@ -136,11 +136,7 @@ class AccountChallengeStore:
         """Rehydrate one authenticated durable challenge without extending its TTL."""
         team = _team_id(team_id)
         identifier = _challenge_id(challenge_id)
-        if (
-            type(remaining_seconds) is not int
-            or not 1 <= remaining_seconds <= self._ttl
-            or not requirements
-        ):
+        if type(remaining_seconds) is not int or not 1 <= remaining_seconds <= self._ttl or not requirements:
             raise AccountChallengeError("account challenge restore is invalid")
         now = time.monotonic()
         with self._lock:
