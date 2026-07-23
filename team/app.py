@@ -199,6 +199,8 @@ _assistant_accounts = oauth_account_store.OAuthAccountStore(
     ASSISTANT_ACCOUNT_KEY_PATH,
 )
 _assistant_account_challenges = assistant_account_challenges.AccountChallengeStore()
+# Hosted interaction challenges are process-local by contract: a restart invalidates them and the
+# client retries the turn; encrypted restart durability belongs only to the local Controller profile.
 _assistant_approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
 _assistant_approval_grants = assistant_approval_grants.ApprovalGrantStore(ASSISTANT_APPROVAL_GRANTS_PATH)
 _assistant_input_challenges = assistant_input_challenges.InputChallengeStore()
