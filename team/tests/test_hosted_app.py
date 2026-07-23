@@ -767,14 +767,14 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         store = types.SimpleNamespace(load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test"))
         invoked: list[tuple[str, str, object]] = []
 
-        def run(_runtime, context, _prompt, validate_power, invoke_power, **hooks):
+        def run(_runtime, context, _prompt, strategy):
             self.assertEqual([assistant.id for assistant in context.assistants], ["places", "weather"])
             self.assertEqual(
                 [assistant.genesis for assistant in context.assistants],
                 ["Compose Powers for places-container.", "Compose Powers for weather-container."],
             )
             self.assertEqual(context.thread_id, app._brain_thread_id("team_1", ANCHOR_ID))
-            self.assertTrue(callable(validate_power))
+            self.assertTrue(callable(strategy.validate_power))
             requests = (
                 app.brain_runtime_client.PowerRequest("place-1", "places", "search", {"name": "Berlin"}),
                 app.brain_runtime_client.PowerRequest(
@@ -784,10 +784,10 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                     {"latitude": 52.52, "longitude": 13.41},
                 ),
             )
-            hooks["prepare_batch"](requests)
+            strategy.prepare_batch(requests)
             for request in requests:
-                invoke_power(request)
-            hooks["batch_delivered"](requests)
+                strategy.invoke_power(request)
+            strategy.batch_delivered(requests)
             return app.chat_orchestrator.ChatOutcome(
                 reply="Berlin weather is ready.",
                 powers=(

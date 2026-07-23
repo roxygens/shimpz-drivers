@@ -62,6 +62,10 @@ def accept_input(_assistant: str, _power: str, payload):
     return payload
 
 
+def strategy(validate_power, invoke_power, **hooks):
+    return chat_orchestrator.ChatStrategy(validate_power, invoke_power, **hooks)
+
+
 class FakeRuntime:
     def __init__(self, turns):
         self.turns = iter(turns)
@@ -83,8 +87,10 @@ class ChatOrchestratorTests(unittest.TestCase):
             FakeRuntime([completed("Hello")]),
             context(),
             "Hello",
-            accept_input,
-            lambda request: invoked.append((request.assistant_id, request.power, request.input)),
+            strategy(
+                accept_input,
+                lambda request: invoked.append((request.assistant_id, request.power, request.input)),
+            ),
         )
 
         self.assertEqual(outcome.reply, "Hello")
@@ -99,9 +105,11 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Greet Ada",
-            accept_input,
-            lambda request: (
-                invoked.append((request.assistant_id, request.power, request.input)) or {"message": "Hello, Ada."}
+            strategy(
+                accept_input,
+                lambda request: (
+                    invoked.append((request.assistant_id, request.power, request.input)) or {"message": "Hello, Ada."}
+                ),
             ),
         )
 
@@ -129,9 +137,11 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Ask first",
-            accept_input,
-            lambda _request: next(interactions),
-            prepare_batch=lambda batch: prepared.append(batch),
+            strategy(
+                accept_input,
+                lambda _request: next(interactions),
+                prepare_batch=lambda batch: prepared.append(batch),
+            ),
         )
 
         self.assertIsInstance(paused, chat_orchestrator.ChatSuspension)
@@ -143,9 +153,11 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             paused.continuation,
-            accept_input,
-            lambda _request: next(interactions),
-            prepare_batch=lambda batch: prepared.append(batch),
+            strategy(
+                accept_input,
+                lambda _request: next(interactions),
+                prepare_batch=lambda batch: prepared.append(batch),
+            ),
         )
         self.assertIsInstance(outcome, chat_orchestrator.ChatOutcome)
         self.assertEqual(outcome.reply, "Answered.")
@@ -164,10 +176,12 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Use the Powers",
-            lambda assistant, power, payload: events.append(("validate", assistant, power)) or payload,
-            lambda request: events.append(("invoke", request.interrupt_id)) or {"ok": True},
-            prepare_batch=lambda batch: events.append(("prepare", len(batch))),
-            pause_before_batch=lambda batch: events.append(("pause", len(batch))) or True,
+            strategy(
+                lambda assistant, power, payload: events.append(("validate", assistant, power)) or payload,
+                lambda request: events.append(("invoke", request.interrupt_id)) or {"ok": True},
+                prepare_batch=lambda batch: events.append(("prepare", len(batch))),
+                pause_before_batch=lambda batch: events.append(("pause", len(batch))) or True,
+            ),
         )
 
         self.assertIsInstance(progress, chat_orchestrator.ChatSuspension)
@@ -185,9 +199,11 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             progress.continuation,
-            accept_input,
-            lambda request: events.append(("invoke", request.interrupt_id)) or {"ok": True},
-            prepare_batch=lambda batch: events.append(("prepare", len(batch))),
+            strategy(
+                accept_input,
+                lambda request: events.append(("invoke", request.interrupt_id)) or {"ok": True},
+                prepare_batch=lambda batch: events.append(("prepare", len(batch))),
+            ),
         )
 
         self.assertIsInstance(resumed, chat_orchestrator.ChatOutcome)
@@ -201,9 +217,11 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Use one Power",
-            accept_input,
-            lambda _request: self.fail("Power must not run before secrets are available"),
-            pause_before_batch=lambda _batch: True,
+            strategy(
+                accept_input,
+                lambda _request: self.fail("Power must not run before secrets are available"),
+                pause_before_batch=lambda _batch: True,
+            ),
         )
         self.assertIsInstance(progress, chat_orchestrator.ChatSuspension)
 
@@ -212,10 +230,12 @@ class ChatOrchestratorTests(unittest.TestCase):
                 runtime,
                 context(),
                 progress.continuation,
-                lambda _assistant, _power, _payload: (_ for _ in ()).throw(
-                    chat_orchestrator.ChatOrchestrationError("context changed")
+                strategy(
+                    lambda _assistant, _power, _payload: (_ for _ in ()).throw(
+                        chat_orchestrator.ChatOrchestrationError("context changed")
+                    ),
+                    lambda _request: self.fail("drifted Power must not run"),
                 ),
-                lambda _request: self.fail("drifted Power must not run"),
             )
         self.assertEqual(runtime.resumes, [])
 
@@ -232,8 +252,7 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Run twice",
-            accept_input,
-            lambda _request: {"message": "ok"},
+            strategy(accept_input, lambda _request: {"message": "ok"}),
         )
 
         self.assertEqual([item.power for item in outcome.powers], ["hello", "hello"])
@@ -249,9 +268,11 @@ class ChatOrchestratorTests(unittest.TestCase):
                 runtime,
                 context(),
                 "Run once",
-                accept_input,
-                lambda request: (
-                    invoked.append((request.assistant_id, request.power, request.input)) or {"message": "ok"}
+                strategy(
+                    accept_input,
+                    lambda request: (
+                        invoked.append((request.assistant_id, request.power, request.input)) or {"message": "ok"}
+                    ),
                 ),
             )
 
@@ -265,8 +286,10 @@ class ChatOrchestratorTests(unittest.TestCase):
                 FakeRuntime([suspended("shell")]),
                 context(),
                 "Do it",
-                accept_input,
-                lambda request: invoked.append((request.assistant_id, request.power, request.input)),
+                strategy(
+                    accept_input,
+                    lambda request: invoked.append((request.assistant_id, request.power, request.input)),
+                ),
             )
         self.assertEqual(invoked, [])
 
@@ -278,9 +301,7 @@ class ChatOrchestratorTests(unittest.TestCase):
                 runtime,
                 context(),
                 "Stop",
-                accept_input,
-                lambda _request: {},
-                cancelled=lambda: True,
+                strategy(accept_input, lambda _request: {}, cancelled=lambda: True),
             )
         self.assertEqual(runtime.resumes, [])
 
@@ -294,8 +315,7 @@ class ChatOrchestratorTests(unittest.TestCase):
                 FakeRuntime(turns),
                 context(),
                 "Loop",
-                accept_input,
-                lambda _request: {"message": "ok"},
+                strategy(accept_input, lambda _request: {"message": "ok"}),
             )
 
     def test_two_assistants_can_own_the_same_local_power_id(self):
@@ -329,8 +349,10 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             team,
             "Find Berlin's weather",
-            accept_input,
-            lambda request: invoked.append((request.assistant_id, request.power, request.input)) or {"ok": True},
+            strategy(
+                accept_input,
+                lambda request: invoked.append((request.assistant_id, request.power, request.input)) or {"ok": True},
+            ),
         )
 
         self.assertEqual([item.assistant_id for item in outcome.powers], ["places", "weather"])
@@ -344,9 +366,11 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Greet Ada",
-            accept_input,
-            lambda _request: {"message": "ok"},
-            validate_context=lambda: validations.append("valid"),
+            strategy(
+                accept_input,
+                lambda _request: {"message": "ok"},
+                validate_context=lambda: validations.append("valid"),
+            ),
         )
 
         self.assertEqual(len(validations), 5)
@@ -361,8 +385,10 @@ class ChatOrchestratorTests(unittest.TestCase):
                 FakeRuntime([suspension(first, invalid)]),
                 context(),
                 "Run the batch",
-                accept_input,
-                lambda request: invoked.append((request.assistant_id, request.power, request.input)),
+                strategy(
+                    accept_input,
+                    lambda request: invoked.append((request.assistant_id, request.power, request.input)),
+                ),
             )
 
         self.assertEqual(invoked, [])
@@ -390,8 +416,10 @@ class ChatOrchestratorTests(unittest.TestCase):
                 FakeRuntime([suspension(first, second)]),
                 context(hello, lookup),
                 "Run the batch",
-                validate,
-                lambda request: invoked.append((request.assistant_id, request.power, request.input)),
+                strategy(
+                    validate,
+                    lambda request: invoked.append((request.assistant_id, request.power, request.input)),
+                ),
             )
 
         self.assertEqual([item[1] for item in validated], ["hello", "lookup"])
@@ -420,10 +448,12 @@ class ChatOrchestratorTests(unittest.TestCase):
             runtime,
             context(),
             "Run safely",
-            normalize,
-            invoke,
-            prepare_batch=prepare,
-            batch_delivered=lambda batch: events.append(("delivered", batch[0].interrupt_id)),
+            strategy(
+                normalize,
+                invoke,
+                prepare_batch=prepare,
+                batch_delivered=lambda batch: events.append(("delivered", batch[0].interrupt_id)),
+            ),
         )
 
         self.assertEqual(
@@ -449,10 +479,12 @@ class ChatOrchestratorTests(unittest.TestCase):
                 runtime,
                 context(),
                 "Run safely",
-                accept_input,
-                lambda request: invoked.append(request),
-                prepare_batch=fail_prepare,
-                batch_delivered=lambda batch: delivered.append(batch),
+                strategy(
+                    accept_input,
+                    lambda request: invoked.append(request),
+                    prepare_batch=fail_prepare,
+                    batch_delivered=lambda batch: delivered.append(batch),
+                ),
             )
 
         self.assertEqual(invoked, [])
@@ -471,9 +503,11 @@ class ChatOrchestratorTests(unittest.TestCase):
                 Runtime([suspended()]),
                 context(),
                 "Run safely",
-                accept_input,
-                lambda _request: {"message": "ok"},
-                batch_delivered=lambda batch: delivered.append(batch),
+                strategy(
+                    accept_input,
+                    lambda _request: {"message": "ok"},
+                    batch_delivered=lambda batch: delivered.append(batch),
+                ),
             )
 
         self.assertEqual(delivered, [])

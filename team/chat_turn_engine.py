@@ -192,30 +192,28 @@ def drive(
     def pause_before_batch(requests: tuple[object, ...]) -> bool:
         return strategy.pause_for_private_inputs(requests, requirements)
 
-    hooks = {
-        "prepare_batch": segment.durable_batch.prepare,
-        "batch_delivered": segment.durable_batch.delivered,
-        "pause_before_batch": pause_before_batch,
-        "cancelled": strategy.cancelled,
-        "validate_context": strategy.validate_context,
-    }
+    orchestration = chat_orchestrator.ChatStrategy(
+        validate_power=strategy.validate_power,
+        invoke_power=segment.durable_batch.invoke,
+        prepare_batch=segment.durable_batch.prepare,
+        batch_delivered=segment.durable_batch.delivered,
+        pause_before_batch=pause_before_batch,
+        cancelled=strategy.cancelled,
+        validate_context=strategy.validate_context,
+    )
     if continuation is None:
         outcome = chat_orchestrator.run_until_pause(
             strategy.runtime,
             segment.context,
             assistant_chat.build_prompt(message, segment.files),
-            strategy.validate_power,
-            segment.durable_batch.invoke,
-            **hooks,
+            orchestration,
         )
     else:
         outcome = chat_orchestrator.continue_after_pause(
             strategy.runtime,
             segment.context,
             continuation,
-            strategy.validate_power,
-            segment.durable_batch.invoke,
-            **hooks,
+            orchestration,
         )
     if isinstance(outcome, chat_orchestrator.ChatSuspension) and outcome.interaction is not None:
         if outcome.interaction.payload["kind"] == "request":
