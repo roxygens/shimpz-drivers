@@ -2228,6 +2228,17 @@ class LocalContractTests(unittest.TestCase):
                 "openai",
                 "sk-test-0123456789",
             )
+            controller.approval_grants.grant_many(
+                (
+                    assistant_approval_grants.Grant(
+                        "team_1",
+                        "shimpz-cloudflare",
+                        "list-zones",
+                        CURRENT_ASSISTANT_IMAGE,
+                        1,
+                    ),
+                )
+            )
             inventory = controller.list_assistant_approval_grants("team_1")
             revoked = controller.revoke_assistant_approval_grants("team_1")
             third = controller.chat(
@@ -2246,7 +2257,7 @@ class LocalContractTests(unittest.TestCase):
                 "grants": [{"assistant_id": "shimpz-cloudflare", "power_id": "list-zones"}],
             },
         )
-        self.assertEqual(revoked, {"team_id": "team_1", "revoked": 1})
+        self.assertEqual(revoked, {"team_id": "team_1", "revoked": 2})
         self.assertEqual(third["status"], "approval-required")
 
     def test_secret_continuation_can_pause_for_approval_before_any_power_runs(self) -> None:

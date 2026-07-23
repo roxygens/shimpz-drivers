@@ -1525,9 +1525,10 @@ class LocalController:
             grants = self.approval_grants.list_team(team_id)
         except assistant_approval_grants.ApprovalGrantError as exc:
             self._raise_approval_grant_problem(exc)
+        identities = sorted({(item.assistant_id, item.power_id) for item in grants})
         return {
             "team_id": team_id,
-            "grants": [{"assistant_id": item.assistant_id, "power_id": item.power_id} for item in grants],
+            "grants": [{"assistant_id": assistant_id, "power_id": power_id} for assistant_id, power_id in identities],
         }
 
     def revoke_assistant_approval_grants(self, team_id: str) -> dict[str, object]:
