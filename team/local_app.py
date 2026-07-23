@@ -19,7 +19,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from http import HTTPStatus
 from pathlib import Path
 from typing import NoReturn
@@ -65,8 +65,21 @@ from local_registry import (
     validate_power_output,
 )
 from local_support import audit as local_audit
+from local_support.chat_types import ActiveAssistant as _ActiveAssistant
+from local_support.chat_types import PendingLocalChat as _PendingLocalChat
+from local_support.chat_types import required_active_assistant as _required_active_assistant
 from local_support.errors import ApiProblemError as ApiProblem
 from local_support.http import REQUEST_TIMEOUT_SECONDS, BoundedServer, Handler
+from local_support.labels import (
+    ASSISTANT_LABEL,
+    IMAGE_LABEL,
+    KIND_LABEL,
+    MANAGED_LABEL,
+    PROFILE_LABEL,
+    SPACE_LABEL,
+    TEAM_LABEL,
+    TEAM_NAME_LABEL,
+)
 from local_support.validation import (
     ASSISTANT_ID_RE as _ASSISTANT_ID,
 )
@@ -89,14 +102,6 @@ log = logging.getLogger("shimpz-team-driver-local")
 
 LISTEN_PORT = 7077
 PROFILE = "single-owner-local-v1"
-MANAGED_LABEL = "com.shimpz.local.managed"
-PROFILE_LABEL = "com.shimpz.local.profile"
-SPACE_LABEL = "com.shimpz.local.space-id"
-KIND_LABEL = "com.shimpz.local.kind"
-TEAM_LABEL = "com.shimpz.local.team-id"
-TEAM_NAME_LABEL = "com.shimpz.local.team-name"
-ASSISTANT_LABEL = "com.shimpz.local.assistant-id"
-IMAGE_LABEL = "com.shimpz.local.image"
 
 MAX_RESPONSE_BYTES = assistant_help.MAX_HELP_BYTES * 6 + 1024
 MAX_EGRESS_POLICY_BYTES = egress_policy.MAX_POLICY_BYTES
@@ -153,30 +158,6 @@ _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 class _UnsupportedAssistantRpcPathError(RuntimeError):
     """The fixed Assistant RPC adapter rejected a path it does not implement."""
-
-
-@dataclass(frozen=True, slots=True)
-class _ActiveAssistant:
-    spec: AssistantSpec
-    container_id: str
-    container: object | None = None
-
-
-_PendingLocalChat = local_chat_continuations.PendingLocalChat
-
-
-def _required_active_assistant(
-    bindings: dict[str, _ActiveAssistant],
-    assistant_id: str,
-) -> _ActiveAssistant:
-    active = bindings.get(assistant_id)
-    if active is None:
-        raise ApiProblem(
-            HTTPStatus.CONFLICT,
-            "Brain requested an unavailable Assistant",
-            code="assistant-unavailable",
-        )
-    return active
 
 
 def _is_replaceable_readiness_failure(assistant_id: str, problem: ApiProblem) -> bool:

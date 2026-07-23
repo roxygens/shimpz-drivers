@@ -1,0 +1,10 @@
+"""Docker ownership labels for the local controller."""
+
+MANAGED_LABEL = "com.shimpz.local.managed"
+PROFILE_LABEL = "com.shimpz.local.profile"
+SPACE_LABEL = "com.shimpz.local.space-id"
+KIND_LABEL = "com.shimpz.local.kind"
+TEAM_LABEL = "com.shimpz.local.team-id"
+TEAM_NAME_LABEL = "com.shimpz.local.team-name"
+ASSISTANT_LABEL = "com.shimpz.local.assistant-id"
+IMAGE_LABEL = "com.shimpz.local.image"
