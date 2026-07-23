@@ -26,6 +26,7 @@ from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import NoReturn
 
 import assistant_account_challenges
 import assistant_account_flow
@@ -327,7 +328,7 @@ def _egress_store() -> egress_policy.EgressPolicyStore:
     )
 
 
-def _raise_egress_problem(exc: egress_policy.EgressPolicyError) -> None:
+def _raise_egress_problem(exc: egress_policy.EgressPolicyError) -> NoReturn:
     if isinstance(exc, egress_policy.EgressPolicyDriftError):
         raise ApiProblem(
             HTTPStatus.CONFLICT,
@@ -905,7 +906,7 @@ class LocalController:
             return {"team_id": team_id, "team_name": team_name, "status": "running", "created": True}
 
     @staticmethod
-    def _raise_storage_problem(exc: team_storage.StorageError) -> None:
+    def _raise_storage_problem(exc: team_storage.StorageError) -> NoReturn:
         if isinstance(exc, team_storage.StorageQuotaError):
             raise ApiProblem(
                 HTTPStatus.INSUFFICIENT_STORAGE,
@@ -923,7 +924,7 @@ class LocalController:
         ) from exc
 
     @staticmethod
-    def _raise_inference_problem(exc: inference_config.InferenceConfigError) -> None:
+    def _raise_inference_problem(exc: inference_config.InferenceConfigError) -> NoReturn:
         raise ApiProblem(
             HTTPStatus.SERVICE_UNAVAILABLE,
             "Team model provider metadata is unavailable",
@@ -1103,7 +1104,7 @@ class LocalController:
         return tuple(active)
 
     @staticmethod
-    def _raise_secret_problem(exc: assistant_secret_store.AssistantSecretError) -> None:
+    def _raise_secret_problem(exc: assistant_secret_store.AssistantSecretError) -> NoReturn:
         if isinstance(exc, assistant_secret_store.AssistantSecretMissingError):
             raise ApiProblem(
                 HTTPStatus.PRECONDITION_REQUIRED,
@@ -1172,7 +1173,7 @@ class LocalController:
             self._delete_chat_continuation(team_id)
 
     @staticmethod
-    def _raise_approval_grant_problem(exc: assistant_approval_grants.ApprovalGrantError) -> None:
+    def _raise_approval_grant_problem(exc: assistant_approval_grants.ApprovalGrantError) -> NoReturn:
         raise ApiProblem(
             HTTPStatus.SERVICE_UNAVAILABLE,
             "Assistant approval state is unavailable",
@@ -1190,17 +1191,15 @@ class LocalController:
             return self.approval_grants.revoke_team(team_id)
         except assistant_approval_grants.ApprovalGrantError as exc:
             self._raise_approval_grant_problem(exc)
-        raise AssertionError("unreachable")
 
     def _revoke_all_approval_grants(self) -> int:
         try:
             return self.approval_grants.revoke_all()
         except assistant_approval_grants.ApprovalGrantError as exc:
             self._raise_approval_grant_problem(exc)
-        raise AssertionError("unreachable")
 
     @staticmethod
-    def _raise_chat_continuation_problem(exc: Exception) -> None:
+    def _raise_chat_continuation_problem(exc: Exception) -> NoReturn:
         raise ApiProblem(
             HTTPStatus.SERVICE_UNAVAILABLE,
             "Team chat continuation state is unavailable",
@@ -1317,7 +1316,6 @@ class LocalController:
             return store.delete(team_id, challenge_id)
         except local_chat_continuation_store.ContinuationStoreError as exc:
             self._raise_chat_continuation_problem(exc)
-        raise AssertionError("unreachable")
 
     def _clear_chat_continuations(self) -> int:
         store = getattr(self, "chat_continuations", None)
@@ -1327,7 +1325,6 @@ class LocalController:
             return store.clear()
         except local_chat_continuation_store.ContinuationStoreError as exc:
             self._raise_chat_continuation_problem(exc)
-        raise AssertionError("unreachable")
 
     def _power_secret_generations(
         self,
@@ -1358,7 +1355,6 @@ class LocalController:
             return self.assistant_secrets.resolve_many(team_id, spec.assistant_id, power.secrets)
         except assistant_secret_store.AssistantSecretError as exc:
             self._raise_secret_problem(exc)
-        raise AssertionError("unreachable")
 
     def _power_account_generations(
         self,
@@ -1458,10 +1454,9 @@ class LocalController:
                 return assistant_secret_flow.inventory_payload(team_id, specs, self.assistant_secrets)
             except assistant_secret_store.AssistantSecretError as exc:
                 self._raise_secret_problem(exc)
-        raise AssertionError("unreachable")
 
     @staticmethod
-    def _raise_account_problem(exc: oauth_account_store.OAuthAccountStoreError) -> None:
+    def _raise_account_problem(exc: oauth_account_store.OAuthAccountStoreError) -> NoReturn:
         raise ApiProblem(
             HTTPStatus.SERVICE_UNAVAILABLE,
             "Assistant account state is unavailable",
@@ -1621,7 +1616,6 @@ class LocalController:
                     self._raise_secret_problem(exc)
         finally:
             chat_lock.release()
-        raise AssertionError("unreachable")
 
     @staticmethod
     def _challenge_response(
@@ -1756,7 +1750,7 @@ class LocalController:
         )
 
     @staticmethod
-    def _raise_chat_problem(reason: str, exc: BaseException | None) -> None:
+    def _raise_chat_problem(reason: str, exc: BaseException | None) -> NoReturn:
         if reason == "invalid-continuation" or reason == "invalid-suspension":
             raise ApiProblem(
                 HTTPStatus.INTERNAL_SERVER_ERROR,

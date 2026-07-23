@@ -30,6 +30,7 @@ from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import NoReturn
 
 import accounts_client
 import assistant_account_challenges
@@ -1147,7 +1148,7 @@ def _egress_store() -> egress_policy.EgressPolicyStore:
     )
 
 
-def _raise_egress_error(exc: egress_policy.EgressPolicyError) -> None:
+def _raise_egress_error(exc: egress_policy.EgressPolicyError) -> NoReturn:
     status = (
         HTTPStatus.CONFLICT if isinstance(exc, egress_policy.EgressPolicyDriftError) else HTTPStatus.SERVICE_UNAVAILABLE
     )
@@ -1992,7 +1993,7 @@ def _assistant_help(
     return {"assistant": current_id, **help_payload}
 
 
-def _raise_assistant_secret_error(exc: assistant_secret_store.AssistantSecretError) -> None:
+def _raise_assistant_secret_error(exc: assistant_secret_store.AssistantSecretError) -> NoReturn:
     if isinstance(exc, assistant_secret_store.AssistantSecretMissingError):
         raise ApiError(HTTPStatus.PRECONDITION_REQUIRED, "Assistant secrets are required") from exc
     if isinstance(exc, assistant_secret_store.AssistantSecretValidationError):
@@ -2050,7 +2051,6 @@ def _resolve_power_secrets(
         return _assistant_secrets.resolve_many(team_id, assistant_id, secret_ids)
     except assistant_secret_store.AssistantSecretError as exc:
         _raise_assistant_secret_error(exc)
-    raise AssertionError("unreachable")
 
 
 def _power_account_generations(
@@ -2159,7 +2159,6 @@ def _assistant_secret_inventory(
             )
         except assistant_secret_store.AssistantSecretError as exc:
             _raise_assistant_secret_error(exc)
-    raise AssertionError("unreachable")
 
 
 def _assistant_account_inventory(
@@ -2230,7 +2229,6 @@ def _replace_assistant_secrets(
             return assistant_secret_flow.inventory_payload(team_id, inventory_specs, _assistant_secrets)
         except assistant_secret_store.AssistantSecretError as exc:
             _raise_assistant_secret_error(exc)
-    raise AssertionError("unreachable")
 
 
 def _pending_chat_secrets(
@@ -2455,7 +2453,7 @@ def _hosted_chat_setup(
     return team_name, assistants, files, config, api_key, generation, identity
 
 
-def _raise_hosted_chat_problem(reason: str, exc: BaseException | None) -> None:
+def _raise_hosted_chat_problem(reason: str, exc: BaseException | None) -> NoReturn:
     if reason == "invalid-continuation" or reason == "invalid-suspension":
         raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, f"invalid chat {reason.removeprefix('invalid-')}")
     if reason == "context-changed":
