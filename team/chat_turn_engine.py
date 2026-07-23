@@ -5,9 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import assistant_account_challenges
+import assistant_account_flow
 import assistant_chat
 import brain_runtime_client
 import chat_orchestrator
+import oauth_account_store
 import power_journal
 
 
@@ -51,6 +54,37 @@ class SegmentStrategy:
     approval_granted: Callable | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class AccountResumeStrategy:
+    """Controller adapters for admitting one account-gated continuation."""
+
+    store: object
+    team_id: str
+    challenge_id: object
+    pending_valid: Callable[[object], bool]
+    pending_identity: Callable[[object], tuple[object, ...]]
+    inspect: Callable[[object], AccountResumeContext]
+    account_store: object
+    challenge_response: Callable[[object], object]
+    expired_error: Callable[[], BaseException]
+    context_error: Callable[[], BaseException]
+    contract_error: Callable[[], BaseException]
+    cancel_extra: Callable[[], None] = lambda: None
+
+
+@dataclass(frozen=True, slots=True)
+class AccountResumeContext:
+    identity: tuple[object, ...]
+    bindings: object
+    requests: tuple[object, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AccountResumeAdmission:
+    pending: object | None
+    response: object | None
+
+
 _DRIVE_ERRORS = (
     power_journal.PowerJournalError,
     chat_orchestrator.ChatStoppedError,
@@ -58,6 +92,40 @@ _DRIVE_ERRORS = (
     chat_orchestrator.ChatOrchestrationError,
     brain_runtime_client.BrainRuntimeError,
 )
+
+
+def admit_account_resume(strategy: AccountResumeStrategy) -> AccountResumeAdmission:
+    """Make account challenge, identity, requirement and one-use decisions once for both twins."""
+    try:
+        challenge = strategy.store.get(strategy.team_id, strategy.challenge_id)
+    except assistant_account_challenges.AccountChallengeNotFoundError as exc:
+        raise strategy.expired_error() from exc
+    pending = challenge.payload
+    if not strategy.pending_valid(pending):
+        raise strategy.context_error()
+    context = strategy.inspect(pending)
+    if context.identity != strategy.pending_identity(pending):
+        strategy.store.cancel_team(strategy.team_id)
+        strategy.cancel_extra()
+        raise strategy.context_error()
+    try:
+        missing = assistant_account_flow.requirements_for_batch(
+            strategy.team_id,
+            context.bindings,
+            context.requests,
+            strategy.account_store,
+        )
+    except (assistant_account_flow.AccountFlowError, oauth_account_store.OAuthAccountStoreError) as exc:
+        raise strategy.contract_error() from exc
+    if missing:
+        return AccountResumeAdmission(None, strategy.challenge_response(challenge))
+    try:
+        claimed = strategy.store.claim(strategy.team_id, challenge.id)
+    except assistant_account_challenges.AccountChallengeNotFoundError as exc:
+        raise strategy.expired_error() from exc
+    if claimed is not challenge:
+        raise strategy.expired_error()
+    return AccountResumeAdmission(pending, None)
 
 
 def run_segment(

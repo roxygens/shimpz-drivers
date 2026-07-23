@@ -2859,46 +2859,48 @@ def _resume_chat_accounts(
     challenge_id: object,
     lease: _AuthorizationLease,
 ) -> dict[str, object]:
-    try:
-        challenge = _assistant_account_challenges.get(team_id, challenge_id)
-    except assistant_account_challenges.AccountChallengeNotFoundError as exc:
-        raise ApiError(HTTPStatus.CONFLICT, "Assistant account request expired; retry the message") from exc
-    pending = challenge.payload
-    if not isinstance(pending, _PendingHostedChat) or pending.owner != lease.owner:
-        raise ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry")
-
     with _exclusive_chat_turn(team_id, lease) as (token, container):
-        team_name, assistants, _files, _config, _key, _generation, current_identity = _hosted_chat_setup(
-            team_id,
-            list(pending.file_ids),
-            pending.assistant_ids,
-            container,
-            lease.owner,
-        )
-        if current_identity != pending.identity:
-            _assistant_account_challenges.cancel_team(team_id)
-            raise ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry")
-        bindings = {active.assistant_id: active for active in assistants}
-        try:
-            requirements = assistant_account_flow.requirements_for_batch(
+
+        def inspect(pending: object) -> chat_turn_engine.AccountResumeContext:
+            if not isinstance(pending, _PendingHostedChat):
+                raise AssertionError("invalid hosted account continuation")
+            _, assistants, _files, _config, _key, _generation, current_identity = _hosted_chat_setup(
                 team_id,
+                list(pending.file_ids),
+                pending.assistant_ids,
+                container,
+                lease.owner,
+            )
+            bindings = {active.assistant_id: active for active in assistants}
+            return chat_turn_engine.AccountResumeContext(
+                current_identity,
                 _secret_bindings(bindings),
                 pending.continuation.turn.powers,
-                _assistant_accounts,
             )
-        except (
-            assistant_account_flow.AccountFlowError,
-            oauth_account_store.OAuthAccountStoreError,
-        ) as exc:
-            raise ApiError(HTTPStatus.CONFLICT, "Assistant account contract is unavailable") from exc
-        if requirements:
-            return _hosted_account_challenge_payload(challenge)
-        try:
-            claimed = _assistant_account_challenges.claim(team_id, challenge.id)
-        except assistant_account_challenges.AccountChallengeNotFoundError as exc:
-            raise ApiError(HTTPStatus.CONFLICT, "Assistant account request expired; retry the message") from exc
-        if claimed is not challenge:
-            raise ApiError(HTTPStatus.CONFLICT, "Assistant account request expired; retry the message")
+
+        admission = chat_turn_engine.admit_account_resume(
+            chat_turn_engine.AccountResumeStrategy(
+                store=_assistant_account_challenges,
+                team_id=team_id,
+                challenge_id=challenge_id,
+                pending_valid=lambda pending: isinstance(pending, _PendingHostedChat) and pending.owner == lease.owner,
+                pending_identity=lambda pending: pending.identity,
+                inspect=inspect,
+                account_store=_assistant_accounts,
+                challenge_response=_hosted_account_challenge_payload,
+                expired_error=lambda: ApiError(
+                    HTTPStatus.CONFLICT,
+                    "Assistant account request expired; retry the message",
+                ),
+                context_error=lambda: ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry"),
+                contract_error=lambda: ApiError(HTTPStatus.CONFLICT, "Assistant account contract is unavailable"),
+            )
+        )
+        if admission.response is not None:
+            return admission.response
+        pending = admission.pending
+        if not isinstance(pending, _PendingHostedChat):
+            raise AssertionError("shared account resume returned invalid state")
 
         team_name, identity, outcome, account_requirements, secret_requirements = _run_hosted_chat_segment(
             team_id,

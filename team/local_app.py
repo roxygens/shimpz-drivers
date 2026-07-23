@@ -2238,65 +2238,56 @@ class LocalController:
                 code="invalid-body",
             )
         challenge_id = body["challenge_id"]
+
         with self._exclusive_chat_turn(team_id) as token:
-            try:
-                challenge = self.account_challenges.get(team_id, challenge_id)
-            except assistant_account_challenges.AccountChallengeNotFoundError as exc:
-                raise ApiProblem(
-                    HTTPStatus.CONFLICT,
-                    "Assistant account request expired; retry the message",
-                    code="assistant-account-challenge-expired",
-                ) from exc
-            pending = challenge.payload
-            if not isinstance(pending, _PendingLocalChat) or pending.provider != provider:
-                raise ApiProblem(
-                    HTTPStatus.CONFLICT,
-                    "Team capabilities changed; retry",
-                    code="team-context-changed",
-                )
             with self._lock(team_id):
-                current = self._chat_setup(team_id, list(pending.file_ids), provider, pending.assistant_ids)
-                if self._chat_identity(*current) != pending.identity:
-                    self.account_challenges.cancel_team(team_id)
-                    self.oauth_pkce.cancel_team(team_id)
-                    raise ApiProblem(
-                        HTTPStatus.CONFLICT,
-                        "Team capabilities changed; retry",
-                        code="team-context-changed",
-                    )
-                bindings = {active.spec.assistant_id: active for active in current[2]}
-                try:
-                    missing = assistant_account_flow.requirements_for_batch(
-                        team_id,
+
+                def inspect(pending: object) -> chat_turn_engine.AccountResumeContext:
+                    if not isinstance(pending, _PendingLocalChat):
+                        raise AssertionError("invalid local account continuation")
+                    current = self._chat_setup(team_id, list(pending.file_ids), provider, pending.assistant_ids)
+                    bindings = {active.spec.assistant_id: active for active in current[2]}
+                    return chat_turn_engine.AccountResumeContext(
+                        self._chat_identity(*current),
                         bindings,
                         pending.continuation.turn.powers,
-                        self.assistant_accounts,
                     )
-                except (
-                    assistant_account_flow.AccountFlowError,
-                    oauth_account_store.OAuthAccountStoreError,
-                ) as exc:
-                    raise ApiProblem(
-                        HTTPStatus.CONFLICT,
-                        "Assistant account contract is unavailable",
-                        code="assistant-account-contract-invalid",
-                    ) from exc
-                if missing:
-                    return self._account_response(challenge)
-                try:
-                    claimed = self.account_challenges.claim(team_id, challenge_id)
-                except assistant_account_challenges.AccountChallengeNotFoundError as exc:
-                    raise ApiProblem(
-                        HTTPStatus.CONFLICT,
-                        "Assistant account request expired; retry the message",
-                        code="assistant-account-challenge-expired",
-                    ) from exc
-                if claimed is not challenge:
-                    raise ApiProblem(
-                        HTTPStatus.CONFLICT,
-                        "Assistant account request expired; retry the message",
-                        code="assistant-account-challenge-expired",
+
+                admission = chat_turn_engine.admit_account_resume(
+                    chat_turn_engine.AccountResumeStrategy(
+                        store=self.account_challenges,
+                        team_id=team_id,
+                        challenge_id=challenge_id,
+                        pending_valid=lambda pending: (
+                            isinstance(pending, _PendingLocalChat) and pending.provider == provider
+                        ),
+                        pending_identity=lambda pending: pending.identity,
+                        inspect=inspect,
+                        account_store=self.assistant_accounts,
+                        challenge_response=self._account_response,
+                        expired_error=lambda: ApiProblem(
+                            HTTPStatus.CONFLICT,
+                            "Assistant account request expired; retry the message",
+                            code="assistant-account-challenge-expired",
+                        ),
+                        context_error=lambda: ApiProblem(
+                            HTTPStatus.CONFLICT,
+                            "Team capabilities changed; retry",
+                            code="team-context-changed",
+                        ),
+                        contract_error=lambda: ApiProblem(
+                            HTTPStatus.CONFLICT,
+                            "Assistant account contract is unavailable",
+                            code="assistant-account-contract-invalid",
+                        ),
+                        cancel_extra=lambda: self.oauth_pkce.cancel_team(team_id),
                     )
+                )
+                if admission.response is not None:
+                    return admission.response
+                pending = admission.pending
+                if not isinstance(pending, _PendingLocalChat):
+                    raise AssertionError("shared account resume returned invalid state")
             (
                 team_name,
                 identity,
