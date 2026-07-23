@@ -3663,10 +3663,7 @@ class LocalController:
                     detail=f"failed:{power}",
                 )
                 raise
-        private_values = {
-            **secret_values,
-            **{f"account:{account_id}": envelope["access_token"] for account_id, envelope in account_values.items()},
-        }
+        private_values = power_execution.protected_rpc_values(secret_values, account_values, answers)
         inspected_result = raw_result.payload if isinstance(raw_result, power_execution.RpcSuspension) else raw_result
         if self._contains_secret(inspected_result, private_values):
             local_audit.record(

@@ -8,7 +8,7 @@ import select
 import socket
 import struct
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from http import HTTPStatus
 
@@ -264,6 +264,23 @@ def contains_secret(value: object, secrets_by_id: Mapping[str, str]) -> bool:
         return False
 
     return bool(secret_values) and visit(value)
+
+
+def protected_rpc_values(
+    secrets_by_id: Mapping[str, str],
+    accounts_by_id: Mapping[str, Mapping[str, object]],
+    answers: Iterable[object],
+) -> dict[str, str]:
+    """Collect literal private strings that an Assistant must not return."""
+    return {
+        **secrets_by_id,
+        **{
+            f"account:{account_id}": access_token
+            for account_id, envelope in accounts_by_id.items()
+            if isinstance((access_token := envelope.get("access_token")), str)
+        },
+        **{f"answer:{ordinal}": answer for ordinal, answer in enumerate(answers) if isinstance(answer, str)},
+    }
 
 
 def _read_exact(raw_socket: socket.socket, amount: int, deadline: float) -> bytes:

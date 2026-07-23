@@ -39,6 +39,20 @@ class SecretScanTests(unittest.TestCase):
         )
         self.assertEqual(self._decisions({"result": "safe"}, {"unset": ""}), (False, False))
 
+    def test_human_answer_echo_is_caught_by_both_controllers(self) -> None:
+        protected = local_app.power_execution.protected_rpc_values(
+            {},
+            {},
+            ("human-submitted-private-value", 42, False),
+        )
+
+        self.assertEqual(
+            self._decisions({"result": "human-submitted-private-value"}, protected),
+            (True, True),
+        )
+        self.assertEqual(self._decisions({"result": "benign"}, protected), (False, False))
+        self.assertEqual(protected, {"answer:0": "human-submitted-private-value"})
+
     def test_excessive_nesting_fails_closed(self) -> None:
         result: object = "safe"
         for _ in range(34):

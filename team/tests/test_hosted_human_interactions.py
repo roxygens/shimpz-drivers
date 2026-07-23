@@ -167,6 +167,30 @@ class HostedHumanInteractionTests(unittest.TestCase):
         self.assertEqual(self.rpc_answers, [[], ["example.com"]])
         self.assertEqual(self.runtime.resumes, [{"power-1": LOOKUP_RESULT}])
 
+    def test_power_cannot_echo_a_human_answer(self) -> None:
+        answer = "human-submitted-private-value"
+
+        def rpc(*_args):
+            return {"echo": answer}
+
+        with (
+            self._environment(rpc),
+            self.assertRaises(app.ApiError) as caught,
+        ):
+            app._invoke_assistant_power(
+                TEAM_ID,
+                "turn-token",
+                ASSISTANT_ID,
+                self.contract,
+                self.assistant,
+                "list-zones",
+                LOOKUP_INPUT,
+                (answer,),
+            )
+
+        self.assertEqual(caught.exception.status, HTTPStatus.BAD_GATEWAY)
+        self.assertNotIn(answer, caught.exception.message)
+
     def test_once_approval_is_reused_only_for_the_bound_hosted_release(self) -> None:
         def rpc(_team_id, _token, _container, _command, _method, _path, payload):
             self.rpc_answers.append(payload["answers"])
