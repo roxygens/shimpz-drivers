@@ -325,6 +325,7 @@ class SharedChatTurnEngineTest(unittest.TestCase):
 
         hosted_events: list[str] = []
         hosted_anchor = SimpleNamespace(id="a" * 64, labels={"team.name": "Team"})
+        hosted_token = "turn-token"
         with (
             hosted_harness._patched(
                 _active_team_assistants=lambda _team_id: (hosted_active,),
@@ -342,13 +343,15 @@ class SharedChatTurnEngineTest(unittest.TestCase):
             mock.patch.object(hosted_app.chat_turn_engine, "run_segment", side_effect=capture("hosted")),
         ):
             hosted_app._run_hosted_chat_segment(
-                "team_1",
-                [],
-                (assistant_id,),
-                "turn-token",
-                hosted_anchor,
-                "owner",
-                message="Look this up",
+                hosted_app.HostedChatSegmentRequest(
+                    team_id="team_1",
+                    file_ids=[],
+                    assistant_ids=(assistant_id,),
+                    token=hosted_token,
+                    container=hosted_anchor,
+                    owner="owner",
+                    message="Look this up",
+                )
             )
             hosted_strategy, hosted_prepared, _, _ = captures["hosted"]
             hosted_validation_result = hosted_strategy.validate_power(assistant_id, "list-zones", request.input)
