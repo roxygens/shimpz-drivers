@@ -1662,6 +1662,7 @@ class LocalController:
 
     @staticmethod
     def _contains_secret(value: object, secrets_by_id: dict[str, str]) -> bool:
+        """Detect literal secret echoes; transformed/encoded values require a separate control."""
         secret_values = tuple(secret for secret in secrets_by_id.values() if secret)
 
         def visit(item: object, depth: int = 0) -> bool:
