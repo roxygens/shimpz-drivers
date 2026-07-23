@@ -310,14 +310,16 @@ class PowerRpcFrameTests(unittest.TestCase):
                 self.assertRaises(app.ApiError) as caught,
             ):
                 app._assistant_rpc_exchange(
-                    "team_1",
-                    container,
-                    "/app/rpc",
-                    "POST",
-                    "/v1/powers/test",
-                    {},
-                    token=None,
-                    operation="Assistant Power",
+                    app.AssistantRpcRequest(
+                        team_id="team_1",
+                        container=container,
+                        command="/app/rpc",
+                        method="POST",
+                        path="/v1/powers/test",
+                        payload={},
+                        token=None,
+                        operation="Assistant Power",
+                    )
                 )
 
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_GATEWAY)

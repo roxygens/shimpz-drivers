@@ -103,6 +103,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
     def test_inventory_is_status_only_and_private_token_reaches_only_declared_power(self) -> None:
         self._connect()
         captured: list[dict[str, object]] = []
+        turn_token = "turn-token"
 
         def rpc(_team_id, _token, _container, _command, _method, _path, payload):
             captured.append(payload)
@@ -114,13 +115,15 @@ class HostedOAuthAccountTests(unittest.TestCase):
             _assistant_rpc=rpc,
         ):
             result = app._invoke_assistant_power(
-                TEAM_ID,
-                "turn-token",
-                ASSISTANT_ID,
-                self.contract,
-                self.container,
-                "list-zones",
-                ZONE_INPUT,
+                app.PowerInvocationRequest(
+                    team_id=TEAM_ID,
+                    token=turn_token,
+                    assistant_id=ASSISTANT_ID,
+                    contract=self.contract,
+                    container=self.container,
+                    power="list-zones",
+                    payload=ZONE_INPUT,
+                )
             )
             payload = app.assistant_account_flow.inventory_payload(
                 TEAM_ID,
@@ -150,6 +153,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
 
     def test_account_token_exposure_is_rejected_without_echoing_it(self) -> None:
         self._connect()
+        turn_token = "turn-token"
         with (
             _patched(
                 _assistant_accounts=self.store,
@@ -159,13 +163,15 @@ class HostedOAuthAccountTests(unittest.TestCase):
             self.assertRaises(app.ApiError) as caught,
         ):
             app._invoke_assistant_power(
-                TEAM_ID,
-                "turn-token",
-                ASSISTANT_ID,
-                self.contract,
-                self.container,
-                "list-zones",
-                ZONE_INPUT,
+                app.PowerInvocationRequest(
+                    team_id=TEAM_ID,
+                    token=turn_token,
+                    assistant_id=ASSISTANT_ID,
+                    contract=self.contract,
+                    container=self.container,
+                    power="list-zones",
+                    payload=ZONE_INPUT,
+                )
             )
 
         self.assertEqual(caught.exception.status, app.HTTPStatus.BAD_GATEWAY)

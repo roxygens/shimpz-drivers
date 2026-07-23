@@ -57,10 +57,10 @@ class HostedAssistantHelpTests(unittest.TestCase):
         lease = object()
         contract = types.SimpleNamespace(rpc_command="/usr/local/bin/shimpz-cloudflare-rpc")
         container = types.SimpleNamespace(id="b" * 64)
-        calls: list[tuple[object, ...]] = []
+        calls: list[object] = []
 
-        def rpc(*args, **kwargs):
-            calls.append((*args, kwargs))
+        def rpc(request):
+            calls.append(request)
             return {"markdown": "# Shimpz Cloudflare\n\nAsk about weather."}
 
         with _patched(
@@ -82,18 +82,16 @@ class HostedAssistantHelpTests(unittest.TestCase):
         self.assertEqual(calls[0], ("authorize", "team_1", lease))
         self.assertEqual(
             calls[1],
-            (
-                "team_1",
-                container,
-                "/usr/local/bin/shimpz-cloudflare-rpc",
-                "GET",
-                "/v1/help/pt",
-                {},
-                {
-                    "token": None,
-                    "operation": "Assistant Help",
-                    "detect_unsupported_path": True,
-                },
+            app.AssistantRpcRequest(
+                team_id="team_1",
+                container=container,
+                command="/usr/local/bin/shimpz-cloudflare-rpc",
+                method="GET",
+                path="/v1/help/pt",
+                payload={},
+                token=None,
+                operation="Assistant Help",
+                detect_unsupported_path=True,
             ),
         )
 
@@ -120,12 +118,12 @@ class HostedAssistantHelpTests(unittest.TestCase):
         container = types.SimpleNamespace(id="b" * 64)
         paths: list[str] = []
 
-        def rpc(_team_id, _container, _command, _method, path, _payload, **kwargs):
-            paths.append(path)
-            if path == "/v1/help/pt":
-                self.assertTrue(kwargs["detect_unsupported_path"])
-                raise app._UnsupportedAssistantRpcPathError(path)
-            self.assertNotIn("detect_unsupported_path", kwargs)
+        def rpc(request):
+            paths.append(request.path)
+            if request.path == "/v1/help/pt":
+                self.assertTrue(request.detect_unsupported_path)
+                raise app._UnsupportedAssistantRpcPathError(request.path)
+            self.assertFalse(request.detect_unsupported_path)
             return {"markdown": "# English fallback"}
 
         with _patched(
@@ -140,8 +138,8 @@ class HostedAssistantHelpTests(unittest.TestCase):
 
         paths.clear()
 
-        def fail_rpc(_team_id, _container, _command, _method, path, _payload, **_kwargs):
-            paths.append(path)
+        def fail_rpc(request):
+            paths.append(request.path)
             raise app.ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Help failed")
 
         with (

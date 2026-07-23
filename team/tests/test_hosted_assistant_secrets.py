@@ -366,6 +366,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
 
     def test_secret_bearing_assistant_output_is_rejected_without_echo(self) -> None:
         secret = SECRET_VALUES["x-bearer-token"]
+        turn_token = "turn-token"
         self.secret_store.put_many(TEAM_ID, ASSISTANT_ID, {"x-bearer-token": secret})
         with (
             _patched(
@@ -376,13 +377,15 @@ class HostedAssistantSecretTests(unittest.TestCase):
             self.assertRaises(app.ApiError) as caught,
         ):
             app._invoke_assistant_power(
-                TEAM_ID,
-                "turn-token",
-                ASSISTANT_ID,
-                self.contract,
-                self.assistant_container,
-                "list-zones",
-                ZONE_INPUT,
+                app.PowerInvocationRequest(
+                    team_id=TEAM_ID,
+                    token=turn_token,
+                    assistant_id=ASSISTANT_ID,
+                    contract=self.contract,
+                    container=self.assistant_container,
+                    power="list-zones",
+                    payload=ZONE_INPUT,
+                )
             )
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_GATEWAY)
         self.assertNotIn(secret, caught.exception.message)

@@ -627,9 +627,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 ),
             )
 
-        def invoke(_team_id, _token, assistant_id, _contract, _container, power, payload, answers):
-            self.assertEqual(answers, ())
-            invoked.append((assistant_id, power, payload))
+        def invoke(request):
+            self.assertEqual(request.answers, ())
+            invoked.append((request.assistant_id, request.power, request.payload))
             return {"result": {"ok": True}}
 
         with tempfile.TemporaryDirectory() as directory:

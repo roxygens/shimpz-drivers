@@ -169,6 +169,7 @@ class HostedHumanInteractionTests(unittest.TestCase):
 
     def test_power_cannot_echo_a_human_answer(self) -> None:
         answer = "human-submitted-private-value"
+        turn_token = "turn-token"
 
         def rpc(*_args):
             return {"echo": answer}
@@ -178,14 +179,16 @@ class HostedHumanInteractionTests(unittest.TestCase):
             self.assertRaises(app.ApiError) as caught,
         ):
             app._invoke_assistant_power(
-                TEAM_ID,
-                "turn-token",
-                ASSISTANT_ID,
-                self.contract,
-                self.assistant,
-                "list-zones",
-                LOOKUP_INPUT,
-                (answer,),
+                app.PowerInvocationRequest(
+                    team_id=TEAM_ID,
+                    token=turn_token,
+                    assistant_id=ASSISTANT_ID,
+                    contract=self.contract,
+                    container=self.assistant,
+                    power="list-zones",
+                    payload=LOOKUP_INPUT,
+                    answers=(answer,),
+                )
             )
 
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_GATEWAY)
