@@ -2490,6 +2490,7 @@ class LocalContractTests(unittest.TestCase):
                     "shimpz-cloudflare",
                     "list-zones",
                     CURRENT_ASSISTANT_IMAGE,
+                    0,
                 ),
             )
         )
@@ -2505,6 +2506,7 @@ class LocalContractTests(unittest.TestCase):
                 "shimpz-cloudflare",
                 "list-zones",
                 CURRENT_ASSISTANT_IMAGE,
+                0,
             )
         )
 

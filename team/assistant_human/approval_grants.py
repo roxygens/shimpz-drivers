@@ -12,7 +12,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 APPLICATION_ID = 0x53484147  # SHAG
 MAX_GRANTS = 8192
 DEFAULT_PATH = Path("/var/lib/shimpz-local/assistant-approvals/grants.sqlite3")
@@ -32,9 +32,10 @@ class Grant:
     assistant_id: str
     power_id: str
     image: str
+    ordinal: int
 
 
-def _identity(team_id: object, assistant_id: object, power_id: object, image: object) -> Grant:
+def _identity(team_id: object, assistant_id: object, power_id: object, image: object, ordinal: object) -> Grant:
     if not isinstance(team_id, str) or _TEAM_ID.fullmatch(team_id) is None:
         raise ApprovalGrantError("approval grant Team is invalid")
     if not isinstance(assistant_id, str) or len(assistant_id) > 80 or _COMPONENT_ID.fullmatch(assistant_id) is None:
@@ -43,7 +44,9 @@ def _identity(team_id: object, assistant_id: object, power_id: object, image: ob
         raise ApprovalGrantError("approval grant Power is invalid")
     if not isinstance(image, str) or _IMAGE.fullmatch(image) is None:
         raise ApprovalGrantError("approval grant release is invalid")
-    return Grant(team_id, assistant_id, power_id, image)
+    if type(ordinal) is not int or not 0 <= ordinal <= 63:
+        raise ApprovalGrantError("approval grant call-site ordinal is invalid")
+    return Grant(team_id, assistant_id, power_id, image, ordinal)
 
 
 class ApprovalGrantStore:
@@ -140,7 +143,8 @@ class ApprovalGrantStore:
                 assistant_id TEXT NOT NULL,
                 power_id TEXT NOT NULL,
                 image TEXT NOT NULL,
-                PRIMARY KEY (team_id, assistant_id, power_id, image)
+                ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 63),
+                PRIMARY KEY (team_id, assistant_id, power_id, image, ordinal)
             ) WITHOUT ROWID;
             """
         )
@@ -158,6 +162,7 @@ class ApprovalGrantStore:
                 "assistant_id",
                 "power_id",
                 "image",
+                "ordinal",
             )
         ):
             raise ApprovalGrantError("approval grant schema is invalid")
@@ -166,14 +171,22 @@ class ApprovalGrantStore:
         if self._closed:
             raise ApprovalGrantError("approval grant store is closed")
 
-    def is_granted(self, team_id: object, assistant_id: object, power_id: object, image: object) -> bool:
-        grant = _identity(team_id, assistant_id, power_id, image)
+    def is_granted(
+        self,
+        team_id: object,
+        assistant_id: object,
+        power_id: object,
+        image: object,
+        ordinal: object,
+    ) -> bool:
+        grant = _identity(team_id, assistant_id, power_id, image, ordinal)
         with self._guard:
             self._ensure_open()
             try:
                 row = self._connection.execute(
-                    "SELECT 1 FROM grants WHERE team_id = ? AND assistant_id = ? AND power_id = ? AND image = ?",
-                    (grant.team_id, grant.assistant_id, grant.power_id, grant.image),
+                    """SELECT 1 FROM grants
+                       WHERE team_id = ? AND assistant_id = ? AND power_id = ? AND image = ? AND ordinal = ?""",
+                    (grant.team_id, grant.assistant_id, grant.power_id, grant.image, grant.ordinal),
                 ).fetchone()
             except sqlite3.Error as exc:
                 raise ApprovalGrantError("approval grant could not be read") from exc
@@ -183,7 +196,9 @@ class ApprovalGrantStore:
         items = tuple(grants)
         if not items or any(not isinstance(item, Grant) for item in items):
             raise ApprovalGrantError("approval grant batch is invalid")
-        canonical = tuple(_identity(item.team_id, item.assistant_id, item.power_id, item.image) for item in items)
+        canonical = tuple(
+            _identity(item.team_id, item.assistant_id, item.power_id, item.image, item.ordinal) for item in items
+        )
         if not canonical or len(set(canonical)) != len(canonical):
             raise ApprovalGrantError("approval grant batch is invalid")
         with self._guard:
@@ -195,8 +210,9 @@ class ApprovalGrantStore:
                 current = self._connection.execute("SELECT COUNT(*) FROM grants").fetchone()[0]
                 missing = sum(
                     self._connection.execute(
-                        "SELECT 1 FROM grants WHERE team_id = ? AND assistant_id = ? AND power_id = ? AND image = ?",
-                        (item.team_id, item.assistant_id, item.power_id, item.image),
+                        """SELECT 1 FROM grants
+                           WHERE team_id = ? AND assistant_id = ? AND power_id = ? AND image = ? AND ordinal = ?""",
+                        (item.team_id, item.assistant_id, item.power_id, item.image, item.ordinal),
                     ).fetchone()
                     is None
                     for item in canonical
@@ -204,8 +220,12 @@ class ApprovalGrantStore:
                 if current + missing > self.max_grants:
                     raise ApprovalGrantError("approval grant capacity reached")
                 self._connection.executemany(
-                    "INSERT OR IGNORE INTO grants (team_id, assistant_id, power_id, image) VALUES (?, ?, ?, ?)",
-                    ((item.team_id, item.assistant_id, item.power_id, item.image) for item in canonical),
+                    """INSERT OR IGNORE INTO grants
+                       (team_id, assistant_id, power_id, image, ordinal) VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        (item.team_id, item.assistant_id, item.power_id, item.image, item.ordinal)
+                        for item in canonical
+                    ),
                 )
                 self._connection.execute("COMMIT")
             except ApprovalGrantError:
@@ -220,13 +240,13 @@ class ApprovalGrantStore:
                 raise ApprovalGrantError("approval grants could not be stored") from exc
 
     def list_team(self, team_id: object) -> tuple[Grant, ...]:
-        team = _identity(team_id, "assistant", "power", "release@sha256:" + "0" * 64).team_id
+        team = _identity(team_id, "assistant", "power", "release@sha256:" + "0" * 64, 0).team_id
         with self._guard:
             self._ensure_open()
             try:
                 rows = self._connection.execute(
-                    "SELECT team_id, assistant_id, power_id, image FROM grants WHERE team_id = ? "
-                    "ORDER BY assistant_id, power_id, image",
+                    """SELECT team_id, assistant_id, power_id, image, ordinal
+                       FROM grants WHERE team_id = ? ORDER BY assistant_id, power_id, image, ordinal""",
                     (team,),
                 ).fetchall()
             except sqlite3.Error as exc:
@@ -234,11 +254,11 @@ class ApprovalGrantStore:
         return tuple(_identity(*row) for row in rows)
 
     def revoke_assistant(self, team_id: object, assistant_id: object) -> int:
-        team = _identity(team_id, assistant_id, "power", "release@sha256:" + "0" * 64)
+        team = _identity(team_id, assistant_id, "power", "release@sha256:" + "0" * 64, 0)
         return self._delete_assistant(team.team_id, team.assistant_id)
 
     def revoke_team(self, team_id: object) -> int:
-        team = _identity(team_id, "assistant", "power", "release@sha256:" + "0" * 64).team_id
+        team = _identity(team_id, "assistant", "power", "release@sha256:" + "0" * 64, 0).team_id
         with self._guard:
             self._ensure_open()
             try:

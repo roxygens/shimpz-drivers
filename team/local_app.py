@@ -1748,6 +1748,7 @@ class LocalController:
                 request.assistant_id,
                 request.power,
                 active.spec.image,
+                0,
             )
         except assistant_approval_grants.ApprovalGrantError as exc:
             self._raise_approval_grant_problem(exc)
@@ -2166,6 +2167,7 @@ class LocalController:
                         assistant_id=requirement.assistant_id,
                         power_id=requirement.power_id,
                         image=requirement.assistant_image,
+                        ordinal=0,
                     )
                     for requirement in challenge.requirements
                     if requirement.approval == "once"
