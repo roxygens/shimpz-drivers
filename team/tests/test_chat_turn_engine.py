@@ -22,6 +22,7 @@ import inference_config
 import local_app
 import local_registry
 import power_execution
+from local_support.chat_segment import SegmentRequest
 
 hosted_app = hosted_harness.app
 
@@ -377,16 +378,19 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         controller._validate_chat_context = lambda *_args: None
         controller._raise_chat_problem = lambda reason, _exc: self.fail(reason)
         controller.approval_grants = SimpleNamespace()
+        turn_token = "turn-token"
 
         with mock.patch.object(local_app.chat_turn_engine, "run_segment", side_effect=capture("local")):
             controller._run_chat_segment(
-                "team_1",
-                [],
-                (assistant_id,),
-                "openai",
-                "test-key",
-                "turn-token",
-                message="Look this up",
+                SegmentRequest(
+                    team_id="team_1",
+                    file_ids=[],
+                    assistant_ids=(assistant_id,),
+                    provider="openai",
+                    api_key="test-key",
+                    token=turn_token,
+                    message="Look this up",
+                )
             )
 
         hosted_strategy, hosted_prepared, hosted_requirements, hosted_paused = captures["hosted"]

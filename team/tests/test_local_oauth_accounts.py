@@ -24,6 +24,7 @@ import local_registry
 import oauth_account_service
 import oauth_account_store
 import oauth_broker_client
+from local_support.chat_segment import SegmentRequest
 
 TEST_ACCESS_TOKEN = "oauth-access-test-token-123456789"
 TEST_REFRESH_TOKEN = "oauth-refresh-test-token-123456789"
@@ -362,15 +363,18 @@ class LocalOAuthAccountTests(unittest.TestCase):
             controller._invoke_chat_power = lambda *_args: (_ for _ in ()).throw(
                 AssertionError("Power must not execute before OAuth consent")
             )
+            turn_token = "turn-token"
 
             result = controller._run_chat_segment(
-                "team_1",
-                [],
-                (spec.assistant_id,),
-                "openai",
-                "test-api-key",
-                "turn-token",
-                message="List my Cloudflare zones",
+                SegmentRequest(
+                    team_id="team_1",
+                    file_ids=[],
+                    assistant_ids=(spec.assistant_id,),
+                    provider="openai",
+                    api_key="test-api-key",
+                    token=turn_token,
+                    message="List my Cloudflare zones",
+                )
             )
 
         self.assertIsInstance(result.outcome, chat_orchestrator.ChatSuspension)
