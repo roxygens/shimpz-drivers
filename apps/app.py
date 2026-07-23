@@ -642,8 +642,8 @@ class Handler(BaseHTTPRequestHandler):
             audit.log(method.lower(), self.path, result="denied", reason=str(exc))
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception as exc:
-            audit.log(method.lower(), self.path, result="error", reason=str(exc))
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            audit.log(method.lower(), self.path, result="error", reason=type(exc).__name__)
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
 
     def _route(self, method: str) -> None:
         path = self.path.split("?", 1)[0]
