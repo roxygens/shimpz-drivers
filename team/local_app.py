@@ -13,7 +13,7 @@ import os
 import secrets
 import sys
 import threading
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -67,7 +67,6 @@ from local_support.errors import ApiProblemError as ApiProblem
 from local_support.http import REQUEST_TIMEOUT_SECONDS, BoundedServer, Handler
 from local_support.labels import (
     ASSISTANT_LABEL,
-    IMAGE_LABEL,
     KIND_LABEL,
     MANAGED_LABEL,
     PROFILE_LABEL,
@@ -75,21 +74,18 @@ from local_support.labels import (
     TEAM_LABEL,
     TEAM_NAME_LABEL,
 )
+from local_support.labels import IMAGE_LABEL as _LOCAL_IMAGE_LABEL
+from local_support.team_lifecycle import LocalTeamLifecycleMixin
+from local_support.validation import brain_thread_id as _local_brain_thread_id
 from local_support.validation import (
-    ASSISTANT_ID_RE as _ASSISTANT_ID,
-)
-from local_support.validation import (
-    MAX_ASSISTANT_ID_LENGTH,
-    MAX_TEAM_ID_LENGTH,
     half_cpu_set,
     validate_space_id,
     validate_team_id,
     validate_team_name,
 )
-from local_support.validation import (
-    TEAM_ID_RE as _TEAM_ID,
-)
-from local_support.validation import brain_thread_id as _brain_thread_id
+
+IMAGE_LABEL = _LOCAL_IMAGE_LABEL
+_brain_thread_id = _local_brain_thread_id
 
 log = logging.getLogger("shimpz-team-driver-local")
 
@@ -153,6 +149,7 @@ class LocalController(
     LocalChatStateMixin,
     LocalChatSubmissionMixin,
     LocalEgressMixin,
+    LocalTeamLifecycleMixin,
 ):
     def __init__(
         self,
@@ -693,243 +690,6 @@ class LocalController(
             detail=f"completed:{power}",
         )
         return {"assistant": assistant_id, "power": power, "result": projected.value}
-
-    def _purge_power_generation(self, generation: str) -> None:
-        try:
-            self.power_state.purge(generation)
-        except power_journal.PowerJournalError as exc:
-            raise ApiProblem(
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                "Team Power execution state could not be deleted",
-                code="power-state-unavailable",
-            ) from exc
-
-    def destroy_team(self, team_id: str) -> dict[str, object]:
-        team_id = validate_team_id(team_id)
-        self.secret_challenges.cancel_team(team_id)
-        self.approval_challenges.cancel_team(team_id)
-        self.input_challenges.cancel_team(team_id)
-        self._delete_chat_continuation(team_id)
-        self._cancel_chat_for_destroy(team_id)
-
-        chat_lock = self._chat_lock(team_id)
-        if not chat_lock.acquire(timeout=30):
-            raise ApiProblem(
-                HTTPStatus.CONFLICT,
-                "active Team chat did not stop in time",
-                code="chat-active",
-            )
-        try:
-            with self._lock(team_id):
-                self._revoke_team_approval_grants(team_id)
-                network = self._network(team_id, required=False)
-                try:
-                    containers = self.client.containers.list(**self._assistant_filters(team_id))
-                except DockerException as exc:
-                    raise ApiProblem(
-                        HTTPStatus.SERVICE_UNAVAILABLE,
-                        "Docker is unavailable",
-                        code="docker-unavailable",
-                    ) from exc
-
-                for container in containers:
-                    assistant_id = container.labels.get(ASSISTANT_LABEL)
-                    spec = self.registry.get(assistant_id)
-                    if spec is None or network is None:
-                        raise ApiProblem(
-                            HTTPStatus.CONFLICT,
-                            "Team resources failed their ownership contract",
-                            code="ownership-conflict",
-                        )
-                    self._validate_container_security(
-                        container,
-                        team_id,
-                        spec,
-                        network.name,
-                    )
-
-                if network is not None:
-                    thread_id = _brain_thread_id(self.space_id, team_id, network.id)
-                    try:
-                        self.brain_runtime.delete_thread(thread_id)
-                    except brain_runtime_client.BrainRuntimeError as exc:
-                        raise ApiProblem(
-                            HTTPStatus.SERVICE_UNAVAILABLE,
-                            "Team conversation state could not be deleted",
-                            code="brain-runtime-failed",
-                        ) from exc
-                    self._purge_power_generation(network.id)
-
-                removed = 0
-                for container in containers:
-                    assistant_id = container.labels[ASSISTANT_LABEL]
-                    spec = self.registry[assistant_id]
-                    try:
-                        container.remove(force=True)
-                    except DockerException as exc:
-                        raise ApiProblem(
-                            HTTPStatus.SERVICE_UNAVAILABLE,
-                            "Docker could not destroy the Team",
-                            code="docker-remove-failed",
-                        ) from exc
-                    self._blocked_power_workloads.discard(container.id)
-                    self._remove_assistant_policy_if_needed(team_id, assistant_id, spec)
-                    removed += 1
-
-                if network is None:
-                    try:
-                        storage_removed = self.storage.destroy(team_id)
-                    except team_storage.StorageError as exc:
-                        self._raise_storage_problem(exc)
-                    try:
-                        self.inference_store.delete(team_id)
-                    except inference_config.InferenceConfigError as exc:
-                        self._raise_inference_problem(exc)
-                    self._delete_team_secret_state(team_id)
-                    self._delete_team_account_state(team_id)
-                    return {
-                        "team_id": team_id,
-                        "destroyed": False,
-                        "assistants_removed": removed,
-                        "storage_removed": storage_removed,
-                    }
-                self._disconnect_egress_proxy_if_attached(network)
-                try:
-                    storage_removed = self.storage.destroy(team_id)
-                except team_storage.StorageError as exc:
-                    self._raise_storage_problem(exc)
-                try:
-                    self.inference_store.delete(team_id)
-                except inference_config.InferenceConfigError as exc:
-                    self._raise_inference_problem(exc)
-                try:
-                    network.remove()
-                except DockerException as exc:
-                    raise ApiProblem(
-                        HTTPStatus.SERVICE_UNAVAILABLE,
-                        "Docker could not destroy the Team",
-                        code="docker-remove-failed",
-                    ) from exc
-                self._delete_team_secret_state(team_id)
-                self._delete_team_account_state(team_id)
-                return {
-                    "team_id": team_id,
-                    "destroyed": True,
-                    "assistants_removed": removed,
-                    "storage_removed": storage_removed,
-                }
-        finally:
-            chat_lock.release()
-
-    def _validate_reset_container(self, container) -> None:
-        container.reload()
-        labels = container.attrs.get("Config", {}).get("Labels") or {}
-        team_id = labels.get(TEAM_LABEL)
-        assistant_id = labels.get(ASSISTANT_LABEL)
-        if (
-            not isinstance(team_id, str)
-            or len(team_id) > MAX_TEAM_ID_LENGTH
-            or _TEAM_ID.fullmatch(team_id) is None
-            or not isinstance(assistant_id, str)
-            or len(assistant_id) > MAX_ASSISTANT_ID_LENGTH
-            or _ASSISTANT_ID.fullmatch(assistant_id) is None
-            or not isinstance(labels.get(IMAGE_LABEL), str)
-            or not self._labels_include(labels, self._base_labels(team_id, "assistant"))
-            or container.name != self._container_name(team_id, assistant_id)
-        ):
-            raise ApiProblem(
-                HTTPStatus.CONFLICT,
-                "a labeled Space resource failed its ownership contract",
-                code="ownership-conflict",
-            )
-
-    def reset_space(self) -> dict[str, object]:
-        """Remove every exactly owned workload/network without accepting resource ids."""
-        self.secret_challenges.cancel_all()
-        self.approval_challenges.cancel_all()
-        self.input_challenges.cancel_all()
-        self._clear_chat_continuations()
-        with ExitStack() as locks:
-            for lock in self._locks:
-                locks.enter_context(lock)
-            assistant_filters = {
-                "label": [
-                    f"{MANAGED_LABEL}=1",
-                    f"{PROFILE_LABEL}={PROFILE}",
-                    f"{SPACE_LABEL}={self.space_id}",
-                    f"{KIND_LABEL}=assistant",
-                ]
-            }
-            network_filters = {
-                "label": [
-                    f"{MANAGED_LABEL}=1",
-                    f"{PROFILE_LABEL}={PROFILE}",
-                    f"{SPACE_LABEL}={self.space_id}",
-                    f"{KIND_LABEL}=team",
-                ]
-            }
-            try:
-                containers = self.client.containers.list(all=True, filters=assistant_filters)
-                networks = self.client.networks.list(filters=network_filters)
-                for container in containers:
-                    self._validate_reset_container(container)
-                owned_assistants = {
-                    (
-                        container.attrs["Config"]["Labels"][TEAM_LABEL],
-                        container.attrs["Config"]["Labels"][ASSISTANT_LABEL],
-                    )
-                    for container in containers
-                }
-                owned_team_ids: set[str] = set()
-                for network in networks:
-                    labels = network.attrs.get("Labels") or {}
-                    team_id = labels.get(TEAM_LABEL)
-                    if not isinstance(team_id, str):
-                        raise ApiProblem(
-                            HTTPStatus.CONFLICT,
-                            "a labeled Space resource failed its ownership contract",
-                            code="ownership-conflict",
-                        )
-                    validate_team_id(team_id)
-                    self._validate_network(network, team_id)
-                    owned_team_ids.add(team_id)
-                owned_assistants.update(
-                    (team_id, assistant_id) for team_id in owned_team_ids for assistant_id in self.registry
-                )
-                self._delete_all_secret_state()
-                self._delete_all_account_state()
-                self._revoke_all_approval_grants()
-                for container in containers:
-                    container.remove(force=True)
-                    self._blocked_power_workloads.discard(container.id)
-                for team_id, assistant_id in sorted(owned_assistants):
-                    self._remove_egress_policy(team_id, assistant_id)
-                for network in networks:
-                    self._disconnect_egress_proxy_if_attached(network)
-                storage_removed = self.storage.destroy_all()
-                for network in networks:
-                    team_id = network.attrs["Labels"][TEAM_LABEL]
-                    self.inference_store.delete(team_id)
-                for network in networks:
-                    network.remove()
-            except ApiProblem:
-                raise
-            except team_storage.StorageError as exc:
-                self._raise_storage_problem(exc)
-            except inference_config.InferenceConfigError as exc:
-                self._raise_inference_problem(exc)
-            except DockerException as exc:
-                raise ApiProblem(
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                    "Docker could not reset the Space",
-                    code="docker-reset-failed",
-                ) from exc
-            return {
-                "reset": True,
-                "assistants_removed": len(containers),
-                "teams_removed": len(networks),
-                "storage_removed": storage_removed,
-            }
 
 
 def main() -> int:
