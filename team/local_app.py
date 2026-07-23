@@ -107,6 +107,7 @@ HEALTH_TIMEOUT_SECONDS = 15
 MAX_CHAT_MESSAGE_CHARS = 16_000
 MAX_CHAT_FILES = 8
 MAX_CHAT_ASSISTANTS = 16
+CHAT_PAUSED_STATUSES = frozenset({"accounts-required", "secrets-required", "input-required", "approval-required"})
 MIN_API_KEY_BYTES = 16
 MAX_API_KEY_BYTES = 8 * 1024
 APP_EGRESS_PROXY_ALIAS = "app-egress-proxy"
@@ -4073,10 +4074,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body(max_bytes=MAX_CHAT_BODY_BYTES)
             payload = self.server.controller.chat(team_id, body, provider, api_key)
             return (
-                HTTPStatus.PRECONDITION_REQUIRED
-                if payload.get("status")
-                in {"accounts-required", "secrets-required", "input-required", "approval-required"}
-                else HTTPStatus.OK,
+                HTTPStatus.PRECONDITION_REQUIRED if payload.get("status") in CHAT_PAUSED_STATUSES else HTTPStatus.OK,
                 payload,
                 "chat",
                 team_id,
@@ -4099,10 +4097,7 @@ class Handler(BaseHTTPRequestHandler):
                 api_key,
             )
             return (
-                HTTPStatus.PRECONDITION_REQUIRED
-                if payload.get("status")
-                in {"accounts-required", "secrets-required", "input-required", "approval-required"}
-                else HTTPStatus.OK,
+                HTTPStatus.PRECONDITION_REQUIRED if payload.get("status") in CHAT_PAUSED_STATUSES else HTTPStatus.OK,
                 payload,
                 "chat-account-submit",
                 team_id,
@@ -4121,10 +4116,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body(max_bytes=MAX_SECRET_BODY_BYTES)
             payload = self.server.controller.submit_chat_secrets(team_id, body, provider, api_key)
             return (
-                HTTPStatus.PRECONDITION_REQUIRED
-                if payload.get("status")
-                in {"accounts-required", "secrets-required", "input-required", "approval-required"}
-                else HTTPStatus.OK,
+                HTTPStatus.PRECONDITION_REQUIRED if payload.get("status") in CHAT_PAUSED_STATUSES else HTTPStatus.OK,
                 payload,
                 "chat-secret-submit",
                 team_id,
@@ -4151,10 +4143,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body(max_bytes=MAX_SECRET_BODY_BYTES)
             payload = self.server.controller.submit_chat_input(team_id, body, provider, api_key)
             return (
-                HTTPStatus.PRECONDITION_REQUIRED
-                if payload.get("status")
-                in {"accounts-required", "secrets-required", "input-required", "approval-required"}
-                else HTTPStatus.OK,
+                HTTPStatus.PRECONDITION_REQUIRED if payload.get("status") in CHAT_PAUSED_STATUSES else HTTPStatus.OK,
                 payload,
                 "chat-input-submit",
                 team_id,
@@ -4165,10 +4154,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body(max_bytes=MAX_SECRET_BODY_BYTES)
             payload = self.server.controller.submit_chat_approval(team_id, body, provider, api_key)
             return (
-                HTTPStatus.PRECONDITION_REQUIRED
-                if payload.get("status")
-                in {"accounts-required", "secrets-required", "input-required", "approval-required"}
-                else HTTPStatus.OK,
+                HTTPStatus.PRECONDITION_REQUIRED if payload.get("status") in CHAT_PAUSED_STATUSES else HTTPStatus.OK,
                 payload,
                 "chat-approval-submit",
                 team_id,
