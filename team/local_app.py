@@ -2763,67 +2763,49 @@ class LocalController:
                 "request is too large",
                 code="body-too-large",
             ) from exc
-        try:
-            created = self.client.api.exec_create(
-                container.id,
-                [spec.rpc_command, method, path],
-                stdin=True,
-                stdout=True,
-                stderr=True,
-                privileged=False,
-                user=ASSISTANT_UID,
-                workdir=ASSISTANT_WORKDIR,
-                environment={},
-            )
-            exec_id = created["Id"]
-            stream = self.client.api.exec_start(exec_id, socket=True)
-            raw_socket = getattr(stream, "_sock", None)
-            if raw_socket is None:
-                raise OSError("the Docker attach socket cannot half-close stdin")
-            raw_socket.sendall(encoded)
-            raw_socket.shutdown(socket.SHUT_WR)
-            deadline = time.monotonic() + RPC_TIMEOUT_SECONDS
-            stdout, stderr = self._read_rpc_frames(raw_socket, deadline)
-        except TimeoutError as exc:
-            self._fail_stop_power(container)
-            raise ApiProblem(
-                HTTPStatus.GATEWAY_TIMEOUT,
-                "Assistant Power timed out",
-                code="assistant-timeout",
-            ) from exc
-        except (DockerException, OSError, ValueError, KeyError) as exc:
-            self._fail_stop_power(container)
-            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant Power failed", code="assistant-rpc-failed") from exc
-        finally:
-            if "stream" in locals():
-                with suppress(Exception):
-                    self._close_exec_stream(stream)
+
+        def close_stream(stream: object) -> None:
+            with suppress(Exception):
+                self._close_exec_stream(stream)
 
         try:
-            details = self.client.api.exec_inspect(exec_id)
-        except DockerException as exc:
-            self._fail_stop_power(container)
-            raise ApiProblem(
-                HTTPStatus.BAD_GATEWAY,
-                "Assistant Power status is ambiguous",
-                code="assistant-rpc-failed",
-            ) from exc
-        exit_code = details.get("ExitCode")
-        if not isinstance(exit_code, int):
-            self._fail_stop_power(container)
-            raise ApiProblem(
-                HTTPStatus.BAD_GATEWAY,
-                "Assistant Power status is ambiguous",
-                code="assistant-rpc-failed",
+            return power_execution.rpc_exchange(
+                self.client.api,
+                container.id,
+                [spec.rpc_command, method, path],
+                user=ASSISTANT_UID,
+                workdir=ASSISTANT_WORKDIR,
+                encoded=encoded,
+                timeout=RPC_TIMEOUT_SECONDS,
+                maximum=MAX_RESPONSE_BYTES,
+                transport_errors=(DockerException,),
+                fail_stop=lambda: self._fail_stop_power(container),
+                cancelled=lambda _exc: None,
+                close_stream=close_stream,
+                detect_unsupported_path=detect_unsupported_path,
             )
-        if exit_code != 0 or stderr:
-            if detect_unsupported_path and exit_code == 2 and not stdout and not stderr:
-                raise _UnsupportedAssistantRpcPathError(path)
-            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant Power failed", code="assistant-rpc-failed")
-        try:
-            return json.loads(bytes(stdout))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise ApiProblem(HTTPStatus.BAD_GATEWAY, "Assistant Power failed", code="assistant-rpc-failed") from exc
+        except power_execution.RpcExchangeError as exc:
+            if exc.kind == "unsupported-path":
+                raise _UnsupportedAssistantRpcPathError(path) from None
+            if exc.kind == "timeout":
+                raise ApiProblem(
+                    HTTPStatus.GATEWAY_TIMEOUT,
+                    "Assistant Power timed out",
+                    code="assistant-timeout",
+                ) from exc
+            if exc.kind == "ambiguous":
+                raise ApiProblem(
+                    HTTPStatus.BAD_GATEWAY,
+                    "Assistant Power status is ambiguous",
+                    code="assistant-rpc-failed",
+                ) from exc
+            if exc.kind in {"failed", "invalid-result"}:
+                raise ApiProblem(
+                    HTTPStatus.BAD_GATEWAY,
+                    "Assistant Power failed",
+                    code="assistant-rpc-failed",
+                ) from exc
+            raise AssertionError(f"unknown RPC failure: {exc.kind}") from exc
 
     def _wait_ready(self, container, spec: AssistantSpec) -> None:
         deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS

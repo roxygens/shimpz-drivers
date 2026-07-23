@@ -132,6 +132,87 @@ class PowerBatch:
             self._journal = None
 
 
+class RpcExchangeError(RuntimeError):
+    """One stable failure kind translated into each Controller's public error shape."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(kind)
+        self.kind = kind
+
+
+def rpc_exchange(
+    api: object,
+    container_id: str,
+    argv: list[str],
+    encoded: bytes,
+    *,
+    user: str,
+    workdir: str,
+    timeout: float,
+    maximum: int,
+    transport_errors: tuple[type[BaseException], ...],
+    fail_stop: Callable[[], None],
+    cancelled: Callable[[BaseException | None], None],
+    close_stream: Callable[[object], None],
+    detect_unsupported_path: bool = False,
+) -> object:
+    """Execute one bounded Docker RPC with shared fail-stop and framing decisions."""
+    stream = None
+    try:
+        try:
+            created = api.exec_create(
+                container_id,
+                argv,
+                stdin=True,
+                stdout=True,
+                stderr=True,
+                privileged=False,
+                user=user,
+                workdir=workdir,
+                environment={},
+            )
+            exec_id = created["Id"]
+            stream = api.exec_start(exec_id, socket=True)
+            raw_socket = getattr(stream, "_sock", None)
+            if raw_socket is None:
+                raise OSError("Docker attach socket cannot half-close stdin")
+            raw_socket.sendall(encoded)
+            raw_socket.shutdown(socket.SHUT_WR)
+            stdout, stderr = read_rpc_frames(raw_socket, time.monotonic() + timeout, maximum)
+        except TimeoutError as exc:
+            fail_stop()
+            cancelled(exc)
+            raise RpcExchangeError("timeout") from exc
+        except (*transport_errors, OSError, ValueError, KeyError) as exc:
+            fail_stop()
+            cancelled(exc)
+            raise RpcExchangeError("failed") from exc
+    finally:
+        if stream is not None:
+            close_stream(stream)
+
+    try:
+        details = api.exec_inspect(exec_id)
+    except transport_errors as exc:
+        fail_stop()
+        cancelled(exc)
+        raise RpcExchangeError("ambiguous") from exc
+    exit_code = details.get("ExitCode")
+    if not isinstance(exit_code, int):
+        fail_stop()
+        cancelled(None)
+        raise RpcExchangeError("ambiguous")
+    if exit_code != 0 or stderr:
+        if detect_unsupported_path and exit_code == 2 and not stdout and not stderr:
+            raise RpcExchangeError("unsupported-path")
+        cancelled(None)
+        raise RpcExchangeError("failed")
+    try:
+        return json.loads(bytes(stdout))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RpcExchangeError("invalid-result") from exc
+
+
 def private_generations(metadata: tuple[object, ...], *, connected: bool) -> tuple[tuple[str, int], ...]:
     """Project only usable positive generations from secret or account metadata."""
     if connected:

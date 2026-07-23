@@ -1864,61 +1864,40 @@ def _assistant_rpc_exchange(
     except assistant_secret_flow.SecretFlowError as exc:
         raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Power input is too large") from exc
     _register_optional_power(team_id, token, container)
-    stream = None
+
+    def close_stream(stream: object) -> None:
+        with contextlib.suppress(Exception):
+            _close_exec_stream(stream)
+
     try:
         try:
-            created = _docker.api.exec_create(
+            return power_execution.rpc_exchange(
+                _docker.api,
                 container.id,
                 [command, method, path],
-                stdin=True,
-                stdout=True,
-                stderr=True,
-                privileged=False,
                 user="10001:10001",
                 workdir=manifests.CONTAINER_TMP,
-                environment={},
+                encoded=encoded,
+                timeout=ASSISTANT_RPC_TIMEOUT_SECONDS,
+                maximum=MAX_ASSISTANT_RPC_OUTPUT_BYTES,
+                transport_errors=(docker.errors.DockerException,),
+                fail_stop=lambda: _fail_stop_power(team_id, container),
+                cancelled=lambda exc: _raise_if_rpc_cancelled(token, exc),
+                close_stream=close_stream,
+                detect_unsupported_path=detect_unsupported_path,
             )
-            exec_id = created["Id"]
-            stream = _docker.api.exec_start(exec_id, socket=True)
-            raw_socket = getattr(stream, "_sock", None)
-            if raw_socket is None:
-                raise OSError("Docker attach socket cannot half-close stdin")
-            raw_socket.sendall(encoded)
-            raw_socket.shutdown(socket.SHUT_WR)
-            deadline = time.monotonic() + ASSISTANT_RPC_TIMEOUT_SECONDS
-            stdout, stderr = _read_rpc_frames(raw_socket, deadline)
-        except TimeoutError as exc:
-            _fail_stop_power(team_id, container)
-            _raise_if_rpc_cancelled(token, exc)
-            raise ApiError(HTTPStatus.GATEWAY_TIMEOUT, f"{operation} timed out") from exc
-        except (docker.errors.DockerException, OSError, ValueError, KeyError) as exc:
-            _fail_stop_power(team_id, container)
-            _raise_if_rpc_cancelled(token, exc)
-            raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} failed") from exc
-        finally:
-            if stream is not None:
-                with contextlib.suppress(Exception):
-                    _close_exec_stream(stream)
-
-        try:
-            details = _docker.api.exec_inspect(exec_id)
-        except docker.errors.DockerException as exc:
-            _fail_stop_power(team_id, container)
-            _raise_if_rpc_cancelled(token, exc)
-            raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} status is ambiguous") from exc
-        if not isinstance(details.get("ExitCode"), int):
-            _fail_stop_power(team_id, container)
-            _raise_if_rpc_cancelled(token)
-            raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} status is ambiguous")
-        if details["ExitCode"] != 0 or stderr:
-            if detect_unsupported_path and details["ExitCode"] == 2 and not stdout and not stderr:
-                raise _UnsupportedAssistantRpcPathError(path)
-            _raise_if_rpc_cancelled(token)
-            raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} failed")
-        try:
-            return json.loads(bytes(stdout))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} returned an invalid result") from exc
+        except power_execution.RpcExchangeError as exc:
+            if exc.kind == "unsupported-path":
+                raise _UnsupportedAssistantRpcPathError(path) from None
+            if exc.kind == "timeout":
+                raise ApiError(HTTPStatus.GATEWAY_TIMEOUT, f"{operation} timed out") from exc
+            if exc.kind == "ambiguous":
+                raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} status is ambiguous") from exc
+            if exc.kind == "invalid-result":
+                raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} returned an invalid result") from exc
+            if exc.kind == "failed":
+                raise ApiError(HTTPStatus.BAD_GATEWAY, f"{operation} failed") from exc
+            raise AssertionError(f"unknown RPC failure: {exc.kind}") from exc
     finally:
         _release_optional_power(team_id, token, container.id)
 
