@@ -7,6 +7,7 @@ from http import HTTPStatus
 from types import SimpleNamespace
 
 import local_app
+from local_support.assistant_rpc import UnsupportedAssistantRpcPathError
 
 
 class LocalAssistantHelpTests(unittest.TestCase):
@@ -59,7 +60,7 @@ class LocalAssistantHelpTests(unittest.TestCase):
             calls.append((method, path, payload))
             if path == "/v1/help/pt":
                 self.assertTrue(kwargs["detect_unsupported_path"])
-                raise local_app._UnsupportedAssistantRpcPathError(path)
+                raise UnsupportedAssistantRpcPathError(path)
             self.assertNotIn("detect_unsupported_path", kwargs)
             return {"markdown": "# English fallback"}
 

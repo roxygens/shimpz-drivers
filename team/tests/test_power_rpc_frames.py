@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import local_app
 from hosted_app_fixture import _patched, app
+from local_support import assistant_rpc as local_assistant_rpc
 
 
 def _frame(stream_id: int, payload: bytes) -> bytes:
@@ -164,7 +165,11 @@ class PowerRpcFrameTests(unittest.TestCase):
             )
 
     def test_malformed_frames_fail_closed_in_both_readers(self) -> None:
-        oversized = struct.pack(">BxxxL", 1, max(app.MAX_ASSISTANT_RPC_OUTPUT_BYTES, local_app.MAX_RESPONSE_BYTES) + 2)
+        oversized = struct.pack(
+            ">BxxxL",
+            1,
+            max(app.MAX_ASSISTANT_RPC_OUTPUT_BYTES, local_assistant_rpc.MAX_RESPONSE_BYTES) + 2,
+        )
         cases = (
             b"\x01\x00\x00",
             _frame(1, b"payload")[:-2],
@@ -334,7 +339,7 @@ class PowerRpcFrameTests(unittest.TestCase):
             spec = SimpleNamespace(rpc_command="/app/rpc")
             with (
                 mock.patch.object(
-                    local_app.assistant_secret_flow,
+                    local_assistant_rpc.assistant_secret_flow,
                     "encode_private_rpc_envelope",
                     return_value=b"request",
                 ),
@@ -344,7 +349,7 @@ class PowerRpcFrameTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.status, HTTPStatus.BAD_GATEWAY)
         controller._fail_stop_power.assert_called_once()
-        self.assertEqual(create.call_args.kwargs["workdir"], local_app.ASSISTANT_WORKDIR)
+        self.assertEqual(create.call_args.kwargs["workdir"], local_assistant_rpc.ASSISTANT_WORKDIR)
         self.assertEqual(create.call_args.kwargs["environment"], {})
 
 
