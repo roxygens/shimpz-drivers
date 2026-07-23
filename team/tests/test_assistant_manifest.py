@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import assistant_manifest
 import cloudflare_assistant_contract
 
-FIXTURE_MANIFEST = Path(__file__).resolve().parent / "fixtures" / "reference-assistant" / "shimpz.assistant.toml"
+FIXTURE_MANIFEST = Path(__file__).resolve().parent / "fixtures" / "reference-assistant" / "shimpz.toml"
 
 
 def manifest(
@@ -64,7 +64,7 @@ def manifest(
 def archive(
     content: bytes,
     *,
-    name: str = "shimpz.assistant.toml",
+    name: str = "shimpz.toml",
     member_type: bytes | None = None,
     mode: int = 0o444,
 ) -> bytes:
@@ -92,7 +92,7 @@ class Container:
         payload = archive(self.content)
         return (
             iter((payload[:113], payload[113:])),
-            {"name": "shimpz.assistant.toml", "size": len(self.content), "mode": 0o444},
+            {"name": "shimpz.toml", "size": len(self.content), "mode": 0o444},
         )
 
 
@@ -288,15 +288,15 @@ class AssistantManifestTests(unittest.TestCase):
     def test_archive_shape_and_metadata_fail_closed(self):
         valid = manifest()
         invalid_cases = (
-            (archive(valid, name="other.toml"), {"name": "shimpz.assistant.toml", "size": len(valid), "mode": 0o444}),
+            (archive(valid, name="other.toml"), {"name": "shimpz.toml", "size": len(valid), "mode": 0o444}),
             (
                 archive(valid, member_type=tarfile.SYMTYPE),
-                {"name": "shimpz.assistant.toml", "size": len(valid), "mode": 0o444},
+                {"name": "shimpz.toml", "size": len(valid), "mode": 0o444},
             ),
-            (archive(valid, mode=0o644), {"name": "shimpz.assistant.toml", "size": len(valid), "mode": 0o444}),
-            (archive(valid), {"name": "shimpz.assistant.toml", "size": len(valid), "mode": 0o100444}),
-            (archive(valid), {"name": "shimpz.assistant.toml", "size": len(valid), "mode": 0o644}),
-            (archive(valid), {"name": "shimpz.assistant.toml", "size": len(valid) + 1, "mode": 0o444}),
+            (archive(valid, mode=0o644), {"name": "shimpz.toml", "size": len(valid), "mode": 0o444}),
+            (archive(valid), {"name": "shimpz.toml", "size": len(valid), "mode": 0o100444}),
+            (archive(valid), {"name": "shimpz.toml", "size": len(valid), "mode": 0o644}),
+            (archive(valid), {"name": "shimpz.toml", "size": len(valid) + 1, "mode": 0o444}),
         )
         for payload, metadata in invalid_cases:
             with self.subTest(metadata=metadata), self.assertRaises(assistant_manifest.ManifestError):

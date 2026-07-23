@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 
-MANIFEST_PATH = "/opt/shimpz-assistant/shimpz.assistant.toml"
+MANIFEST_PATH = "/opt/shimpz-assistant/shimpz.toml"
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_ARCHIVE_BYTES = MAX_MANIFEST_BYTES + (32 * 1024)
 MAX_ALLOWED_HOSTS = 32
@@ -429,7 +429,7 @@ def _read_container_manifest_bytes(container) -> bytes:
     mode = metadata.get("mode")
     name = metadata.get("name")
     if (
-        name != "shimpz.assistant.toml"
+        name != "shimpz.toml"
         or not isinstance(size, int)
         or isinstance(size, bool)
         or not 1 <= size <= MAX_MANIFEST_BYTES
@@ -445,7 +445,7 @@ def _read_container_manifest_bytes(container) -> bytes:
             members = bundle.getmembers()
             if (
                 len(members) != 1
-                or members[0].name not in {"shimpz.assistant.toml", "./shimpz.assistant.toml"}
+                or members[0].name not in {"shimpz.toml", "./shimpz.toml"}
                 or not members[0].isreg()
                 or members[0].size != size
                 or members[0].mode & 0o777 != 0o444
