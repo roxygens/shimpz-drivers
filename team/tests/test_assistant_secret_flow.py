@@ -25,8 +25,8 @@ def _spec() -> AssistantSpec:
         rpc_command="/app/rpc",
         health_path="/healthz",
         powers={
-            "read": PowerSpec("POST", "/read", "read", {}, {}, "none", ("bearer",)),
-            "write": PowerSpec("POST", "/write", "write", {}, {}, "none", ("key", "secret")),
+            "read": PowerSpec("POST", "/read", "read", {}, {}, ("bearer",)),
+            "write": PowerSpec("POST", "/write", "write", {}, {}, ("key", "secret")),
         },
         secrets={
             "bearer": SecretSpec("Bearer", "Read access"),
@@ -51,7 +51,7 @@ class AssistantSecretFlowTests(unittest.TestCase):
 
     @staticmethod
     def _request(power: str, interrupt_id: str) -> brain_runtime_client.PowerRequest:
-        return brain_runtime_client.PowerRequest(interrupt_id, "x-assistant", power, {}, "none")
+        return brain_runtime_client.PowerRequest(interrupt_id, "x-assistant", power, {})
 
     def test_batch_collects_all_missing_secrets_before_any_power(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

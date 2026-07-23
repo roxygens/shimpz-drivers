@@ -68,14 +68,12 @@ class _Runtime:
                 ASSISTANT_ID,
                 "list-zones",
                 ZONE_INPUT,
-                "none",
             ),
             app.brain_runtime_client.PowerRequest(
                 "identity-read",
                 ASSISTANT_ID,
                 "list-dns-records",
                 DNS_INPUT,
-                "none",
             ),
         )
 

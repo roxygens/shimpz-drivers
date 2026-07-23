@@ -357,7 +357,7 @@ class LocalContractTests(unittest.TestCase):
         self.assertEqual(spec.allowed_hosts, ("api.cloudflare.com",))
         self.assertEqual(spec.health_path, "/healthz")
         self.assertEqual(set(spec.powers), {"list-zones", "list-dns-records"})
-        self.assertTrue(all(power.approval == "none" for power in spec.powers.values()))
+        self.assertTrue(all(not hasattr(power, "approval") for power in spec.powers.values()))
         self.assertTrue(all(power.accounts == ("cloudflare",) for power in spec.powers.values()))
         self.assertEqual(
             local_registry.validate_power_input(
@@ -835,14 +835,12 @@ class LocalContractTests(unittest.TestCase):
                 assistant_id="shimpz-cloudflare",
                 power="list-zones",
                 input=LOOKUP_INPUT,
-                approval="none",
             ),
             brain_runtime_client.PowerRequest(
                 interrupt_id="identity",
                 assistant_id="shimpz-cloudflare",
                 power="list-dns-records",
                 input=DNS_INPUT,
-                approval="none",
             ),
         )
 
@@ -887,7 +885,6 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-cloudflare",
             power="list-zones",
             input=LOOKUP_INPUT,
-            approval="none",
         )
 
         class Runtime:
@@ -925,7 +922,6 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-cloudflare",
             power="list-dns-records",
             input=DNS_INPUT,
-            approval="none",
         )
 
         class Runtime:
@@ -1039,7 +1035,6 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-cloudflare",
             power="list-zones",
             input=LOOKUP_INPUT,
-            approval="none",
         )
 
         class Runtime:
@@ -1223,7 +1218,6 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-cloudflare",
             power="list-dns-records",
             input=DNS_INPUT,
-            approval="none",
         )
 
         class Runtime:
@@ -1279,6 +1273,9 @@ class LocalContractTests(unittest.TestCase):
                 return LOOKUP_RESULT
 
             controller._rpc = rpc
+            audit = mock.patch.object(local_app.local_audit, "record", return_value="trace")
+            audit.start()
+            self.addCleanup(audit.stop)
             with mock.patch.object(local_app.local_audit, "record", return_value="trace"):
                 response = controller.invoke(
                     "team_1",
@@ -1537,7 +1534,6 @@ class LocalContractTests(unittest.TestCase):
                             assistant_id="account-helper",
                             power="lookup",
                             input=LOOKUP_INPUT,
-                            approval="none",
                         ),
                     ),
                 )
@@ -1836,7 +1832,7 @@ class LocalContractTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "team-context-changed")
 
-    def test_chat_executes_only_controller_owned_none_approval_power(self) -> None:
+    def test_chat_executes_only_a_controller_owned_declared_power(self) -> None:
         class Runtime:
             def start(self, _context, _message):
                 return brain_runtime_client.RuntimeTurn(
@@ -1848,7 +1844,6 @@ class LocalContractTests(unittest.TestCase):
                             assistant_id="shimpz-cloudflare",
                             power="list-zones",
                             input=LOOKUP_INPUT,
-                            approval="none",
                         ),
                     ),
                 )
@@ -1881,7 +1876,6 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-cloudflare",
             power="list-zones",
             input=LOOKUP_INPUT,
-            approval="none",
         )
 
         class Runtime:
@@ -1933,7 +1927,6 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-cloudflare",
             power="list-zones",
             input=LOOKUP_INPUT,
-            approval="none",
         )
 
         class Runtime:
@@ -1984,7 +1977,6 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-cloudflare",
             power="list-zones",
             input=LOOKUP_INPUT,
-            approval="each-run",
         )
 
         class Runtime:
@@ -2005,22 +1997,39 @@ class LocalContractTests(unittest.TestCase):
         runtime = Runtime()
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, runtime)
-            spec = controller.registry["shimpz-cloudflare"]
-            spec.powers["list-zones"] = replace(spec.powers["list-zones"], approval="each-run")
-            invocations: list[tuple[str, object]] = []
-            controller.invoke = lambda _team, assistant, power, payload: (
-                invocations.append((power, payload))
-                or {"assistant": assistant, "power": power, "result": LOOKUP_RESULT}
-            )
+            answers: list[list[object]] = []
+
+            def rpc(_container, _spec, _method, _path, envelope):
+                answers.append(envelope["answers"])
+                if not envelope["answers"]:
+                    return local_app.power_execution.RpcSuspension(
+                        {
+                            "ordinal": 0,
+                            "kind": "approval",
+                            "request_type": "bool",
+                            "title": "Publish zones",
+                            "summary": "Publish the current zones?",
+                            "docs": "https://docs.shimpz.com/",
+                            "options": [],
+                            "runs": "always",
+                        }
+                    )
+                return LOOKUP_RESULT
+
+            controller._rpc = rpc
+            audit = mock.patch.object(local_app.local_audit, "record", return_value="trace")
+            audit.start()
+            self.addCleanup(audit.stop)
             challenge = controller.chat(
                 "team_1",
                 {"message": "Publish it", "files": [], "assistant_ids": ["shimpz-cloudflare"]},
                 "openai",
                 "sk-test-0123456789",
             )
-            self.assertEqual(invocations, [])
             self.assertEqual(challenge["status"], "approval-required")
-            self.assertEqual(challenge["requirements"][0]["input"], LOOKUP_INPUT)
+            self.assertEqual(challenge["requirements"][0]["title"], "Publish zones")
+            self.assertEqual(challenge["requirements"][0]["summary"], "Publish the current zones?")
+            self.assertEqual(challenge["requirements"][0]["docs"], "https://docs.shimpz.com/")
             self.assertNotIn("power-1", repr(challenge))
 
             submission = {"challenge_id": challenge["challenge_id"], "approved": True}
@@ -2046,7 +2055,7 @@ class LocalContractTests(unittest.TestCase):
                 )
 
         self.assertEqual(response["reply"], "Published.")
-        self.assertEqual(invocations, [("list-zones", LOOKUP_INPUT)])
+        self.assertEqual(answers, [[], [True]])
         self.assertEqual(runtime.resumes, [{"power-1": LOOKUP_RESULT}])
         self.assertEqual(replay.exception.code, "assistant-approval-challenge-expired")
 
@@ -2056,7 +2065,6 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-cloudflare",
             power="list-zones",
             input=LOOKUP_INPUT,
-            approval="none",
         )
 
         class Runtime:
@@ -2104,6 +2112,9 @@ class LocalContractTests(unittest.TestCase):
                 return LOOKUP_RESULT
 
             controller._rpc = rpc
+            audit = mock.patch.object(local_app.local_audit, "record", return_value="trace")
+            audit.start()
+            self.addCleanup(audit.stop)
             with mock.patch.object(local_app.local_audit, "record", return_value="trace"):
                 challenge = controller.chat(
                     "team_1",
@@ -2166,7 +2177,6 @@ class LocalContractTests(unittest.TestCase):
                     assistant_id="shimpz-cloudflare",
                     power="list-zones",
                     input=LOOKUP_INPUT,
-                    approval="once",
                 )
                 return brain_runtime_client.RuntimeTurn(status="power-required", reply="", powers=(request,))
 
@@ -2175,12 +2185,29 @@ class LocalContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, Runtime())
-            spec = controller.registry["shimpz-cloudflare"]
-            spec.powers["list-zones"] = replace(spec.powers["list-zones"], approval="once")
-            invoked: list[object] = []
-            controller.invoke = lambda _team, _assistant, power, payload: (
-                invoked.append((power, payload)) or {"result": LOOKUP_RESULT}
-            )
+            answers: list[list[object]] = []
+
+            def rpc(_container, _spec, _method, _path, envelope):
+                answers.append(envelope["answers"])
+                if not envelope["answers"]:
+                    return local_app.power_execution.RpcSuspension(
+                        {
+                            "ordinal": 0,
+                            "kind": "approval",
+                            "request_type": "bool",
+                            "title": "Publish zones",
+                            "summary": "Publish the current zones?",
+                            "docs": None,
+                            "options": [],
+                            "runs": "once",
+                        }
+                    )
+                return LOOKUP_RESULT
+
+            controller._rpc = rpc
+            audit = mock.patch.object(local_app.local_audit, "record", return_value="trace")
+            audit.start()
+            self.addCleanup(audit.stop)
 
             first = controller.chat(
                 "team_1",
@@ -2211,7 +2238,7 @@ class LocalContractTests(unittest.TestCase):
             )
 
         self.assertEqual(second["reply"], "Published.")
-        self.assertEqual(len(invoked), 2)
+        self.assertEqual(answers, [[], [True], [], [True], []])
         self.assertEqual(
             inventory,
             {
@@ -2228,7 +2255,6 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-cloudflare",
             power="list-zones",
             input=LOOKUP_INPUT,
-            approval="each-run",
         )
 
         class Runtime:
@@ -2242,12 +2268,29 @@ class LocalContractTests(unittest.TestCase):
         runtime = Runtime()
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, runtime, configure_secrets=False)
-            spec = controller.registry["shimpz-cloudflare"]
-            spec.powers["list-zones"] = replace(spec.powers["list-zones"], approval="each-run")
-            invocations: list[object] = []
-            controller.invoke = lambda _team, _assistant, power, payload: (
-                invocations.append((power, payload)) or {"result": LOOKUP_RESULT}
-            )
+            answers: list[list[object]] = []
+
+            def rpc(_container, _spec, _method, _path, envelope):
+                answers.append(envelope["answers"])
+                if not envelope["answers"]:
+                    return local_app.power_execution.RpcSuspension(
+                        {
+                            "ordinal": 0,
+                            "kind": "approval",
+                            "request_type": "bool",
+                            "title": "Publish zones",
+                            "summary": "Publish the current zones?",
+                            "docs": None,
+                            "options": [],
+                            "runs": "always",
+                        }
+                    )
+                return LOOKUP_RESULT
+
+            controller._rpc = rpc
+            audit = mock.patch.object(local_app.local_audit, "record", return_value="trace")
+            audit.start()
+            self.addCleanup(audit.stop)
             secret_challenge = controller.chat(
                 "team_1",
                 {"message": "Publish", "files": [], "assistant_ids": ["shimpz-cloudflare"]},
@@ -2260,12 +2303,8 @@ class LocalContractTests(unittest.TestCase):
                 "openai",
                 "sk-test-0123456789",
             )
-            self.assertEqual(invocations, [])
             self.assertEqual(approval_challenge["status"], "approval-required")
-            self.assertEqual(
-                approval_challenge["requirements"][0]["input"],
-                LOOKUP_INPUT,
-            )
+            self.assertEqual(approval_challenge["requirements"][0]["title"], "Publish zones")
             response = controller.submit_chat_approval(
                 "team_1",
                 {"challenge_id": approval_challenge["challenge_id"], "approved": True},
@@ -2274,7 +2313,7 @@ class LocalContractTests(unittest.TestCase):
             )
 
         self.assertEqual(response["reply"], "Published.")
-        self.assertEqual(invocations, [("list-zones", LOOKUP_INPUT)])
+        self.assertEqual(answers, [[], [True]])
         self.assertEqual(runtime.results, {"create-1": LOOKUP_RESULT})
 
     def test_approval_challenge_transfers_to_a_cancellable_active_turn_without_a_gap(self) -> None:
@@ -2283,7 +2322,6 @@ class LocalContractTests(unittest.TestCase):
             assistant_id="shimpz-cloudflare",
             power="list-zones",
             input=LOOKUP_INPUT,
-            approval="each-run",
         )
 
         class Runtime:
@@ -2295,9 +2333,21 @@ class LocalContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, Runtime())
-            spec = controller.registry["shimpz-cloudflare"]
-            spec.powers["list-zones"] = replace(spec.powers["list-zones"], approval="each-run")
-            controller.invoke = lambda *_args: self.fail("a cancelled approval must never invoke")
+            controller._rpc = lambda *_args: local_app.power_execution.RpcSuspension(
+                {
+                    "ordinal": 0,
+                    "kind": "approval",
+                    "request_type": "bool",
+                    "title": "Publish zones",
+                    "summary": "Publish the current zones?",
+                    "docs": None,
+                    "options": [],
+                    "runs": "always",
+                }
+            )
+            audit = mock.patch.object(local_app.local_audit, "record", return_value="trace")
+            audit.start()
+            self.addCleanup(audit.stop)
             challenge = controller.chat(
                 "team_1",
                 {"message": "Publish", "files": [], "assistant_ids": ["shimpz-cloudflare"]},

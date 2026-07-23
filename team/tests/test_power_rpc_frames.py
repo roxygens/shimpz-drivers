@@ -105,7 +105,7 @@ class PowerRpcFrameTests(unittest.TestCase):
             self.assertEqual(self.local._read_rpc_frames(local_socket, time.monotonic() + 1), (b"", b""))
 
     def test_both_controller_bindings_reject_the_same_generation_drift(self) -> None:
-        request = app.brain_runtime_client.PowerRequest("interrupt-1", "assistant", "lookup", {"query": "safe"}, "none")
+        request = app.brain_runtime_client.PowerRequest("interrupt-1", "assistant", "lookup", {"query": "safe"})
         generation = [1]
         execute = mock.Mock(return_value={"ok": True})
         image = "example.invalid/assistant@sha256:" + "a" * 64
@@ -151,7 +151,6 @@ class PowerRpcFrameTests(unittest.TestCase):
             "assistant",
             "lookup",
             {"query": "safe"},
-            "none",
         )
         suspension = app.power_execution.RpcSuspension({"ordinal": 0, "kind": "request"})
         execute = mock.Mock(side_effect=(suspension, {"ok": True}))

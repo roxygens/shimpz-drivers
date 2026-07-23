@@ -35,7 +35,6 @@ def power_operation(
     try:
         encoded = json.dumps(
             {
-                "approval": request.approval,
                 "assistant_container_id": assistant_container_id,
                 "assistant_id": request.assistant_id,
                 "assistant_image": assistant_image,

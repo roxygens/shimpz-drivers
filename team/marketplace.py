@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 import assistant_manifest
 import network_policy
@@ -40,7 +40,6 @@ class PowerSpec:
     summary: str
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
-    approval: Literal["none", "once", "each-run"] = "none"
     secrets: tuple[str, ...] = ()
     accounts: tuple[str, ...] = ()
 
@@ -112,7 +111,6 @@ APPS: dict[str, AppSpec] = {
                     summary=power_id.replace("-", " ").capitalize(),
                     input_schema=power["input_schema"],
                     output_schema=power["output_schema"],
-                    approval="none",
                     secrets=(),
                     accounts=tuple(power["accounts"]),
                 )

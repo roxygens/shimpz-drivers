@@ -518,7 +518,6 @@ class PowerJournal:
 
     def suspend(self, batch: Batch, operation: Operation) -> None:
         """Return an explicitly suspended operation to its replayable state."""
-
         batch = self._validate_handle(batch)
         operation = _operation(operation)
         if operation not in batch.operations:

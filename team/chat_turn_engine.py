@@ -23,9 +23,8 @@ class SegmentRequirements:
     inputs: tuple[object, ...] = ()
     approvals: tuple[object, ...] = ()
 
-    def groups(self, *, approvals: bool) -> tuple[tuple[object, ...], ...]:
-        groups = (self.accounts, self.secrets, self.inputs)
-        return (*groups, self.approvals) if approvals else groups
+    def groups(self) -> tuple[tuple[object, ...], ...]:
+        return self.accounts, self.secrets, self.inputs, self.approvals
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,8 +50,6 @@ class SegmentStrategy:
     validate_context: Callable[[], None]
     raise_problem: Callable[[str, BaseException | None], None]
     finalize: Callable[[], None] = lambda: None
-    pause_for_approval: Callable[[tuple[object, ...], SegmentRequirements], bool] | None = None
-    approval_granted: Callable | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +86,6 @@ class AccountResumeAdmission:
 _DRIVE_ERRORS = (
     power_journal.PowerJournalError,
     chat_orchestrator.ChatStoppedError,
-    chat_orchestrator.ApprovalRequiredError,
     chat_orchestrator.ChatOrchestrationError,
     brain_runtime_client.BrainRuntimeError,
 )
@@ -160,7 +156,7 @@ def run_segment(
         strategy.raise_problem("drive-error", exc)
         raise AssertionError("chat error adapter returned") from exc
     strategy.finalize()
-    groups = requirements.groups(approvals=strategy.pause_for_approval is not None)
+    groups = requirements.groups()
     if isinstance(outcome, chat_orchestrator.ChatSuspension) and suspension_gate_count(*groups) != 1:
         strategy.raise_problem("invalid-suspension", None)
     return segment.team_name, segment.identity, outcome, requirements
@@ -186,15 +182,6 @@ def drive(
         "cancelled": strategy.cancelled,
         "validate_context": strategy.validate_context,
     }
-    approval_pause = strategy.pause_for_approval
-    if approval_pause is not None:
-
-        def pause_for_approval(requests: tuple[object, ...]) -> bool:
-            return approval_pause(requests, requirements)
-
-        hooks["pause_for_approval"] = pause_for_approval
-    if strategy.approval_granted is not None:
-        hooks["approval_granted"] = strategy.approval_granted
     if continuation is None:
         outcome = chat_orchestrator.run_until_pause(
             strategy.runtime,

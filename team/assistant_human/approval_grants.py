@@ -1,4 +1,4 @@
-"""Durable release-bound grants for Assistant Powers declared with approval="once"."""
+"""Durable release-bound grants for in-body approvals declared with runs="once"."""
 
 from __future__ import annotations
 
@@ -222,10 +222,7 @@ class ApprovalGrantStore:
                 self._connection.executemany(
                     """INSERT OR IGNORE INTO grants
                        (team_id, assistant_id, power_id, image, ordinal) VALUES (?, ?, ?, ?, ?)""",
-                    (
-                        (item.team_id, item.assistant_id, item.power_id, item.image, item.ordinal)
-                        for item in canonical
-                    ),
+                    ((item.team_id, item.assistant_id, item.power_id, item.image, item.ordinal) for item in canonical),
                 )
                 self._connection.execute("COMMIT")
             except ApprovalGrantError:

@@ -16,14 +16,6 @@ class ChatOrchestrationError(RuntimeError):
     """The Brain runtime violated the turn contract or could not finish safely."""
 
 
-class ApprovalRequiredError(ChatOrchestrationError):
-    """A declared Power requires a Captain approval that has not been granted."""
-
-    def __init__(self, request: brain_runtime_client.PowerRequest) -> None:
-        super().__init__(f"Power {request.power!r} requires {request.approval} approval")
-        self.request = request
-
-
 class ChatStoppedError(ChatOrchestrationError):
     """The Controller cancelled the active turn between two bounded operations."""
 
@@ -69,7 +61,6 @@ PowerInvoker = Callable[[brain_runtime_client.PowerRequest], object]
 PowerValidator = Callable[[str, str, Mapping[str, Any]], Mapping[str, Any]]
 BatchHook = Callable[[tuple[brain_runtime_client.PowerRequest, ...]], None]
 BatchPause = Callable[[tuple[brain_runtime_client.PowerRequest, ...]], bool]
-ApprovalCheck = Callable[[brain_runtime_client.PowerRequest], bool]
 CancellationCheck = Callable[[], bool]
 ContextCheck = Callable[[], None]
 
@@ -87,7 +78,7 @@ def _validate_batch(
     contracts: list[tuple[brain_runtime_client.PowerRequest, brain_runtime_client.RuntimePower]] = []
     for request in requests:
         power = declared.get((request.assistant_id, request.power))
-        if power is None or request.approval != power.approval:
+        if power is None:
             raise ChatOrchestrationError("Brain requested an undeclared Power contract")
         if request.interrupt_id in seen_interrupts:
             raise ChatOrchestrationError("Brain repeated a Power interrupt id")
@@ -105,7 +96,6 @@ def _validate_batch(
                 assistant_id=request.assistant_id,
                 power=power.id,
                 input=dict(safe_input),
-                approval=request.approval,
             )
         )
     return tuple(validated)
@@ -121,8 +111,6 @@ def _drive(
     prepare_batch: BatchHook = lambda _batch: None,
     batch_delivered: BatchHook = lambda _batch: None,
     pause_before_batch: BatchPause = lambda _batch: False,
-    pause_for_approval: BatchPause = lambda _batch: False,
-    approval_granted: ApprovalCheck = lambda request: request.approval == "none",
     cancelled: CancellationCheck = lambda: False,
     validate_context: ContextCheck = lambda: None,
 ) -> ChatOutcome | ChatSuspension:
@@ -155,19 +143,6 @@ def _drive(
                 ),
                 requests=batch,
             )
-        unapproved = tuple(request for request in batch if request.approval != "none" and not approval_granted(request))
-        if unapproved:
-            if pause_for_approval(unapproved):
-                return ChatSuspension(
-                    continuation=ChatContinuation(
-                        turn=turn,
-                        seen_interrupts=tuple(sorted(seen_interrupts)),
-                        invoked=tuple(invoked),
-                        round_index=_round,
-                    ),
-                    requests=batch,
-                )
-            raise ApprovalRequiredError(unapproved[0])
         prepare_batch(batch)
         results: dict[str, object] = {}
         batch_invoked: list[InvokedPower] = []
@@ -216,8 +191,6 @@ def run_until_pause(
     prepare_batch: BatchHook = lambda _batch: None,
     batch_delivered: BatchHook = lambda _batch: None,
     pause_before_batch: BatchPause = lambda _batch: False,
-    pause_for_approval: BatchPause = lambda _batch: False,
-    approval_granted: ApprovalCheck = lambda request: request.approval == "none",
     cancelled: CancellationCheck = lambda: False,
     validate_context: ContextCheck = lambda: None,
 ) -> ChatOutcome | ChatSuspension:
@@ -235,8 +208,6 @@ def run_until_pause(
         prepare_batch=prepare_batch,
         batch_delivered=batch_delivered,
         pause_before_batch=pause_before_batch,
-        pause_for_approval=pause_for_approval,
-        approval_granted=approval_granted,
         cancelled=cancelled,
         validate_context=validate_context,
     )
@@ -252,8 +223,6 @@ def continue_after_pause(
     prepare_batch: BatchHook = lambda _batch: None,
     batch_delivered: BatchHook = lambda _batch: None,
     pause_before_batch: BatchPause = lambda _batch: False,
-    pause_for_approval: BatchPause = lambda _batch: False,
-    approval_granted: ApprovalCheck = lambda request: request.approval == "none",
     cancelled: CancellationCheck = lambda: False,
     validate_context: ContextCheck = lambda: None,
 ) -> ChatOutcome | ChatSuspension:
@@ -267,8 +236,6 @@ def continue_after_pause(
         prepare_batch=prepare_batch,
         batch_delivered=batch_delivered,
         pause_before_batch=pause_before_batch,
-        pause_for_approval=pause_for_approval,
-        approval_granted=approval_granted,
         cancelled=cancelled,
         validate_context=validate_context,
     )

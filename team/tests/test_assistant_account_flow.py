@@ -89,7 +89,6 @@ def _spec() -> AssistantSpec:
                 "Read one external profile.",
                 {},
                 {},
-                "none",
                 (),
                 ("cloudflare-read",),
             ),
@@ -99,7 +98,6 @@ def _spec() -> AssistantSpec:
                 "Publish one approved external update.",
                 {},
                 {},
-                "each-run",
                 (),
                 ("cloudflare-write",),
             ),
@@ -114,7 +112,7 @@ def _spec() -> AssistantSpec:
 
 
 def _request(power: str, interrupt_id: str) -> brain_runtime_client.PowerRequest:
-    return brain_runtime_client.PowerRequest(interrupt_id, "cloudflare-assistant", power, {}, "none")
+    return brain_runtime_client.PowerRequest(interrupt_id, "cloudflare-assistant", power, {})
 
 
 def _cloudflare_spec() -> AssistantSpec:
@@ -132,7 +130,6 @@ def _cloudflare_spec() -> AssistantSpec:
                 "List a bounded page of Cloudflare zones and domains.",
                 {},
                 {},
-                "none",
                 (),
                 ("cloudflare",),
             )

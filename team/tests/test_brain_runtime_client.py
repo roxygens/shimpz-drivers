@@ -51,7 +51,6 @@ def context(secret: str) -> brain_runtime_client.RuntimeContext:
                             "properties": {"name": {"type": "string"}},
                             "additionalProperties": False,
                         },
-                        approval="none",
                     ),
                 ),
             ),
@@ -111,7 +110,6 @@ class BrainRuntimeClientTests(unittest.TestCase):
                             "assistant_id": "hello-pulse",
                             "power": "hello",
                             "input": {"name": "Ada"},
-                            "approval": "each-run",
                         }
                     ],
                 }
@@ -123,7 +121,6 @@ class BrainRuntimeClientTests(unittest.TestCase):
         self.assertEqual(result.powers[0].power, "hello")
         self.assertEqual(result.powers[0].assistant_id, "hello-pulse")
         self.assertEqual(result.powers[0].input, {"name": "Ada"})
-        self.assertEqual(result.powers[0].approval, "each-run")
 
     def test_resume_sends_only_interrupt_results(self):
         client, connection = self.client(_Response({"status": "completed", "reply": "Done.", "powers": []}))

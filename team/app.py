@@ -2425,8 +2425,6 @@ def _raise_hosted_chat_problem(reason: str, exc: BaseException | None) -> None:
         raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Team Power execution state is unavailable") from exc
     if isinstance(exc, chat_orchestrator.ChatStoppedError):
         raise ApiError(HTTPStatus.CONFLICT, "brain turn stopped") from exc
-    if isinstance(exc, chat_orchestrator.ApprovalRequiredError):
-        raise ApiError(HTTPStatus.CONFLICT, "Assistant Power requires Captain approval") from exc
     if isinstance(exc, chat_orchestrator.ChatOrchestrationError):
         raise ApiError(HTTPStatus.BAD_GATEWAY, "Brain could not complete the Assistant turn") from exc
     if isinstance(exc, brain_runtime_client.BrainRuntimeError):
@@ -2541,7 +2539,6 @@ def _run_hosted_chat_segment(
                             id=power_id,
                             summary=power.summary,
                             input_schema=power.input_schema,
-                            approval=power.approval,
                         )
                         for power_id, power in sorted(active.contract.powers.items())
                     ),

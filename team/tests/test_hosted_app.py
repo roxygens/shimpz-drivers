@@ -736,11 +736,10 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         commit.assert_not_called()
 
     def test_hosted_team_context_contains_and_routes_two_active_assistants(self) -> None:
-        place_power = types.SimpleNamespace(summary="Find a place.", input_schema={"type": "object"}, approval="none")
+        place_power = types.SimpleNamespace(summary="Find a place.", input_schema={"type": "object"})
         weather_power = types.SimpleNamespace(
             summary="Read current weather.",
             input_schema={"type": "object"},
-            approval="none",
         )
         place_contract = types.SimpleNamespace(powers={"search": place_power})
         weather_contract = types.SimpleNamespace(powers={"current": weather_power})
@@ -768,13 +767,12 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             self.assertEqual(context.thread_id, app._brain_thread_id("team_1", ANCHOR_ID))
             self.assertTrue(callable(validate_power))
             requests = (
-                app.brain_runtime_client.PowerRequest("place-1", "places", "search", {"name": "Berlin"}, "none"),
+                app.brain_runtime_client.PowerRequest("place-1", "places", "search", {"name": "Berlin"}),
                 app.brain_runtime_client.PowerRequest(
                     "weather-1",
                     "weather",
                     "current",
                     {"latitude": 52.52, "longitude": 13.41},
-                    "none",
                 ),
             )
             hooks["prepare_batch"](requests)
@@ -833,7 +831,6 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             "shimpz-cloudflare",
             "list-zones",
             {"page": 1, "per_page": 25},
-            "none",
         )
 
         class Runtime:
@@ -900,7 +897,6 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             "shimpz-cloudflare",
             "list-zones",
             {"page": 1, "per_page": 25},
-            "none",
         )
         thread_id = app._brain_thread_id("team_1", ANCHOR_ID)
 
@@ -912,7 +908,6 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                     "shimpz-cloudflare",
                     "list-zones",
                     {"page": 1, "per_page": 25},
-                    "none",
                 )
                 return app.brain_runtime_client.RuntimeTurn("power-required", "", (raw,))
 
@@ -959,55 +954,6 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 self.addCleanup(journal.close)
                 self.assertTrue(path.exists())
                 self.assertIs(app._power_execution_journal(), journal)
-
-    def test_hosted_approval_error_does_not_expose_the_power_id(self) -> None:
-        private_power_id = "private-campaign-export"
-        request = app.brain_runtime_client.PowerRequest(
-            interrupt_id="approval-1",
-            assistant_id="salesnator",
-            power=private_power_id,
-            input={},
-            approval="each-run",
-        )
-        contract = types.SimpleNamespace(powers={})
-        anchor = types.SimpleNamespace(
-            id=ANCHOR_ID,
-            labels={"team.name": "Marketing", "team.owner": "account_1"},
-        )
-        store = types.SimpleNamespace(load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test"))
-
-        with (
-            _patched(
-                _active_team_assistants=lambda _team_id: (
-                    app._ActiveAssistant("salesnator", contract, types.SimpleNamespace(id="assistant-container")),
-                ),
-                _require_assistant_genesis=lambda _container: "Use only campaign Powers.",
-                _chat_file_metadata=lambda _team_id, _files: [],
-                _inference_store=store,
-                _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
-                _require_model_credential_current=lambda *_args: None,
-                _brain_runtime=object(),
-            ),
-            mock.patch.object(
-                app.chat_orchestrator,
-                "run_until_pause",
-                side_effect=app.chat_orchestrator.ApprovalRequiredError(request),
-            ),
-            self.assertRaises(app.ApiError) as caught,
-        ):
-            app._chat_in_turn(
-                "team_1",
-                "Export the campaign",
-                [],
-                ("salesnator",),
-                "turn-token",
-                anchor,
-                "account_1",
-            )
-
-        self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
-        self.assertEqual(caught.exception.message, "Assistant Power requires Captain approval")
-        self.assertNotIn(private_power_id, caught.exception.message)
 
     def test_destroy_deletes_generation_after_chat_drain_before_teardown(self) -> None:
         events: list[object] = []

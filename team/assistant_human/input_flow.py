@@ -63,10 +63,7 @@ def requirement(
         if (
             not options
             or any(
-                not isinstance(option, str)
-                or not option
-                or len(option) > MAX_OPTION_CHARS
-                or "\0" in option
+                not isinstance(option, str) or not option or len(option) > MAX_OPTION_CHARS or "\0" in option
                 for option in options
             )
             or len(options) != len(set(options))

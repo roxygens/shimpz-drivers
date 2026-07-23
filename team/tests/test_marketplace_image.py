@@ -76,7 +76,7 @@ class MarketplaceImageTests(unittest.TestCase):
             ("dns.read", "offline_access", "zone.read"),
         )
         self.assertTrue(all(power.accounts == ("cloudflare",) for power in spec.assistant.powers.values()))
-        self.assertTrue(all(power.approval == "none" for power in spec.assistant.powers.values()))
+        self.assertTrue(all(not hasattr(power, "approval") for power in spec.assistant.powers.values()))
 
     def test_missing_digest_is_pulled_by_the_exact_registry_reference_then_rechecked(self) -> None:
         spec = marketplace.APPS["shimpz-cloudflare"]

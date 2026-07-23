@@ -49,7 +49,6 @@ class _Runtime:
             ASSISTANT_ID,
             "list-zones",
             ZONE_INPUT,
-            "none",
         )
 
     def start(self, _context, _message):

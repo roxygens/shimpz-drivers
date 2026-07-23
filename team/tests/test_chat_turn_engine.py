@@ -39,7 +39,6 @@ def _context() -> brain_runtime_client.RuntimeContext:
                         id="lookup",
                         summary="Look up one value.",
                         input_schema={"type": "object"},
-                        approval="none",
                     ),
                 ),
             ),
@@ -62,7 +61,6 @@ class _Runtime:
                     assistant_id="assistant",
                     power="lookup",
                     input={"query": "Ada"},
-                    approval="none",
                 ),
             ),
         )
@@ -89,9 +87,7 @@ class _InteractionBatch:
 
     @staticmethod
     def invoke(_request):
-        return power_execution.RpcSuspension(
-            {"ordinal": 0, "kind": "request", "request_type": "str"}
-        )
+        return power_execution.RpcSuspension({"ordinal": 0, "kind": "request", "request_type": "str"})
 
     @staticmethod
     def delivered(_requests) -> None:
@@ -99,15 +95,11 @@ class _InteractionBatch:
 
 
 class SharedChatTurnEngineTest(unittest.TestCase):
-    def _strategy(self, *, local: bool, decisions: list[str]) -> chat_turn_engine.SegmentStrategy:
+    def _strategy(self, *, decisions: list[str]) -> chat_turn_engine.SegmentStrategy:
         def private_inputs(_requests, requirements) -> bool:
             requirements.accounts = ("account-required",)
             decisions.append("accounts")
             return True
-
-        def approval(_requests, _requirements) -> bool:
-            decisions.append("approval")
-            return False
 
         def raise_problem(reason: str, _exc: BaseException | None) -> None:
             raise AssertionError(reason)
@@ -126,21 +118,19 @@ class SharedChatTurnEngineTest(unittest.TestCase):
             cancelled=lambda: False,
             validate_context=lambda: None,
             raise_problem=raise_problem,
-            pause_for_approval=approval if local else None,
-            approval_granted=(lambda _request: False) if local else None,
         )
 
     def test_hosted_and_local_strategies_make_the_same_real_suspension_decision(self) -> None:
         decisions: dict[str, list[str]] = {"hosted": [], "local": []}
 
         hosted = chat_turn_engine.run_segment(
-            self._strategy(local=False, decisions=decisions["hosted"]),
+            self._strategy(decisions=decisions["hosted"]),
             message="look this up",
             continuation=None,
             expected_identity=("identity",),
         )
         local = chat_turn_engine.run_segment(
-            self._strategy(local=True, decisions=decisions["local"]),
+            self._strategy(decisions=decisions["local"]),
             message="look this up",
             continuation=None,
             expected_identity=("identity",),
@@ -156,11 +146,11 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         requirements = chat_turn_engine.SegmentRequirements(inputs=("input-required",))
 
         self.assertEqual(
-            requirements.groups(approvals=True),
+            requirements.groups(),
             ((), (), ("input-required",), ()),
         )
         self.assertEqual(
-            chat_turn_engine.suspension_gate_count(*requirements.groups(approvals=True)),
+            chat_turn_engine.suspension_gate_count(*requirements.groups()),
             1,
         )
 
@@ -170,7 +160,7 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         )
         dispatched = chat_turn_engine.dispatch(
             suspension,
-            requirements.groups(approvals=True),
+            requirements.groups(),
             lambda _outcome: "pending",
             (
                 lambda *_args: "accounts",
@@ -183,7 +173,7 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         self.assertEqual(dispatched, "inputs")
 
     def test_rpc_request_suspension_populates_the_input_category(self) -> None:
-        strategy = self._strategy(local=True, decisions=[])
+        strategy = self._strategy(decisions=[])
         strategy = chat_turn_engine.SegmentStrategy(
             runtime=strategy.runtime,
             prepare=lambda: chat_turn_engine.PreparedSegment(
@@ -198,8 +188,6 @@ class SharedChatTurnEngineTest(unittest.TestCase):
             cancelled=strategy.cancelled,
             validate_context=strategy.validate_context,
             raise_problem=strategy.raise_problem,
-            pause_for_approval=lambda _requests, _requirements: False,
-            approval_granted=lambda _request: True,
         )
 
         _, _, outcome, requirements = chat_turn_engine.run_segment(
@@ -240,7 +228,6 @@ class SharedChatTurnEngineTest(unittest.TestCase):
             declared_power.summary,
             dict(declared_power.input_schema),
             dict(declared_power.output_schema),
-            "none",
             (),
         )
         local_spec = local_registry.AssistantSpec(
@@ -260,7 +247,6 @@ class SharedChatTurnEngineTest(unittest.TestCase):
             assistant_id=assistant_id,
             power="list-zones",
             input={"page": 1, "per_page": 25},
-            approval="none",
         )
         config = inference_config.InferenceConfig("openai", "gpt-test")
         captures: dict[str, tuple[object, object, chat_turn_engine.SegmentRequirements, bool]] = {}
@@ -324,19 +310,14 @@ class SharedChatTurnEngineTest(unittest.TestCase):
             requirements.accounts = ("account-required",)
             return True
 
-        def local_approval(_bindings, _requests, requirements) -> bool:
-            requirements.approvals = ("approval-required",)
-            return True
-
         controller._require_chat_private_inputs = local_private_inputs
-        controller._require_chat_approval = local_approval
         controller._require_power_rpc_envelope = lambda *_args: local_events.append("preflight")
         controller._power_secret_generations = lambda *_args: local_events.append("secrets") or ()
         controller._power_account_generations = lambda *_args: local_events.append("accounts") or ()
         controller._chat_cancelled = lambda _token: False
         controller._validate_chat_context = lambda *_args: None
         controller._raise_chat_problem = lambda reason, _exc: self.fail(reason)
-        controller._chat_approval_granted = lambda *_args: False
+        controller.approval_grants = SimpleNamespace()
 
         with mock.patch.object(local_app.chat_turn_engine, "run_segment", side_effect=capture("local")):
             controller._run_chat_segment(
@@ -358,22 +339,16 @@ class SharedChatTurnEngineTest(unittest.TestCase):
                 (
                     assistant.id,
                     assistant.genesis,
-                    tuple((power.id, power.summary, power.input_schema, power.approval) for power in assistant.powers),
+                    tuple((power.id, power.summary, power.input_schema) for power in assistant.powers),
                 )
                 for assistant in context.assistants
             )
             return context.team_name, assistants, context.provider, context.model, context.api_key, prepared.files
 
         self.assertEqual(context_contract(hosted_prepared), context_contract(local_prepared))
-        self.assertEqual(hosted_requirements.groups(approvals=False), local_requirements.groups(approvals=False))
+        self.assertEqual(hosted_requirements.groups(), local_requirements.groups())
         self.assertTrue(hosted_paused)
         self.assertTrue(local_paused)
-        self.assertIsNone(hosted_strategy.pause_for_approval)
-        self.assertIsNotNone(local_strategy.pause_for_approval)
-        local_approval_requirements = chat_turn_engine.SegmentRequirements()
-        self.assertTrue(local_strategy.pause_for_approval((request,), local_approval_requirements))
-        self.assertEqual(local_approval_requirements.groups(approvals=True)[-1], ("approval-required",))
-
         self.assertEqual(
             hosted_validation_result,
             local_strategy.validate_power(assistant_id, "list-zones", request.input),

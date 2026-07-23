@@ -16,7 +16,6 @@ def interaction(request_type: str, *, options: list[str] | None = None) -> chat_
         "assistant",
         "collect",
         {},
-        "none",
     )
     return chat_orchestrator.HumanInteraction(
         request,

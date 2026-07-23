@@ -29,10 +29,12 @@ class ApprovalRequirement:
     assistant_id: str
     assistant_name: str
     power_id: str
-    power_summary: str
-    input_json: str
-    approval: str
     assistant_image: str
+    ordinal: int
+    title: str
+    summary: str
+    docs: str | None
+    runs: str
 
 
 @dataclass(frozen=True, slots=True)

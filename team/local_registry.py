@@ -10,7 +10,6 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 import assistant_manifest
 
@@ -34,7 +33,6 @@ class PowerSpec:
     summary: str
     input_schema: dict[str, object]
     output_schema: dict[str, object]
-    approval: Literal["none", "once", "each-run"]
     secrets: tuple[str, ...]
     accounts: tuple[str, ...] = ()
 
@@ -117,7 +115,6 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
                     summary=power_id.replace("-", " ").capitalize(),
                     input_schema=power["input_schema"],
                     output_schema=power["output_schema"],
-                    approval="none",
                     secrets=(),
                     accounts=tuple(power["accounts"]),
                 )

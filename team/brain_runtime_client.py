@@ -19,7 +19,6 @@ MAX_REPLY_CHARS = 64 * 1024
 MAX_POWER_REQUESTS = 64
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 POWER_ID_RE = re.compile(r"[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*\Z")
-APPROVALS = frozenset({"none", "once", "each-run"})
 
 
 class BrainRuntimeError(RuntimeError):
@@ -31,7 +30,6 @@ class RuntimePower:
     id: str
     summary: str
     input_schema: Mapping[str, Any]
-    approval: Literal["none", "once", "each-run"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +55,6 @@ class PowerRequest:
     assistant_id: str
     power: str
     input: Mapping[str, Any]
-    approval: Literal["none", "once", "each-run"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +118,6 @@ class BrainRuntimeClient:
                             "id": power.id,
                             "summary": power.summary,
                             "input_schema": dict(power.input_schema),
-                            "approval": power.approval,
                         }
                         for power in assistant.powers
                     ],
@@ -186,14 +182,12 @@ class BrainRuntimeClient:
                 "assistant_id",
                 "power",
                 "input",
-                "approval",
             }:
                 raise BrainRuntimeError("Brain runtime returned an invalid response")
             interrupt_id = raw["interrupt_id"]
             assistant_id = raw["assistant_id"]
             power = raw["power"]
             power_input = raw["input"]
-            approval = raw["approval"]
             if (
                 not isinstance(interrupt_id, str)
                 or SAFE_ID_RE.fullmatch(interrupt_id) is None
@@ -202,7 +196,6 @@ class BrainRuntimeClient:
                 or not isinstance(power, str)
                 or POWER_ID_RE.fullmatch(power) is None
                 or not isinstance(power_input, dict)
-                or approval not in APPROVALS
             ):
                 raise BrainRuntimeError("Brain runtime returned an invalid response")
             powers.append(
@@ -211,7 +204,6 @@ class BrainRuntimeClient:
                     assistant_id=assistant_id,
                     power=power,
                     input=power_input,
-                    approval=approval,
                 )
             )
         if status == "completed" and (not reply.strip() or powers):
