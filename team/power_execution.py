@@ -165,6 +165,40 @@ class RpcSuspension:
     payload: dict[str, object]
 
 
+class RpcSecretExposureError(ValueError):
+    """An Assistant returned a literal private value."""
+
+
+class RpcInvalidResultError(ValueError):
+    """An Assistant result failed its reviewed Power schema."""
+
+
+@dataclass(frozen=True, slots=True)
+class RpcInvocationResult:
+    value: object
+    suspended: bool
+
+
+def project_rpc_result(
+    raw_result: object,
+    secrets_by_id: Mapping[str, str],
+    accounts_by_id: Mapping[str, Mapping[str, object]],
+    answers: tuple[object, ...],
+    validate: Callable[[object], object],
+) -> RpcInvocationResult:
+    """Reject private echoes, retain suspensions, and validate one terminal Power result."""
+    private_values = protected_rpc_values(secrets_by_id, accounts_by_id, answers)
+    inspected = raw_result.payload if isinstance(raw_result, RpcSuspension) else raw_result
+    if contains_secret(inspected, private_values):
+        raise RpcSecretExposureError
+    if isinstance(raw_result, RpcSuspension):
+        return RpcInvocationResult(raw_result.payload, True)
+    try:
+        return RpcInvocationResult(validate(raw_result), False)
+    except ValueError as exc:
+        raise RpcInvalidResultError from exc
+
+
 def decode_rpc_response(raw: bytes) -> object:
     """Decode the closed result-or-suspend stdout protocol."""
     try:

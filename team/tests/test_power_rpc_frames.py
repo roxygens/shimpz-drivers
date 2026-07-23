@@ -127,6 +127,42 @@ class PowerRpcFrameTests(unittest.TestCase):
         with self.assertRaisesRegex(app.power_journal.PowerJournalConflictError, "account contract"):
             app.power_execution.account_generations(powers, {}, "lookup", account_metadata)
 
+    def test_rpc_result_projection_rejects_private_and_invalid_outputs(self) -> None:
+        projected = app.power_execution.project_rpc_result(
+            {"ok": True},
+            {"secret": "private"},
+            {},
+            (),
+            lambda value: value,
+        )
+        self.assertEqual(projected, app.power_execution.RpcInvocationResult({"ok": True}, False))
+
+        suspended = app.power_execution.project_rpc_result(
+            app.power_execution.RpcSuspension({"kind": "request"}),
+            {},
+            {},
+            (),
+            lambda _value: self.fail("suspension reached output validation"),
+        )
+        self.assertEqual(suspended, app.power_execution.RpcInvocationResult({"kind": "request"}, True))
+
+        with self.assertRaises(app.power_execution.RpcSecretExposureError):
+            app.power_execution.project_rpc_result(
+                {"echo": "private"},
+                {"secret": "private"},
+                {},
+                (),
+                lambda value: value,
+            )
+        with self.assertRaises(app.power_execution.RpcInvalidResultError):
+            app.power_execution.project_rpc_result(
+                {"invalid": True},
+                {},
+                {},
+                (),
+                lambda _value: (_ for _ in ()).throw(ValueError("invalid")),
+            )
+
     def test_malformed_frames_fail_closed_in_both_readers(self) -> None:
         oversized = struct.pack(">BxxxL", 1, max(app.MAX_ASSISTANT_RPC_OUTPUT_BYTES, local_app.MAX_RESPONSE_BYTES) + 2)
         cases = (

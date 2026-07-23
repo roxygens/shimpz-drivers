@@ -3492,9 +3492,15 @@ class LocalController:
                     detail=f"failed:{power}",
                 )
                 raise
-        private_values = power_execution.protected_rpc_values(secret_values, account_values, answers)
-        inspected_result = raw_result.payload if isinstance(raw_result, power_execution.RpcSuspension) else raw_result
-        if self._contains_secret(inspected_result, private_values):
+        try:
+            projected = power_execution.project_rpc_result(
+                raw_result,
+                secret_values,
+                account_values,
+                answers,
+                lambda value: validate_power_output(assistant_id, power, value),
+            )
+        except power_execution.RpcSecretExposureError:
             local_audit.record(
                 "assistant-power",
                 result="error",
@@ -3506,19 +3512,8 @@ class LocalController:
                 HTTPStatus.BAD_GATEWAY,
                 "the Assistant returned an unsafe result",
                 code="assistant-secret-exposure",
-            )
-        if isinstance(raw_result, power_execution.RpcSuspension):
-            local_audit.record(
-                "assistant-power",
-                result="ok",
-                team_id=team_id,
-                assistant=assistant_id,
-                detail=f"suspended:{power}",
-            )
-            return {"assistant": assistant_id, "power": power, "suspend": raw_result.payload}
-        try:
-            result = validate_power_output(assistant_id, power, raw_result)
-        except ValueError as exc:
+            ) from None
+        except power_execution.RpcInvalidResultError as exc:
             local_audit.record(
                 "assistant-power",
                 result="error",
@@ -3531,6 +3526,15 @@ class LocalController:
                 "the Assistant returned an invalid result",
                 code="invalid-power-output",
             ) from exc
+        if projected.suspended:
+            local_audit.record(
+                "assistant-power",
+                result="ok",
+                team_id=team_id,
+                assistant=assistant_id,
+                detail=f"suspended:{power}",
+            )
+            return {"assistant": assistant_id, "power": power, "suspend": projected.value}
         local_audit.record(
             "assistant-power",
             result="ok",
@@ -3538,7 +3542,7 @@ class LocalController:
             assistant=assistant_id,
             detail=f"completed:{power}",
         )
-        return {"assistant": assistant_id, "power": power, "result": result}
+        return {"assistant": assistant_id, "power": power, "result": projected.value}
 
     def _purge_power_generation(self, generation: str) -> None:
         try:

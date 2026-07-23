@@ -2297,9 +2297,15 @@ def _invoke_assistant_power(
             status=int(exc.status),
         )
         raise
-    private_values = power_execution.protected_rpc_values(secret_values, account_values, answers)
-    inspected_result = raw_result.payload if isinstance(raw_result, power_execution.RpcSuspension) else raw_result
-    if _contains_secret(inspected_result, private_values):
+    try:
+        projected = power_execution.project_rpc_result(
+            raw_result,
+            secret_values,
+            account_values,
+            answers,
+            lambda value: marketplace.validate_power_output(assistant_id, power, value),
+        )
+    except power_execution.RpcSecretExposureError:
         audit.log(
             "assistant_power",
             team_id,
@@ -2308,20 +2314,8 @@ def _invoke_assistant_power(
             power=power,
             reason="secret-exposure",
         )
-        raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Power exposed protected data")
-    if isinstance(raw_result, power_execution.RpcSuspension):
-        audit.log(
-            "assistant_power",
-            team_id,
-            result="ok",
-            phase="suspended",
-            assistant=assistant_id,
-            power=power,
-        )
-        return {"assistant": assistant_id, "power": power, "suspend": raw_result.payload}
-    try:
-        result = marketplace.validate_power_output(assistant_id, power, raw_result)
-    except ValueError as exc:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Power exposed protected data") from None
+    except power_execution.RpcInvalidResultError as exc:
         audit.log(
             "assistant_power",
             team_id,
@@ -2331,6 +2325,16 @@ def _invoke_assistant_power(
             reason="invalid-output",
         )
         raise ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Power returned an invalid result") from exc
+    if projected.suspended:
+        audit.log(
+            "assistant_power",
+            team_id,
+            result="ok",
+            phase="suspended",
+            assistant=assistant_id,
+            power=power,
+        )
+        return {"assistant": assistant_id, "power": power, "suspend": projected.value}
     audit.log(
         "assistant_power",
         team_id,
@@ -2339,7 +2343,7 @@ def _invoke_assistant_power(
         assistant=assistant_id,
         power=power,
     )
-    return {"assistant": assistant_id, "power": power, "result": result}
+    return {"assistant": assistant_id, "power": power, "result": projected.value}
 
 
 def _validate_assistant_power_input(bindings, assistant_id: str, power: str, power_input) -> object:
