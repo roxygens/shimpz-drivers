@@ -4048,21 +4048,7 @@ class Handler(BaseHTTPRequestHandler):
         kind, account_id = principal
         operation = route.operation
 
-        if operation == "team-list":
-            self._send_json(HTTPStatus.OK, _list(owner=account_id if kind == "account" else None))
-            return
-
-        if operation == "assistant-account-complete":
-            result = _complete_oauth_account(self._read_body(), principal)
-            audit.log(
-                "assistant_account_complete",
-                result["team_id"],
-                result="ok",
-                assistant=result["assistant_id"],
-                account=result["account_id"],
-                provider=result["provider"],
-            )
-            self._send_json(HTTPStatus.OK, result, no_store=True)
+        if Handler._route_global_operation(self, operation, principal, kind, account_id):
             return
 
         team_id = validate.validate_team_id(route.params["team_id"])
@@ -4103,6 +4089,31 @@ class Handler(BaseHTTPRequestHandler):
             self._route_files(method, parts, team_id, lease, principal)
         else:
             self._route_team_runtime(method, operation.removeprefix("team-"), team_id, lease, query)
+
+    def _route_global_operation(
+        self,
+        operation: str,
+        principal: tuple[str, str | None],
+        kind: str,
+        account_id: str | None,
+    ) -> bool:
+        if operation == "team-list":
+            self._send_json(HTTPStatus.OK, _list(owner=account_id if kind == "account" else None))
+            return True
+
+        if operation == "assistant-account-complete":
+            result = _complete_oauth_account(self._read_body(), principal)
+            audit.log(
+                "assistant_account_complete",
+                result["team_id"],
+                result="ok",
+                assistant=result["assistant_id"],
+                account=result["account_id"],
+                provider=result["provider"],
+            )
+            self._send_json(HTTPStatus.OK, result, no_store=True)
+            return True
+        return False
 
     def _route_assistant_accounts(
         self,
@@ -4315,101 +4326,146 @@ class Handler(BaseHTTPRequestHandler):
         `chat/stream` is the live NDJSON turn; the rest are the shimpz-ask surface + the Stop control.
         """
         sub2 = parts[4] if len(parts) > 4 else ""
-        if method == "POST" and sub2 in {"", "stream"}:
-            body = self._read_body()
-            if not isinstance(body, dict) or set(body) != {"message", "files", "assistant_ids"}:
-                raise ApiError(
-                    HTTPStatus.UNPROCESSABLE_ENTITY,
-                    "Team chat requires message, files, and assistant_ids",
+        if sub2 in {"", "stream"}:
+            Handler._route_chat_turn(self, method, sub2, team_id, principal, lease)
+            return
+        if sub2 == "accounts" and len(parts) == 5:
+            Handler._route_chat_accounts(self, method, team_id, principal, lease)
+            return
+        if sub2 == "secrets" and len(parts) == 5:
+            Handler._route_chat_secrets(self, method, team_id, principal, lease)
+            return
+        if sub2 in {"input", "approval"} and len(parts) == 5:
+            self._route_human_chat(method, sub2, team_id, principal, lease)
+            return
+        if sub2 == "stop":
+            Handler._route_chat_stop(self, method, team_id, principal, lease)
+            return
+        raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
+
+    def _route_chat_turn(
+        self,
+        method: str,
+        mode: str,
+        team_id: str,
+        principal: tuple[str, str | None],
+        lease: _AuthorizationLease,
+    ) -> None:
+        if method != "POST":
+            raise ApiError(HTTPStatus.NOT_FOUND, f"no such chat operation: {method}")
+        body = self._read_body()
+        if not isinstance(body, dict) or set(body) != {"message", "files", "assistant_ids"}:
+            raise ApiError(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                "Team chat requires message, files, and assistant_ids",
+            )
+        message = validate.validate_chat_message(body["message"])
+        file_ids = body["files"]
+        assistant_ids = _chat_assistant_ids(body["assistant_ids"])
+        if mode == "stream":
+            _enforce_rate("stream", principal)
+            pending = _pending_hosted_chat(team_id)
+            if pending is not None:
+                self._send_json(
+                    HTTPStatus.PRECONDITION_REQUIRED,
+                    pending,
+                    no_store=True,
                 )
-            message = validate.validate_chat_message(body["message"])
-            file_ids = body["files"]
-            assistant_ids = _chat_assistant_ids(body["assistant_ids"])
-            if sub2 == "stream":
-                _enforce_rate("stream", principal)
-                pending = _pending_hosted_chat(team_id)
-                if pending is not None:
-                    self._send_json(
-                        HTTPStatus.PRECONDITION_REQUIRED,
-                        pending,
-                        no_store=True,
-                    )
-                    return
-                self._stream_chat(team_id, message, file_ids, assistant_ids, lease)
                 return
+            self._stream_chat(team_id, message, file_ids, assistant_ids, lease)
+            return
+        _enforce_rate("chat", principal)
+        result = _chat(team_id, message, file_ids, assistant_ids, lease)
+        audit.log(
+            "chat",
+            team_id,
+            result="ok",
+            chars_in=len(message),
+            chars_out=len(str(result.get("reply", ""))),
+            paused=result.get("status") in CHAT_PAUSED_STATUSES,
+        )
+        paused = result.get("status") in CHAT_PAUSED_STATUSES
+        self._send_json(
+            HTTPStatus.PRECONDITION_REQUIRED if paused else HTTPStatus.OK,
+            result,
+            no_store=paused,
+        )
+
+    def _route_chat_accounts(
+        self,
+        method: str,
+        team_id: str,
+        principal: tuple[str, str | None],
+        lease: _AuthorizationLease,
+    ) -> None:
+        if method == "GET":
+            pending = _assistant_account_challenges.current(team_id)
+            self._send_json(
+                HTTPStatus.OK,
+                (
+                    _hosted_account_challenge_payload(pending)
+                    if pending is not None
+                    else {"team_id": team_id, "status": "none"}
+                ),
+                no_store=True,
+            )
+            return
+        if method == "POST":
             _enforce_rate("chat", principal)
-            result = _chat(team_id, message, file_ids, assistant_ids, lease)
-            audit.log(
-                "chat",
+            body = self._read_body()
+            if not isinstance(body, dict) or set(body) != {"challenge_id"}:
+                raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "account continuation is invalid")
+            result = _resume_chat_accounts(team_id, body["challenge_id"], lease)
+            paused = result.get("status") in CHAT_PAUSED_STATUSES
+            self._send_json(
+                HTTPStatus.PRECONDITION_REQUIRED if paused else HTTPStatus.OK,
+                result,
+                no_store=True,
+            )
+            return
+        raise ApiError(HTTPStatus.NOT_FOUND, f"no such chat account operation: {method}")
+
+    def _route_chat_secrets(
+        self,
+        method: str,
+        team_id: str,
+        principal: tuple[str, str | None],
+        lease: _AuthorizationLease,
+    ) -> None:
+        if method == "GET":
+            self._send_json(
+                HTTPStatus.OK,
+                _pending_chat_secrets(team_id, lease),
+                no_store=True,
+            )
+            return
+        if method == "POST":
+            _enforce_rate("chat", principal)
+            result = _submit_chat_secrets(
                 team_id,
-                result="ok",
-                chars_in=len(message),
-                chars_out=len(str(result.get("reply", ""))),
-                paused=result.get("status") in CHAT_PAUSED_STATUSES,
+                self._read_body(max_bytes=MAX_ASSISTANT_SECRET_BODY_BYTES),
+                lease,
             )
             paused = result.get("status") in CHAT_PAUSED_STATUSES
             self._send_json(
                 HTTPStatus.PRECONDITION_REQUIRED if paused else HTTPStatus.OK,
                 result,
-                no_store=paused,
+                no_store=True,
             )
             return
-        if sub2 == "accounts" and len(parts) == 5:
-            if method == "GET":
-                pending = _assistant_account_challenges.current(team_id)
-                self._send_json(
-                    HTTPStatus.OK,
-                    (
-                        _hosted_account_challenge_payload(pending)
-                        if pending is not None
-                        else {"team_id": team_id, "status": "none"}
-                    ),
-                    no_store=True,
-                )
-                return
-            if method == "POST":
-                _enforce_rate("chat", principal)
-                body = self._read_body()
-                if not isinstance(body, dict) or set(body) != {"challenge_id"}:
-                    raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "account continuation is invalid")
-                result = _resume_chat_accounts(team_id, body["challenge_id"], lease)
-                paused = result.get("status") in CHAT_PAUSED_STATUSES
-                self._send_json(
-                    HTTPStatus.PRECONDITION_REQUIRED if paused else HTTPStatus.OK,
-                    result,
-                    no_store=True,
-                )
-                return
-        if sub2 == "secrets" and len(parts) == 5:
-            if method == "GET":
-                self._send_json(
-                    HTTPStatus.OK,
-                    _pending_chat_secrets(team_id, lease),
-                    no_store=True,
-                )
-                return
-            if method == "POST":
-                _enforce_rate("chat", principal)
-                result = _submit_chat_secrets(
-                    team_id,
-                    self._read_body(max_bytes=MAX_ASSISTANT_SECRET_BODY_BYTES),
-                    lease,
-                )
-                paused = result.get("status") in CHAT_PAUSED_STATUSES
-                self._send_json(
-                    HTTPStatus.PRECONDITION_REQUIRED if paused else HTTPStatus.OK,
-                    result,
-                    no_store=True,
-                )
-                return
-        if sub2 in {"input", "approval"} and len(parts) == 5:
-            self._route_human_chat(method, sub2, team_id, principal, lease)
-            return
-        if method == "POST" and sub2 == "stop":
-            _enforce_rate("stop", principal)
-            self._send_json(HTTPStatus.OK, _stop_chat(team_id, lease))
-            return
-        raise ApiError(HTTPStatus.NOT_FOUND, f"no such operation: {method} /{'/'.join(parts)}")
+        raise ApiError(HTTPStatus.NOT_FOUND, f"no such chat secret operation: {method}")
+
+    def _route_chat_stop(
+        self,
+        method: str,
+        team_id: str,
+        principal: tuple[str, str | None],
+        lease: _AuthorizationLease,
+    ) -> None:
+        if method != "POST":
+            raise ApiError(HTTPStatus.NOT_FOUND, f"no such chat stop operation: {method}")
+        _enforce_rate("stop", principal)
+        self._send_json(HTTPStatus.OK, _stop_chat(team_id, lease))
 
     def _route_apps(
         self,
