@@ -20,7 +20,7 @@ WORKDIR /app
 COPY --from=dependencies /opt/venv /opt/venv
 
 COPY local_app.py local_audit.py local_registry.py local_token_store.py local_healthcheck.py team_storage.py assistant_genesis.py assistant_manifest.py \
-    assistant_help.py cloudflare_assistant_contract.py assistant_secret_store.py assistant_secret_challenges.py assistant_secret_flow.py \
+    assistant_help.py assistant_catalog.json assistant_secret_store.py assistant_secret_challenges.py assistant_secret_flow.py \
     assistant_account_challenges.py assistant_account_flow.py oauth_account_store.py oauth_account_service.py \
     oauth_broker_client.py oauth_http_client.py oauth_pkce_challenges.py oauth_providers.py \
     assistant_approval_challenges.py assistant_approval_flow.py assistant_approval_grants.py \

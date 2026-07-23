@@ -1,0 +1,309 @@
+{
+  "assistants": {
+    "shimpz-cloudflare": {
+      "accounts": {
+        "cloudflare": {
+          "scopes": [
+            "dns.read",
+            "offline_access",
+            "zone.read"
+          ]
+        }
+      },
+      "allowed_hosts": [
+        "api.cloudflare.com"
+      ],
+      "contract": {
+        "powers": [
+          {
+            "accounts": [
+              "cloudflare"
+            ],
+            "id": "list-dns-records",
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "page": {
+                  "maximum": 100000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "per_page": {
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "zone_id": {
+                  "pattern": "^[0-9a-f]{32}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "zone_id",
+                "page",
+                "per_page"
+              ],
+              "type": "object"
+            },
+            "method": "POST",
+            "output_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "pagination": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "count": {
+                      "maximum": 100,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "page": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "per_page": {
+                      "maximum": 100,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "total_count": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "total_pages": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "page",
+                    "per_page",
+                    "count",
+                    "total_count",
+                    "total_pages"
+                  ],
+                  "type": "object"
+                },
+                "records": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "content": {
+                        "maxLength": 65535,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "id": {
+                        "pattern": "^[0-9a-f]{32}$",
+                        "type": "string"
+                      },
+                      "name": {
+                        "maxLength": 255,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "proxiable": {
+                        "type": "boolean"
+                      },
+                      "proxied": {
+                        "type": "boolean"
+                      },
+                      "ttl": {
+                        "maximum": 2147483647,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "type": {
+                        "enum": [
+                          "A",
+                          "AAAA",
+                          "CAA",
+                          "CERT",
+                          "CNAME",
+                          "DNSKEY",
+                          "DS",
+                          "HTTPS",
+                          "LOC",
+                          "MX",
+                          "NAPTR",
+                          "NS",
+                          "OPENPGPKEY",
+                          "PTR",
+                          "SMIMEA",
+                          "SRV",
+                          "SSHFP",
+                          "SVCB",
+                          "TLSA",
+                          "TXT",
+                          "URI"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "type",
+                      "name",
+                      "content",
+                      "ttl",
+                      "proxied",
+                      "proxiable"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "records",
+                "pagination"
+              ],
+              "type": "object"
+            },
+            "path": "/v1/powers/list-dns-records"
+          },
+          {
+            "accounts": [
+              "cloudflare"
+            ],
+            "id": "list-zones",
+            "input_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "page": {
+                  "maximum": 100000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "per_page": {
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "page",
+                "per_page"
+              ],
+              "type": "object"
+            },
+            "method": "POST",
+            "output_schema": {
+              "additionalProperties": false,
+              "properties": {
+                "pagination": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "count": {
+                      "maximum": 100,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "page": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "per_page": {
+                      "maximum": 100,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "total_count": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "total_pages": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "page",
+                    "per_page",
+                    "count",
+                    "total_count",
+                    "total_pages"
+                  ],
+                  "type": "object"
+                },
+                "zones": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "account": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "id": {
+                            "pattern": "^[0-9a-f]{32}$",
+                            "type": "string"
+                          },
+                          "name": {
+                            "maxLength": 160,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name"
+                        ],
+                        "type": "object"
+                      },
+                      "id": {
+                        "pattern": "^[0-9a-f]{32}$",
+                        "type": "string"
+                      },
+                      "name": {
+                        "maxLength": 255,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "paused": {
+                        "type": "boolean"
+                      },
+                      "status": {
+                        "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+                        "type": "string"
+                      },
+                      "type": {
+                        "enum": [
+                          "full",
+                          "internal",
+                          "partial",
+                          "secondary"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name",
+                      "status",
+                      "type",
+                      "paused",
+                      "account"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 100,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "zones",
+                "pagination"
+              ],
+              "type": "object"
+            },
+            "path": "/v1/powers/list-zones"
+          }
+        ],
+        "version": 1
+      },
+      "health_path": "/healthz",
+      "name": "Shimpz Cloudflare",
+      "rpc_command": "/usr/local/bin/shimpz-assistant-rpc",
+      "summary": "List Cloudflare zones and inspect their DNS records through OAuth."
+    }
+  },
+  "version": 1
+}

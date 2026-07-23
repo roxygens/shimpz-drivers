@@ -185,6 +185,7 @@ class LocalContractTests(unittest.TestCase):
         controller._cancelled_chat_tokens = set()
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
         controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
+        controller._assistant_machine_contract_cache = local_app.assistant_manifest.MachineContractCache()
         controller._admit_assistant_allowed_hosts = lambda _container, spec: tuple(sorted(spec.allowed_hosts))
         container = SimpleNamespace(id="assistant-container", status="running", reload=lambda: None)
         network = SimpleNamespace(id="a" * 64, name="team-network")
@@ -224,6 +225,7 @@ class LocalContractTests(unittest.TestCase):
         controller._blocked_power_workloads = set()
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
         controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
+        controller._assistant_machine_contract_cache = local_app.assistant_manifest.MachineContractCache()
         secret_directory = tempfile.TemporaryDirectory()
         self.addCleanup(secret_directory.cleanup)
         controller.assistant_secrets = assistant_secret_store.AssistantSecretStore(
@@ -2375,6 +2377,7 @@ class LocalContractTests(unittest.TestCase):
         controller.cpuset_cpus = "0"
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
         controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
+        controller._assistant_machine_contract_cache = local_app.assistant_manifest.MachineContractCache()
         controller._blocked_power_workloads = set()
         spec = SimpleNamespace(
             assistant_id="shimpz-cloudflare",
@@ -2419,6 +2422,9 @@ class LocalContractTests(unittest.TestCase):
             return reviewed
 
         controller._assistant_allowed_hosts_cache = SimpleNamespace(get=admit)
+        controller._assistant_machine_contract_cache = SimpleNamespace(
+            get=lambda _container, _accounts, reviewed: reviewed
+        )
         spec = self._registry(CURRENT_ASSISTANT_IMAGE)["shimpz-cloudflare"]
 
         allowed_hosts = controller._admit_assistant_allowed_hosts(SimpleNamespace(id="generation"), spec)
@@ -2469,6 +2475,7 @@ class LocalContractTests(unittest.TestCase):
         controller.cpuset_cpus = "0"
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
         controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
+        controller._assistant_machine_contract_cache = local_app.assistant_manifest.MachineContractCache()
         spec = SimpleNamespace(
             assistant_id="shimpz-cloudflare",
             image=CURRENT_ASSISTANT_IMAGE,
@@ -2510,6 +2517,7 @@ class LocalContractTests(unittest.TestCase):
         controller.cpuset_cpus = "0"
         controller._assistant_genesis_cache = local_app.assistant_genesis.GenesisCache()
         controller._assistant_allowed_hosts_cache = local_app.assistant_manifest.ManifestContractCache()
+        controller._assistant_machine_contract_cache = local_app.assistant_manifest.MachineContractCache()
         controller._blocked_power_workloads = set()
         spec = SimpleNamespace(
             assistant_id="shimpz-cloudflare",

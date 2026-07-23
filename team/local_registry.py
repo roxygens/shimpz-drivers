@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-import cloudflare_assistant_contract
+import assistant_manifest
 
 REGISTRY_PATH = Path("/etc/shimpz/local-assistants.json")
 _DIGEST_REF = re.compile(
@@ -20,6 +20,7 @@ _DIGEST_REF = re.compile(
     r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}"
 )
 _ZERO_DIGEST = "0" * 64
+_REVIEWED_ASSISTANTS = assistant_manifest.load_reviewed_catalog()
 
 
 class RegistryError(RuntimeError):
@@ -62,6 +63,7 @@ class AssistantSpec:
     secrets: dict[str, SecretSpec]
     allowed_hosts: tuple[str, ...]
     accounts: dict[str, AccountSpec] = field(default_factory=dict)
+    machine_contract: dict[str, object] = field(default_factory=dict)
 
 
 def is_digest_ref(value: object) -> bool:
@@ -90,8 +92,7 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RegistryError("the baked Assistant registry is unreadable") from exc
-    contracts = (cloudflare_assistant_contract,)
-    expected_ids = {contract.ASSISTANT_ID for contract in contracts}
+    expected_ids = set(_REVIEWED_ASSISTANTS)
     if (
         not isinstance(raw, dict)
         or set(raw) != {"schema", "images"}
@@ -101,28 +102,50 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
     ):
         raise RegistryError("the baked Assistant registry has an unsupported shape")
     registry: dict[str, AssistantSpec] = {}
-    for contract in contracts:
+    for assistant_id, contract in _REVIEWED_ASSISTANTS.items():
         spec = AssistantSpec(
-            assistant_id=contract.ASSISTANT_ID,
-            name=contract.ASSISTANT_NAME,
-            summary=contract.ASSISTANT_SUMMARY,
-            image=_digest_ref(raw["images"][contract.ASSISTANT_ID]),
-            rpc_command=contract.ASSISTANT_RPC_COMMAND,
-            health_path=getattr(contract, "ASSISTANT_HEALTH_PATH", "/healthz"),
-            powers={power_id: PowerSpec(**power) for power_id, power in contract.power_contracts().items()},
-            secrets={secret_id: SecretSpec(**secret) for secret_id, secret in contract.secret_contracts().items()},
-            allowed_hosts=contract.ASSISTANT_ALLOWED_HOSTS,
-            accounts={
-                account_id: AccountSpec(**account) for account_id, account in contract.account_contracts().items()
+            assistant_id=assistant_id,
+            name=contract.name,
+            summary=contract.summary,
+            image=_digest_ref(raw["images"][assistant_id]),
+            rpc_command=contract.rpc_command,
+            health_path=contract.health_path,
+            powers={
+                power_id: PowerSpec(
+                    method=power["method"],
+                    path=power["path"],
+                    summary=power_id.replace("-", " ").capitalize(),
+                    input_schema=power["input_schema"],
+                    output_schema=power["output_schema"],
+                    approval="none",
+                    secrets=(),
+                    accounts=tuple(power["accounts"]),
+                )
+                for power_id, power in contract.powers.items()
             },
+            secrets={},
+            allowed_hosts=contract.allowed_hosts,
+            accounts={
+                account.id: AccountSpec(provider=account.provider, scopes=account.scopes)
+                for account in contract.accounts
+            },
+            machine_contract=contract.machine_contract,
         )
         registry[spec.assistant_id] = spec
     return registry
 
 
 def validate_power_input(assistant_id: str, power: str, payload: object) -> dict[str, object]:
-    return cloudflare_assistant_contract.validate_power_input(assistant_id, power, payload)
+    try:
+        schema = _REVIEWED_ASSISTANTS[assistant_id].powers[power]["input_schema"]
+    except KeyError as exc:
+        raise ValueError("the Power has no declared input contract") from exc
+    return assistant_manifest.validate_schema_payload(schema, payload)
 
 
 def validate_power_output(assistant_id: str, power: str, payload: object) -> dict[str, object]:
-    return cloudflare_assistant_contract.validate_power_output(assistant_id, power, payload)
+    try:
+        schema = _REVIEWED_ASSISTANTS[assistant_id].powers[power]["output_schema"]
+    except KeyError as exc:
+        raise ValueError("the Power has no declared output contract") from exc
+    return assistant_manifest.validate_schema_payload(schema, payload)

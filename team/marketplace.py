@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import cloudflare_assistant_contract
+import assistant_manifest
 import network_policy
 
 # Also bounds derived names: the per-app DB project "team_<sha10>_<app>" stays within pg-driver's
@@ -25,6 +25,8 @@ RESERVED_APP_IDS = network_policy.RESERVED_SERVICE_ALIASES
 SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE = (
     "ghcr.io/theshimpz/shimpz-space@sha256:31af82a29962ae1ae298fa87417a433286a0aa1bf3da0862dc7127d4646efac5"
 )
+_REVIEWED_ASSISTANTS = assistant_manifest.load_reviewed_catalog()
+_CLOUDFLARE = _REVIEWED_ASSISTANTS["shimpz-cloudflare"]
 
 
 class MarketplaceError(Exception):
@@ -61,6 +63,7 @@ class AssistantContract:
     powers: dict[str, PowerSpec]
     secrets: dict[str, SecretSpec]
     accounts: dict[str, AccountSpec] = field(default_factory=dict)
+    machine_contract: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -89,31 +92,38 @@ APPS: dict[str, AppSpec] = {
     ),
     # First closed Genesis/Powers adapter for the hosted Team controller. The browser supplies only
     # this ID; the controller owns the digest, runtime envelope and identity labels below.
-    cloudflare_assistant_contract.ASSISTANT_ID: AppSpec(
+    _CLOUDFLARE.assistant_id: AppSpec(
         image=SHIMPZ_CLOUDFLARE_ASSISTANT_IMAGE,
         port=8080,
-        health_path=cloudflare_assistant_contract.ASSISTANT_HEALTH_PATH,
+        health_path=_CLOUDFLARE.health_path,
         db=False,
-        allowed_hosts=cloudflare_assistant_contract.ASSISTANT_ALLOWED_HOSTS,
+        allowed_hosts=_CLOUDFLARE.allowed_hosts,
         first_party=True,
         required_image_labels=(
-            ("org.shimpz.assistant.id", cloudflare_assistant_contract.ASSISTANT_ID),
+            ("org.shimpz.assistant.id", _CLOUDFLARE.assistant_id),
             ("org.shimpz.assistant.api", "1"),
         ),
         assistant=AssistantContract(
-            rpc_command=cloudflare_assistant_contract.ASSISTANT_RPC_COMMAND,
+            rpc_command=_CLOUDFLARE.rpc_command,
             powers={
-                power_id: PowerSpec(**contract)
-                for power_id, contract in cloudflare_assistant_contract.power_contracts().items()
+                power_id: PowerSpec(
+                    method=power["method"],
+                    path=power["path"],
+                    summary=power_id.replace("-", " ").capitalize(),
+                    input_schema=power["input_schema"],
+                    output_schema=power["output_schema"],
+                    approval="none",
+                    secrets=(),
+                    accounts=tuple(power["accounts"]),
+                )
+                for power_id, power in _CLOUDFLARE.powers.items()
             },
-            secrets={
-                secret_id: SecretSpec(**contract)
-                for secret_id, contract in cloudflare_assistant_contract.secret_contracts().items()
-            },
+            secrets={},
             accounts={
-                account_id: AccountSpec(**contract)
-                for account_id, contract in cloudflare_assistant_contract.account_contracts().items()
+                account.id: AccountSpec(provider=account.provider, scopes=account.scopes)
+                for account in _CLOUDFLARE.accounts
             },
+            machine_contract=_CLOUDFLARE.machine_contract,
         ),
     ),
 }
@@ -149,8 +159,16 @@ def resolve(app_id: object) -> tuple[str, AppSpec]:
 
 
 def validate_power_input(assistant_id: str, power: str, payload: object) -> dict[str, object]:
-    return cloudflare_assistant_contract.validate_power_input(assistant_id, power, payload)
+    try:
+        schema = _REVIEWED_ASSISTANTS[assistant_id].powers[power]["input_schema"]
+    except KeyError as exc:
+        raise ValueError("the Power has no declared input contract") from exc
+    return assistant_manifest.validate_schema_payload(schema, payload)
 
 
 def validate_power_output(assistant_id: str, power: str, payload: object) -> dict[str, object]:
-    return cloudflare_assistant_contract.validate_power_output(assistant_id, power, payload)
+    try:
+        schema = _REVIEWED_ASSISTANTS[assistant_id].powers[power]["output_schema"]
+    except KeyError as exc:
+        raise ValueError("the Power has no declared output contract") from exc
+    return assistant_manifest.validate_schema_payload(schema, payload)

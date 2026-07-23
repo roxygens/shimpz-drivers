@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import io
+import json
 import tarfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 import assistant_manifest
-import cloudflare_assistant_contract
 
 FIXTURE_MANIFEST = Path(__file__).resolve().parent / "fixtures" / "reference-assistant" / "shimpz.toml"
 
@@ -67,15 +66,30 @@ class Container:
         )
 
 
+class ContractContainer:
+    def __init__(self, container_id: str, content: bytes) -> None:
+        self.id = container_id
+        self.content = content
+        self.reads = 0
+
+    def get_archive(self, path: str):
+        self.reads += 1
+        if path != assistant_manifest.CONTRACT_PATH:
+            raise AssertionError(f"unexpected archive path: {path}")
+        payload = archive(self.content, name="shimpz.contract.json")
+        return (
+            iter((payload,)),
+            {"name": "shimpz.contract.json", "size": len(self.content), "mode": 0o444},
+        )
+
+
 class AssistantManifestTests(unittest.TestCase):
     def test_reference_fixture_matches_the_reviewed_cloudflare_security_intent(self) -> None:
         declared = assistant_manifest.parse_manifest_contract(FIXTURE_MANIFEST.read_bytes())
+        reviewed_assistant = assistant_manifest.load_reviewed_catalog()["shimpz-cloudflare"]
         reviewed = assistant_manifest.reviewed_manifest_contract(
-            allowed_hosts=cloudflare_assistant_contract.ASSISTANT_ALLOWED_HOSTS,
-            accounts={
-                account_id: SimpleNamespace(**metadata)
-                for account_id, metadata in cloudflare_assistant_contract.account_contracts().items()
-            },
+            allowed_hosts=reviewed_assistant.allowed_hosts,
+            accounts={account.id: account for account in reviewed_assistant.accounts},
         )
 
         self.assertEqual(declared, reviewed)
@@ -232,6 +246,54 @@ class AssistantManifestTests(unittest.TestCase):
         for reviewed in drifted:
             with self.subTest(reviewed=reviewed), self.assertRaises(assistant_manifest.ManifestError):
                 cache.get(container, reviewed)
+
+    def test_machine_contract_loader_accepts_reviewed_artifact_and_rejects_foreign_accounts(self) -> None:
+        reviewed = assistant_manifest.load_reviewed_catalog()["shimpz-cloudflare"]
+        raw = json.dumps(reviewed.machine_contract, separators=(",", ":")).encode()
+
+        self.assertEqual(
+            assistant_manifest.parse_machine_contract(raw, reviewed.accounts),
+            reviewed.machine_contract,
+        )
+
+        foreign = json.loads(raw)
+        foreign["powers"][0]["accounts"] = ["github"]
+        with self.assertRaises(assistant_manifest.ManifestError):
+            assistant_manifest.parse_machine_contract(json.dumps(foreign).encode(), reviewed.accounts)
+
+    def test_machine_contract_loader_rejects_malformed_schema_and_oversized_artifact(self) -> None:
+        reviewed = assistant_manifest.load_reviewed_catalog()["shimpz-cloudflare"]
+        malformed = json.loads(json.dumps(reviewed.machine_contract))
+        malformed["powers"][0]["input_schema"] = {"type": "not-a-json-schema-type"}
+
+        for raw in (
+            json.dumps(malformed).encode(),
+            b'{"version":1,"version":1,"powers":[]}',
+            b"x" * (assistant_manifest.MAX_CONTRACT_BYTES + 1),
+        ):
+            with self.subTest(size=len(raw)), self.assertRaises(assistant_manifest.ManifestError):
+                assistant_manifest.parse_machine_contract(raw, reviewed.accounts)
+
+    def test_machine_contract_cache_reads_once_and_requires_exact_review(self) -> None:
+        reviewed = assistant_manifest.load_reviewed_catalog()["shimpz-cloudflare"]
+        raw = json.dumps(reviewed.machine_contract, separators=(",", ":")).encode()
+        container = ContractContainer("machine-generation", raw)
+        cache = assistant_manifest.MachineContractCache()
+
+        self.assertEqual(
+            cache.get(container, reviewed.accounts, reviewed.machine_contract),
+            reviewed.machine_contract,
+        )
+        self.assertEqual(
+            cache.get(container, reviewed.accounts, reviewed.machine_contract),
+            reviewed.machine_contract,
+        )
+        self.assertEqual(container.reads, 1)
+
+        drifted = json.loads(raw)
+        drifted["powers"][0]["path"] = "/v1/powers/other"
+        with self.assertRaises(assistant_manifest.ManifestError):
+            cache.get(container, reviewed.accounts, drifted)
 
 
 if __name__ == "__main__":

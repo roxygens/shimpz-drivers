@@ -405,6 +405,7 @@ class LocalController:
         )
         self._assistant_genesis_cache = assistant_genesis.GenesisCache()
         self._assistant_allowed_hosts_cache = assistant_manifest.ManifestContractCache()
+        self._assistant_machine_contract_cache = assistant_manifest.MachineContractCache()
         self._blocked_power_workloads: set[str] = set()
         self._locks = tuple(threading.RLock() for _ in range(64))
         self._active_chat_guard = threading.Lock()
@@ -1036,13 +1037,16 @@ class LocalController:
                 allowed_hosts=spec.allowed_hosts,
                 accounts=spec.accounts,
             )
-            return self._assistant_allowed_hosts_cache.get(container, reviewed).allowed_hosts
+            declared = self._assistant_allowed_hosts_cache.get(container, reviewed)
+            self._assistant_machine_contract_cache.get(container, declared.accounts, spec.machine_contract)
         except assistant_manifest.ManifestError as exc:
             raise ApiProblem(
                 HTTPStatus.CONFLICT,
                 "installed Assistant manifest failed its reviewed contract",
                 code="assistant-manifest-invalid",
             ) from exc
+        else:
+            return declared.allowed_hosts
 
     def _active_chat_assistants(self, team_id: str, network_name: str) -> tuple[_ActiveAssistant, ...]:
         try:
@@ -2888,6 +2892,7 @@ class LocalController:
         if container is not None:
             self._assistant_genesis_cache.discard(container.id)
             self._assistant_allowed_hosts_cache.discard(container.id)
+            self._assistant_machine_contract_cache.discard(container.id)
             try:
                 container.remove(force=True)
             except NotFound:
@@ -3002,6 +3007,7 @@ class LocalController:
         try:
             self._assistant_genesis_cache.discard(existing.id)
             self._assistant_allowed_hosts_cache.discard(existing.id)
+            self._assistant_machine_contract_cache.discard(existing.id)
             existing.remove(force=True)
         except DockerException as exc:
             raise ApiProblem(
@@ -3027,6 +3033,7 @@ class LocalController:
         try:
             self._assistant_genesis_cache.discard(existing.id)
             self._assistant_allowed_hosts_cache.discard(existing.id)
+            self._assistant_machine_contract_cache.discard(existing.id)
             existing.remove(force=True)
         except DockerException as exc:
             raise ApiProblem(
@@ -3119,6 +3126,7 @@ class LocalController:
             self._blocked_power_workloads.discard(container.id)
             self._assistant_genesis_cache.discard(container.id)
             self._assistant_allowed_hosts_cache.discard(container.id)
+            self._assistant_machine_contract_cache.discard(container.id)
             if spec.allowed_hosts:
                 self._release_assistant_egress(
                     team_id,

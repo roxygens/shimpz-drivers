@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import ipaddress
+import json
 import re
 import tarfile
 import threading
@@ -12,11 +13,18 @@ from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import oauth_providers
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
 
 MANIFEST_PATH = "/opt/shimpz-assistant/shimpz.toml"
+CONTRACT_PATH = "/opt/shimpz/shimpz.contract.json"
+CATALOG_PATH = Path(__file__).with_name("assistant_catalog.json")
 MAX_MANIFEST_BYTES = 256 * 1024
+MAX_CONTRACT_BYTES = 512 * 1024
 MAX_ARCHIVE_BYTES = MAX_MANIFEST_BYTES + (32 * 1024)
 MAX_ALLOWED_HOSTS = 32
 MAX_ACCOUNTS = 16
@@ -69,6 +77,21 @@ class ManifestContract:
 
     allowed_hosts: tuple[str, ...]
     accounts: tuple[AccountDeclaration, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedAssistant:
+    """Controller-reviewed metadata and machine Power contract."""
+
+    assistant_id: str
+    name: str
+    summary: str
+    rpc_command: str
+    health_path: str
+    allowed_hosts: tuple[str, ...]
+    accounts: tuple[AccountDeclaration, ...]
+    powers: dict[str, dict[str, Any]]
+    machine_contract: dict[str, Any]
 
 
 def canonical_allowed_hosts(value: object) -> tuple[str, ...]:
@@ -168,6 +191,170 @@ def reviewed_manifest_contract(
     )
 
 
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON number")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _strict_json(raw: bytes, *, maximum: int, kind: str) -> object:
+    if not isinstance(raw, bytes) or not 1 <= len(raw) <= maximum:
+        raise ManifestError(f"Assistant {kind} has an invalid size")
+    try:
+        return json.loads(raw, parse_constant=_reject_json_constant, object_pairs_hook=_unique_json_object)
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ManifestError(f"Assistant {kind} is invalid JSON") from exc
+
+
+def _machine_schema(value: object, *, kind: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("type") != "object":
+        raise ManifestError(f"Assistant Power {kind} schema must describe an object")
+    try:
+        Draft202012Validator.check_schema(value)
+    except SchemaError as exc:
+        raise ManifestError(f"Assistant Power {kind} schema is invalid") from exc
+    encoded = json.dumps(value, allow_nan=False, separators=(",", ":")).encode()
+    if len(encoded) > 128 * 1024:
+        raise ManifestError(f"Assistant Power {kind} schema is too large")
+    return value
+
+
+def canonical_machine_contract(value: object, declared_accounts: tuple[AccountDeclaration, ...]) -> dict[str, Any]:
+    """Validate and canonicalize an untrusted SDK-generated Power contract."""
+    if not isinstance(value, dict) or set(value) != {"version", "powers"} or value["version"] != 1:
+        raise ManifestError("Assistant machine contract has an unsupported shape")
+    raw_powers = value["powers"]
+    if not isinstance(raw_powers, list) or not 1 <= len(raw_powers) <= 128:
+        raise ManifestError("Assistant machine contract Powers are invalid")
+    declared_ids = {account.id for account in declared_accounts}
+    used_accounts: set[str] = set()
+    powers: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    for raw_power in raw_powers:
+        if not isinstance(raw_power, dict) or set(raw_power) != {
+            "id",
+            "method",
+            "path",
+            "input_schema",
+            "output_schema",
+            "accounts",
+        }:
+            raise ManifestError("Assistant machine contract Power is invalid")
+        power_id = _identifier(raw_power["id"], kind="Power")
+        if power_id in ids or raw_power["method"] != "POST" or raw_power["path"] != f"/v1/powers/{power_id}":
+            raise ManifestError("Assistant machine contract Power route is invalid")
+        ids.add(power_id)
+        accounts = raw_power["accounts"]
+        if (
+            not isinstance(accounts, list)
+            or len(accounts) > 4
+            or len(accounts) != len(set(accounts))
+            or any(not isinstance(account_id, str) or account_id not in declared_ids for account_id in accounts)
+        ):
+            raise ManifestError("Assistant machine contract Power accounts are invalid")
+        used_accounts.update(accounts)
+        powers.append(
+            {
+                "id": power_id,
+                "method": "POST",
+                "path": raw_power["path"],
+                "input_schema": _machine_schema(raw_power["input_schema"], kind="input"),
+                "output_schema": _machine_schema(raw_power["output_schema"], kind="output"),
+                "accounts": sorted(accounts),
+            }
+        )
+    if used_accounts != declared_ids:
+        raise ManifestError("Assistant machine contract must use every declared account")
+    return {"version": 1, "powers": sorted(powers, key=lambda power: power["id"])}
+
+
+def parse_machine_contract(raw: bytes, declared_accounts: tuple[AccountDeclaration, ...]) -> dict[str, Any]:
+    """Parse a bounded SDK artifact without executing Assistant code."""
+    return canonical_machine_contract(
+        _strict_json(raw, maximum=MAX_CONTRACT_BYTES, kind="machine contract"),
+        declared_accounts,
+    )
+
+
+def validate_schema_payload(schema: object, payload: object) -> dict[str, object]:
+    """Validate one untrusted Power input or output against its reviewed schema."""
+    safe_schema = _machine_schema(schema, kind="payload")
+    if not isinstance(payload, dict):
+        raise ValueError("Power payload must be an object")
+    try:
+        Draft202012Validator(safe_schema).validate(payload)
+    except ValidationError as exc:
+        raise ValueError("Power payload does not match its reviewed schema") from exc
+    return payload
+
+
+def load_reviewed_catalog(path: Path = CATALOG_PATH) -> dict[str, ReviewedAssistant]:
+    """Load the build-baked catalog of reviewed SDK machine contracts."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ManifestError("Assistant reviewed catalog is unavailable") from exc
+    catalog = _strict_json(raw, maximum=MAX_CONTRACT_BYTES * 2, kind="reviewed catalog")
+    if not isinstance(catalog, dict) or set(catalog) != {"version", "assistants"} or catalog["version"] != 1:
+        raise ManifestError("Assistant reviewed catalog has an unsupported shape")
+    assistants = catalog["assistants"]
+    if not isinstance(assistants, dict) or not assistants or len(assistants) > 32:
+        raise ManifestError("Assistant reviewed catalog is invalid")
+    reviewed: dict[str, ReviewedAssistant] = {}
+    for raw_id, metadata in assistants.items():
+        assistant_id = _identifier(raw_id, kind="id")
+        if not isinstance(metadata, dict) or set(metadata) != {
+            "name",
+            "summary",
+            "rpc_command",
+            "health_path",
+            "allowed_hosts",
+            "accounts",
+            "contract",
+        }:
+            raise ManifestError("Assistant reviewed catalog entry is invalid")
+        name = _public_text(metadata["name"], kind="name", maximum=80)
+        summary = _public_text(metadata["summary"], kind="summary", maximum=160)
+        rpc_command = metadata["rpc_command"]
+        health_path = metadata["health_path"]
+        if (
+            not isinstance(rpc_command, str)
+            or re.fullmatch(r"/usr/local/bin/[a-z0-9-]{1,80}", rpc_command) is None
+            or not isinstance(health_path, str)
+            or re.fullmatch(r"/[a-z0-9/-]{1,80}", health_path) is None
+        ):
+            raise ManifestError("Assistant reviewed catalog runtime is invalid")
+        raw_accounts = metadata["accounts"]
+        if not isinstance(raw_accounts, dict):
+            raise ManifestError("Assistant reviewed catalog accounts are invalid")
+        account_scopes: dict[str, object] = {}
+        for account_id, account in raw_accounts.items():
+            if not isinstance(account, dict) or set(account) != {"scopes"}:
+                raise ManifestError("Assistant reviewed catalog account is invalid")
+            account_scopes[account_id] = account["scopes"]
+        accounts = canonical_account_declarations(account_scopes)
+        machine_contract = canonical_machine_contract(metadata["contract"], accounts)
+        reviewed[assistant_id] = ReviewedAssistant(
+            assistant_id=assistant_id,
+            name=name,
+            summary=summary,
+            rpc_command=rpc_command,
+            health_path=health_path,
+            allowed_hosts=canonical_allowed_hosts(metadata["allowed_hosts"]),
+            accounts=accounts,
+            powers={power["id"]: power for power in machine_contract["powers"]},
+            machine_contract=machine_contract,
+        )
+    return reviewed
+
+
 def _reject_credential_material(value: object) -> None:
     pending: list[tuple[object, tuple[str, ...], int]] = [(value, (), 0)]
     while pending:
@@ -245,7 +432,7 @@ def parse_manifest_contract(raw: bytes) -> ManifestContract:
     )
 
 
-def _bounded_archive(chunks: Iterable[bytes]) -> bytes:
+def _bounded_archive(chunks: Iterable[bytes], maximum: int = MAX_ARCHIVE_BYTES) -> bytes:
     archive = bytearray()
     try:
         with ExitStack() as cleanup:
@@ -256,8 +443,8 @@ def _bounded_archive(chunks: Iterable[bytes]) -> bytes:
                 if not isinstance(chunk, bytes):
                     raise ManifestError("Assistant manifest archive is invalid")
                 archive.extend(chunk)
-                if len(archive) > MAX_ARCHIVE_BYTES:
-                    raise ManifestError("Assistant manifest archive is too large")
+                if len(archive) > maximum:
+                    raise ManifestError("Assistant package archive is too large")
     except ManifestError:
         raise
     except Exception as exc:
@@ -265,56 +452,79 @@ def _bounded_archive(chunks: Iterable[bytes]) -> bytes:
     return bytes(archive)
 
 
-def _read_container_manifest_bytes(container) -> bytes:
-    """Read the fixed regular manifest file from a digest-bound root."""
+def _read_container_file(container, *, path: str, name: str, maximum: int) -> bytes:
+    """Read one fixed immutable regular file from a digest-bound root."""
     try:
-        chunks, metadata = container.get_archive(MANIFEST_PATH)
+        chunks, metadata = container.get_archive(path)
     except Exception as exc:
-        raise ManifestError("Assistant manifest is unavailable") from exc
+        raise ManifestError("Assistant package file is unavailable") from exc
     if not isinstance(metadata, dict):
-        raise ManifestError("Assistant manifest metadata is invalid")
+        raise ManifestError("Assistant package metadata is invalid")
     size = metadata.get("size")
     mode = metadata.get("mode")
-    name = metadata.get("name")
+    metadata_name = metadata.get("name")
     if (
-        name != "shimpz.toml"
+        metadata_name != name
         or not isinstance(size, int)
         or isinstance(size, bool)
-        or not 1 <= size <= MAX_MANIFEST_BYTES
+        or not 1 <= size <= maximum
         or not isinstance(mode, int)
         or isinstance(mode, bool)
         or mode != 0o444
     ):
-        raise ManifestError("Assistant manifest metadata is invalid")
+        raise ManifestError("Assistant package metadata is invalid")
 
-    archive = _bounded_archive(chunks)
+    archive = _bounded_archive(chunks, maximum + (32 * 1024))
     try:
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
             members = bundle.getmembers()
             if (
                 len(members) != 1
-                or members[0].name not in {"shimpz.toml", "./shimpz.toml"}
+                or members[0].name not in {name, f"./{name}"}
                 or not members[0].isreg()
                 or members[0].size != size
                 or members[0].mode & 0o777 != 0o444
             ):
-                raise ManifestError("Assistant manifest archive is invalid")
+                raise ManifestError("Assistant package archive is invalid")
             extracted = bundle.extractfile(members[0])
             if extracted is None:
-                raise ManifestError("Assistant manifest archive is invalid")
-            raw = extracted.read(MAX_MANIFEST_BYTES + 1)
+                raise ManifestError("Assistant package archive is invalid")
+            raw = extracted.read(maximum + 1)
     except ManifestError:
         raise
     except (tarfile.TarError, OSError, EOFError) as exc:
-        raise ManifestError("Assistant manifest archive is invalid") from exc
+        raise ManifestError("Assistant package archive is invalid") from exc
     if len(raw) != size:
-        raise ManifestError("Assistant manifest archive is invalid")
+        raise ManifestError("Assistant package archive is invalid")
     return raw
+
+
+def _read_container_manifest_bytes(container) -> bytes:
+    return _read_container_file(
+        container,
+        path=MANIFEST_PATH,
+        name="shimpz.toml",
+        maximum=MAX_MANIFEST_BYTES,
+    )
 
 
 def read_container_manifest_contract(container) -> ManifestContract:
     """Read the fixed regular manifest contract from a digest-bound root."""
     return parse_manifest_contract(_read_container_manifest_bytes(container))
+
+
+def read_container_machine_contract(
+    container,
+    declared_accounts: tuple[AccountDeclaration, ...],
+) -> dict[str, Any]:
+    """Read and validate the fixed SDK contract artifact from an immutable image."""
+    raw = _read_container_file(
+        container,
+        path=CONTRACT_PATH,
+        name="shimpz.contract.json",
+        maximum=MAX_CONTRACT_BYTES,
+    )
+    return parse_machine_contract(raw, declared_accounts)
 
 
 class ManifestContractCache:
@@ -350,6 +560,51 @@ class ManifestContractCache:
                 self._entries.move_to_end(container_id)
         if declared != reviewed:
             raise ManifestError("Assistant manifest does not match its reviewed contract")
+        return declared
+
+    def discard(self, container_id: object) -> None:
+        if isinstance(container_id, str):
+            with self._lock:
+                self._entries.pop(container_id, None)
+
+
+class MachineContractCache:
+    """Admit the image-baked SDK artifact only when it equals controller review."""
+
+    def __init__(self, max_entries: int = DEFAULT_CACHE_ENTRIES) -> None:
+        if not isinstance(max_entries, int) or isinstance(max_entries, bool) or max_entries < 1:
+            raise ValueError("Assistant machine contract cache size must be positive")
+        self._max_entries = max_entries
+        self._entries: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(
+        self,
+        container,
+        declared_accounts: tuple[AccountDeclaration, ...],
+        reviewed: object,
+    ) -> dict[str, Any]:
+        """Return the machine contract only after exact semantic equality."""
+        container_id = getattr(container, "id", None)
+        if (
+            not isinstance(container_id, str)
+            or not container_id
+            or len(container_id) > 256
+            or any(not character.isalnum() and character not in {"-", "_", "."} for character in container_id)
+        ):
+            raise ManifestError("Assistant container identity is invalid")
+        canonical_reviewed = canonical_machine_contract(reviewed, declared_accounts)
+        with self._lock:
+            declared = self._entries.get(container_id)
+            if declared is None:
+                declared = read_container_machine_contract(container, declared_accounts)
+                self._entries[container_id] = declared
+                while len(self._entries) > self._max_entries:
+                    self._entries.popitem(last=False)
+            else:
+                self._entries.move_to_end(container_id)
+        if declared != canonical_reviewed:
+            raise ManifestError("Assistant machine contract does not match controller review")
         return declared
 
     def discard(self, container_id: object) -> None:

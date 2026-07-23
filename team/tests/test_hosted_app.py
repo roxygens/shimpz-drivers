@@ -269,8 +269,10 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
         cache = types.SimpleNamespace(
             get=admit,
         )
+        machine_cache = types.SimpleNamespace(get=lambda _container, _accounts, reviewed: reviewed)
         with _patched(
             _assistant_allowed_hosts_cache=cache,
+            _assistant_machine_contract_cache=machine_cache,
             _require_assistant_genesis=lambda _container: "Use reviewed Powers.",
         ):
             self.assertEqual(app._admit_app_contract(spec, container), tuple(sorted(spec.allowed_hosts)))
@@ -289,14 +291,20 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             replace(exact, accounts=(replace(account, scopes=("tweet.read",)),)),
         )
         with (
-            _patched(_assistant_allowed_hosts_cache=app.assistant_manifest.ManifestContractCache()),
+            _patched(
+                _assistant_allowed_hosts_cache=app.assistant_manifest.ManifestContractCache(),
+                _assistant_machine_contract_cache=machine_cache,
+            ),
             mock.patch.object(app.assistant_manifest, "read_container_manifest_contract", return_value=exact),
         ):
             self.assertEqual(app._require_assistant_allowed_hosts(spec, container), exact.allowed_hosts)
         for declared in drifted:
             with (
                 self.subTest(declared=declared),
-                _patched(_assistant_allowed_hosts_cache=app.assistant_manifest.ManifestContractCache()),
+                _patched(
+                    _assistant_allowed_hosts_cache=app.assistant_manifest.ManifestContractCache(),
+                    _assistant_machine_contract_cache=machine_cache,
+                ),
                 mock.patch.object(
                     app.assistant_manifest,
                     "read_container_manifest_contract",
@@ -311,7 +319,10 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             raise app.assistant_manifest.ManifestError("mismatch")
 
         with (
-            _patched(_assistant_allowed_hosts_cache=types.SimpleNamespace(get=reject)),
+            _patched(
+                _assistant_allowed_hosts_cache=types.SimpleNamespace(get=reject),
+                _assistant_machine_contract_cache=machine_cache,
+            ),
             self.assertRaises(app.ApiError) as caught,
         ):
             app._admit_app_contract(spec, container)

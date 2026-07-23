@@ -8,6 +8,7 @@ dependencies = [
     "docker==7.1.0",
     # One-use X25519 + AES-GCM delivery means the credential endpoint never returns plaintext.
     "cryptography==49.0.0",
+    "jsonschema==4.25.1",
 ]
 
 [tool.uv]

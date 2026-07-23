@@ -177,6 +177,7 @@ _power_journal_instance: power_journal.PowerJournal | None = None
 _brain_runtime = brain_runtime_client.BrainRuntimeClient()
 _assistant_genesis_cache = assistant_genesis.GenesisCache()
 _assistant_allowed_hosts_cache = assistant_manifest.ManifestContractCache()
+_assistant_machine_contract_cache = assistant_manifest.MachineContractCache()
 _assistant_secrets = assistant_secret_store.AssistantSecretStore(
     ASSISTANT_SECRET_STATE_PATH,
     ASSISTANT_SECRET_KEY_PATH,
@@ -1349,6 +1350,7 @@ def _teardown_app(
         if container_removed:
             _assistant_genesis_cache.discard(container_id)
             _assistant_allowed_hosts_cache.discard(container_id)
+            _assistant_machine_contract_cache.discard(container_id)
     elif container is not None:
         # Preserve the labeled retry anchor, but do not leave tenant code running after a failed removal.
         with contextlib.suppress(ApiError):
@@ -1667,9 +1669,12 @@ def _require_assistant_allowed_hosts(spec: marketplace.AppSpec, container) -> tu
             allowed_hosts=spec.allowed_hosts,
             accounts=contract.accounts,
         )
-        return _assistant_allowed_hosts_cache.get(container, reviewed).allowed_hosts
+        declared = _assistant_allowed_hosts_cache.get(container, reviewed)
+        _assistant_machine_contract_cache.get(container, declared.accounts, contract.machine_contract)
     except assistant_manifest.ManifestError as exc:
         raise ApiError(HTTPStatus.CONFLICT, "installed Assistant manifest failed its reviewed contract") from exc
+    else:
+        return declared.allowed_hosts
 
 
 def _admit_app_contract(spec: marketplace.AppSpec, container) -> tuple[str, ...]:
