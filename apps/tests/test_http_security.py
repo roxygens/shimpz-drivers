@@ -99,6 +99,23 @@ class HttpBodyTests(unittest.TestCase):
             handler._route("DELETE")
         remove.assert_called_once_with("example", False)
 
+    def test_candidate_cutover_rolls_back_both_names_on_rename_failure(self) -> None:
+        old = mock.Mock()
+        candidate = mock.Mock()
+        candidate.rename.side_effect = self.app.docker.errors.APIError("rename failed")
+
+        with (
+            mock.patch.object(self.app, "_get_or_none", return_value=old),
+            mock.patch.object(self.app.audit, "log"),
+            self.assertRaises(self.app.ApiError) as caught,
+        ):
+            self.app._cutover_candidate("example", candidate, "app_example", "app_example__retiring")
+
+        self.assertEqual(caught.exception.status, self.app.HTTPStatus.INTERNAL_SERVER_ERROR)
+        self.assertEqual(old.rename.call_args_list, [mock.call("app_example__retiring"), mock.call("app_example")])
+        candidate.remove.assert_called_once_with(force=True)
+        old.remove.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

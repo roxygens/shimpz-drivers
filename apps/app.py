@@ -354,6 +354,27 @@ def _teardown_app_network(name: str) -> None:
         network.remove()
 
 
+def _cutover_candidate(name: str, candidate: object, final_name: str, retiring_name: str) -> None:
+    old = _get_or_none(name)
+    try:
+        if old is not None:
+            old.rename(retiring_name)
+        candidate.rename(final_name)
+    except docker.errors.APIError as exc:
+        # Restore the old name so it keeps serving and discard the healthy candidate that never
+        # cut over. The previous container remains untouched until this exact transaction seam.
+        if old is not None:
+            with contextlib.suppress(docker.errors.APIError):
+                old.rename(final_name)
+        with contextlib.suppress(docker.errors.APIError):
+            candidate.remove(force=True)
+        audit.log("deploy", name, result="error", reason=f"cutover rename failed: {exc}")
+        raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, f"cutover failed, rolled back: {exc}") from exc
+
+    if old is not None:
+        old.remove(force=True)
+
+
 def _deploy(name: str, body: dict) -> dict:
     """Blue-green deploy: create+health-check a CANDIDATE before touching the serving container.
 
@@ -419,24 +440,7 @@ def _deploy(name: str, body: dict) -> dict:
                 f"the previous container (if any) was never touched. Log tail:\n{log_tail}",
             )
 
-        old = _get_or_none(name)
-        try:
-            if old is not None:
-                old.rename(retiring_name)
-            candidate.rename(final_name)
-        except docker.errors.APIError as exc:
-            # Roll back the rename attempt itself: restore the old container's name so it keeps
-            # serving, and discard the (already-healthy, but never cut over) candidate.
-            if old is not None:
-                with contextlib.suppress(docker.errors.APIError):
-                    old.rename(final_name)
-            with contextlib.suppress(docker.errors.APIError):
-                candidate.remove(force=True)
-            audit.log("deploy", name, result="error", reason=f"cutover rename failed: {exc}")
-            raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, f"cutover failed, rolled back: {exc}") from exc
-
-        if old is not None:
-            old.remove(force=True)
+        _cutover_candidate(name, candidate, final_name, retiring_name)
 
     trace_id = audit.log(
         "deploy",
