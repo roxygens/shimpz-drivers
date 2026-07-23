@@ -20,10 +20,11 @@ class SegmentRequirements:
 
     accounts: tuple[object, ...] = ()
     secrets: tuple[object, ...] = ()
+    inputs: tuple[object, ...] = ()
     approvals: tuple[object, ...] = ()
 
     def groups(self, *, approvals: bool) -> tuple[tuple[object, ...], ...]:
-        groups = (self.accounts, self.secrets)
+        groups = (self.accounts, self.secrets, self.inputs)
         return (*groups, self.approvals) if approvals else groups
 
 

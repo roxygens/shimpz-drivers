@@ -135,6 +135,36 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         self.assertEqual(hosted[3].accounts, local[3].accounts)
         self.assertEqual(decisions, {"hosted": ["accounts"], "local": ["accounts"]})
 
+    def test_human_input_is_one_distinct_suspension_category(self) -> None:
+        requirements = chat_turn_engine.SegmentRequirements(inputs=("input-required",))
+
+        self.assertEqual(
+            requirements.groups(approvals=True),
+            ((), (), ("input-required",), ()),
+        )
+        self.assertEqual(
+            chat_turn_engine.suspension_gate_count(*requirements.groups(approvals=True)),
+            1,
+        )
+
+        suspension = chat_orchestrator.ChatSuspension(
+            continuation=SimpleNamespace(),
+            requests=(),
+        )
+        dispatched = chat_turn_engine.dispatch(
+            suspension,
+            requirements.groups(approvals=True),
+            lambda _outcome: "pending",
+            (
+                lambda *_args: "accounts",
+                lambda *_args: "secrets",
+                lambda *_args: "inputs",
+                lambda *_args: "approvals",
+            ),
+            lambda _outcome: "complete",
+        )
+        self.assertEqual(dispatched, "inputs")
+
     def test_hosted_and_local_controllers_build_equivalent_real_segment_strategies(self) -> None:
         assistant_id = "shimpz-cloudflare"
         declared_contract = hosted_app.marketplace.APPS[assistant_id].assistant

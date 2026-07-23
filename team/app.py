@@ -2681,10 +2681,13 @@ def _hosted_segment_response(
             "reply": terminal.reply[:CHAT_OUTPUT_CAP],
         }
 
+    def unsupported_input(*_args) -> object:
+        raise ValueError("human input suspension is unavailable")
+
     try:
         return chat_turn_engine.dispatch(
             outcome,
-            (account_requirements, secret_requirements),
+            (account_requirements, secret_requirements, ()),
             pending,
             (
                 lambda suspension, requirements, state: _pause_hosted_connection(
@@ -2693,6 +2696,7 @@ def _hosted_segment_response(
                 lambda suspension, requirements, state: _pause_hosted_chat(
                     team_id, token, suspension, requirements, state
                 ),
+                unsupported_input,
             ),
             complete,
         )

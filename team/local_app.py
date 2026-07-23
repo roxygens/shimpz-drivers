@@ -2139,10 +2139,13 @@ class LocalController:
                 raise ApiProblem(HTTPStatus.CONFLICT, "chat turn stopped", code="chat-stopped")
             return {"team_id": team_id, "team_name": team_name, "reply": terminal.reply}
 
+        def unsupported_input(*_args) -> object:
+            raise ValueError("human input suspension is unavailable")
+
         try:
             return chat_turn_engine.dispatch(
                 outcome,
-                (account_requirements, secret_requirements, approval_requirements),
+                (account_requirements, secret_requirements, (), approval_requirements),
                 pending,
                 (
                     lambda suspension, requirements, state: self._pause_account(
@@ -2151,6 +2154,7 @@ class LocalController:
                     lambda suspension, requirements, state: self._pause_chat(
                         team_id, token, suspension, requirements, state
                     ),
+                    unsupported_input,
                     lambda suspension, requirements, state: self._pause_approval(
                         team_id, token, suspension, requirements, state
                     ),
