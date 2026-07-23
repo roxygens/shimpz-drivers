@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 node_modules/
 .venv/
+.coverage
+.coverage.*
 build/
 .svelte-kit/
 .output/
