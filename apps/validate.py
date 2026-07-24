@@ -321,41 +321,6 @@ def _validate_target(target: object, field: str) -> str:
     return target
 
 
-# ── stack recreate (Phase C2): the marketplace's live-apply of a saved secret ────────────────────
-# The admin panel (which holds the .env secrets, never the socket) passes the new env for ONE
-# stateless capability sidecar; the driver (which holds the socket, never the .env) recreates
-# it. This positive allowlist is the security boundary: ONLY this service and its own env keys —
-# `shimpz-brain`, `postgres`, `cloudflared`, and every stray key are refused BY
-# CONSTRUCTION (a bad request can never recreate the brain or a stateful datastore, nor inject PATH).
-RECREATABLE: dict[str, frozenset[str]] = {}
-
-
-@dataclass(frozen=True, slots=True)
-class RecreateRequest:
-    service: str  # the logical/compose service name (also the DNS alias == container base name)
-    container_name: str  # resolved with SHIMPZ_SUFFIX (R137) — the actual running container to recreate
-    env: dict[str, str]  # the allowlisted env overlay (empty value = disable that key → inert boot)
-
-
-def validate_recreate_request(body: dict) -> RecreateRequest:
-    service = body.get("service")
-    if service not in RECREATABLE:
-        raise ValidationError(f"service {service!r} is not recreatable (allowed: {sorted(RECREATABLE)})")
-    env = body.get("env", {})
-    if not isinstance(env, dict):
-        raise ValidationError("env must be an object")
-    allowed = RECREATABLE[service]
-    out: dict[str, str] = {}
-    for key, value in env.items():
-        if not isinstance(key, str) or not isinstance(value, str):
-            raise ValidationError("env keys/values must be strings")
-        if key not in allowed:
-            raise ValidationError(f"env key {key!r} not allowed for {service} (allowed: {sorted(allowed)})")
-        out[key] = value
-    container_name = f"{service}{os.environ.get('SHIMPZ_SUFFIX', '')}"  # this instance's actual container (R137)
-    return RecreateRequest(service=service, container_name=container_name, env=out)
-
-
 @dataclass(frozen=True, slots=True)
 class RouteRequest:
     fqdn: str

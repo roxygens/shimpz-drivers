@@ -155,11 +155,11 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises(validate.ValidationError):
                 validate.validate_route_request(body)
 
-    def test_no_service_is_recreatable_through_the_retired_bridge(self) -> None:
-        self.assertEqual(validate.RECREATABLE, {})
-        for service in ("shimpz-brain", "postgres", "cloudflared", "shimpz-driver", None):
-            with self.subTest(service=service), self.assertRaises(validate.ValidationError):
-                validate.validate_recreate_request({"service": service, "env": {}})
+    def test_recreate_surface_does_not_exist(self) -> None:
+        source = (APPS / "app.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("/v1/stack/recreate", source)
+        self.assertFalse(hasattr(validate, "validate_recreate_request"))
 
     def test_egress_is_deduplicated_and_defaults_to_no_internet(self) -> None:
         self.assertEqual(validate.validate_egress(None), [])

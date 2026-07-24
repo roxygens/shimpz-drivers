@@ -14,7 +14,6 @@ Endpoints (all require `Authorization: Bearer <token>` — see token_store.py):
   DELETE /v1/apps/<name>[?purge_volume=1]
   POST   /v1/routes/apply               {fqdn, target, web_port, api_port, ws_port}
   DELETE /v1/routes/<fqdn>
-  POST   /v1/stack/recreate             {service, env}   (C2: recreate a whitelisted stateless sidecar)
 """
 
 from __future__ import annotations
@@ -83,7 +82,6 @@ HEALTH_DELAY_SECONDS = float(os.environ.get("SHIMPZ_HEALTH_DELAY_SECONDS", "1.5"
 
 _APP_ROUTES = (
     stdlib_http.Route("POST", re.compile(r"^/v1/apps/(?P<name>[^/]+)/deploy$"), "deploy"),
-    stdlib_http.Route("POST", re.compile(r"^/v1/stack/recreate$"), "recreate"),
     stdlib_http.Route(
         "POST",
         re.compile(r"^/v1/apps/(?P<name>[^/]+)/(?P<action>stop|start|restart)$"),
@@ -190,35 +188,6 @@ def _wait_running(container) -> tuple[bool, str]:
         if attempt < HEALTH_RETRIES - 1:
             time.sleep(HEALTH_DELAY_SECONDS)
     return False, status
-
-
-def _wait_recreated_healthy(container, hc_test) -> tuple[bool, str]:
-    """Health-gate a recreated CORE sidecar by exec'ing its OWN Docker HEALTHCHECK (rc==0).
-
-    NOT _wait_healthy: that curls an HTTP path, but the sidecar images ship no curl — their
-    healthcheck is `python3 /app/healthcheck.py` (proving the 403 auth gate is live). No healthcheck
-    at all → fall back to "stays running".
-    """
-    if not hc_test:
-        return _wait_running(container)
-    if hc_test[0] == "CMD-SHELL":
-        argv = ["sh", "-c", hc_test[1]]
-    elif hc_test[0] == "CMD":
-        argv = hc_test[1:]
-    else:
-        argv = hc_test
-    detail = "unknown"
-    for attempt in range(HEALTH_RETRIES):
-        container.reload()
-        if container.status != "running":
-            return False, f"not running (status={container.status})"
-        rc, _ = container.exec_run(argv)
-        if rc == 0:
-            return True, "healthy"
-        detail = f"healthcheck rc={rc}"
-        if attempt < HEALTH_RETRIES - 1:
-            time.sleep(HEALTH_DELAY_SECONDS)
-    return False, detail
 
 
 def _ensure_app_network(name: str):
@@ -453,80 +422,6 @@ def _deploy(name: str, body: dict) -> dict:
     return {"status": "deployed", "container_id": candidate.id, "trace_id": trace_id}
 
 
-def _recreate(body: dict) -> dict:
-    """Blue-green recreate of ONE whitelisted stateless sidecar with a new env overlay (Phase C2).
-
-    Mirrors _deploy's create-candidate → health-gate → rename-swap, but rebuilds the create kwargs
-    from the RUNNING container's own `.attrs` (manifests.build_recreate_kwargs) instead of a manifest
-    — the caller supplies ONLY the env, already constrained by validate.RECREATABLE. Keep-old-on-
-    failure: any failure tears down the candidate and leaves the old sidecar serving, untouched.
-
-    DNS cutover is the rename itself: a sidecar's service alias EQUALS its container name (e.g.
-    `example-driver`), so renaming the healthy candidate to that name moves Docker's embedded DNS to
-    it — the same reason _deploy needs no Caddy reconfig.
-    """
-    req = validate.validate_recreate_request(body)
-    name = req.container_name
-    candidate_name = f"{name}{CANDIDATE_SUFFIX}"
-    retiring_name = f"{name}{RETIRING_SUFFIX}"
-
-    with _lock_for(name):
-        for stale_name in (candidate_name, retiring_name):
-            stale = _get_by_container_name(stale_name)
-            if stale is not None:
-                stale.remove(force=True)
-
-        old = _get_by_container_name(name)
-        if old is None:
-            raise ApiError(HTTPStatus.NOT_FOUND, f"service {req.service!r} ({name}) is not running")
-        old.reload()
-        attrs = old.attrs
-        nets = list((attrs.get("NetworkSettings", {}).get("Networks") or {}).keys())
-        hc_test = (attrs.get("Config", {}).get("Healthcheck") or {}).get("Test")
-
-        kwargs = manifests.build_recreate_kwargs(attrs, req.env)
-        kwargs["name"] = candidate_name
-        if nets:
-            kwargs["network"] = nets[0]  # create attaches to ONE network; the rest are connected next
-        try:
-            candidate = _docker.containers.create(**kwargs)
-            for extra in nets[1:]:
-                _docker.networks.get(extra).connect(candidate)
-            candidate.start()
-        except docker.errors.APIError as exc:
-            with contextlib.suppress(docker.errors.APIError, NameError):
-                candidate.remove(force=True)
-            audit.log("stack_recreate", req.service, result="error", reason=f"candidate create/start failed: {exc}")
-            raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, f"candidate create/start failed: {exc}") from exc
-
-        healthy, detail = _wait_recreated_healthy(candidate, hc_test)
-        if not healthy:
-            log_tail = candidate.logs(tail=40).decode(errors="replace")
-            candidate.remove(force=True)
-            audit.log("stack_recreate", req.service, result="denied", reason=f"candidate unhealthy: {detail}")
-            raise ApiError(
-                HTTPStatus.BAD_GATEWAY,
-                f"recreated {req.service!r} failed its health check ({detail}) — rolled back, the "
-                f"previous sidecar was never touched. Log tail:\n{log_tail}",
-            )
-
-        try:
-            old.rename(retiring_name)
-            candidate.rename(name)
-        except docker.errors.APIError as exc:
-            with contextlib.suppress(docker.errors.APIError):
-                old.rename(name)
-            with contextlib.suppress(docker.errors.APIError):
-                candidate.remove(force=True)
-            audit.log("stack_recreate", req.service, result="error", reason=f"cutover rename failed: {exc}")
-            raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, f"cutover failed, rolled back: {exc}") from exc
-
-        old.remove(force=True)
-
-    trace_id = audit.log("stack_recreate", req.service, result="ok", env_keys=sorted(req.env), health=detail)
-    return {"status": "recreated", "service": req.service, "health": detail, "trace_id": trace_id}
-
-
 def _lifecycle(name: str, op: str) -> dict:
     validate.validate_name(name)
     container = _get_or_none(name)
@@ -625,10 +520,6 @@ def _operation_deploy(handler: Handler, route: stdlib_http.RouteMatch) -> dict:
     return _deploy(route.params["name"], handler._body())
 
 
-def _operation_recreate(handler: Handler, _route: stdlib_http.RouteMatch) -> dict:
-    return _recreate(handler._body())
-
-
 def _operation_lifecycle(_handler: Handler, route: stdlib_http.RouteMatch) -> dict:
     return _lifecycle(route.params["name"], route.params["action"])
 
@@ -669,7 +560,6 @@ def _operation_delete_route(_handler: Handler, route: stdlib_http.RouteMatch) ->
 
 _APP_OPERATIONS = {
     "deploy": _operation_deploy,
-    "recreate": _operation_recreate,
     "lifecycle": _operation_lifecycle,
     "status": _operation_status,
     "logs": _operation_logs,
