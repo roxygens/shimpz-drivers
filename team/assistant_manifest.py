@@ -91,6 +91,7 @@ class ReviewedAssistant:
     allowed_hosts: tuple[str, ...]
     accounts: tuple[AccountDeclaration, ...]
     powers: dict[str, dict[str, Any]]
+    power_validators: dict[str, dict[str, Draft202012Validator]]
     machine_contract: dict[str, Any]
 
 
@@ -294,13 +295,12 @@ def parse_machine_contract(raw: bytes, declared_accounts: tuple[AccountDeclarati
     )
 
 
-def validate_schema_payload(schema: object, payload: object) -> dict[str, object]:
+def validate_schema_payload(validator: Draft202012Validator, payload: object) -> dict[str, object]:
     """Validate one untrusted Power input or output against its reviewed schema."""
-    safe_schema = _machine_schema(schema, kind="payload")
     if not isinstance(payload, dict):
         raise ValueError("Power payload must be an object")
     try:
-        Draft202012Validator(safe_schema).validate(payload)
+        validator.validate(payload)
     except ValidationError as exc:
         raise ValueError("Power payload does not match its reviewed schema") from exc
     return payload
@@ -361,6 +361,13 @@ def load_reviewed_catalog(path: Path = CATALOG_PATH) -> dict[str, ReviewedAssist
             allowed_hosts=canonical_allowed_hosts(metadata["allowed_hosts"]),
             accounts=accounts,
             powers={power["id"]: power for power in machine_contract["powers"]},
+            power_validators={
+                power["id"]: {
+                    "input": Draft202012Validator(power["input_schema"]),
+                    "output": Draft202012Validator(power["output_schema"]),
+                }
+                for power in machine_contract["powers"]
+            },
             machine_contract=machine_contract,
         )
     return reviewed

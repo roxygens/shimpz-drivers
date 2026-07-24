@@ -134,15 +134,15 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, AssistantSpec]:
 
 def validate_power_input(assistant_id: str, power: str, payload: object) -> dict[str, object]:
     try:
-        schema = _REVIEWED_ASSISTANTS[assistant_id].powers[power]["input_schema"]
+        validator = _REVIEWED_ASSISTANTS[assistant_id].power_validators[power]["input"]
     except KeyError as exc:
         raise ValueError("the Power has no declared input contract") from exc
-    return assistant_manifest.validate_schema_payload(schema, payload)
+    return assistant_manifest.validate_schema_payload(validator, payload)
 
 
 def validate_power_output(assistant_id: str, power: str, payload: object) -> dict[str, object]:
     try:
-        schema = _REVIEWED_ASSISTANTS[assistant_id].powers[power]["output_schema"]
+        validator = _REVIEWED_ASSISTANTS[assistant_id].power_validators[power]["output"]
     except KeyError as exc:
         raise ValueError("the Power has no declared output contract") from exc
-    return assistant_manifest.validate_schema_payload(schema, payload)
+    return assistant_manifest.validate_schema_payload(validator, payload)

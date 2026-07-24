@@ -265,6 +265,27 @@ class AssistantManifestTests(unittest.TestCase):
         with self.assertRaises(assistant_manifest.ManifestError):
             assistant_manifest.parse_machine_contract(json.dumps(foreign).encode(), reviewed.accounts)
 
+    def test_reviewed_catalog_precompiles_payload_validators(self) -> None:
+        with mock.patch.object(
+            assistant_manifest,
+            "Draft202012Validator",
+            wraps=assistant_manifest.Draft202012Validator,
+        ) as validator_class:
+            reviewed = assistant_manifest.load_reviewed_catalog()["shimpz-cloudflare"]
+
+        self.assertEqual(validator_class.call_count, len(reviewed.powers) * 2)
+        validator = reviewed.power_validators["list-zones"]["input"]
+        with (
+            mock.patch.object(assistant_manifest, "_machine_schema") as canonicalize,
+            mock.patch.object(assistant_manifest, "Draft202012Validator") as construct,
+        ):
+            self.assertEqual(
+                assistant_manifest.validate_schema_payload(validator, {"page": 1, "per_page": 10}),
+                {"page": 1, "per_page": 10},
+            )
+        canonicalize.assert_not_called()
+        construct.assert_not_called()
+
     def test_machine_contract_loader_rejects_malformed_schema_and_oversized_artifact(self) -> None:
         reviewed = assistant_manifest.load_reviewed_catalog()["shimpz-cloudflare"]
         malformed = json.loads(json.dumps(reviewed.machine_contract))
