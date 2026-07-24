@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import sys
 from dataclasses import replace
 from http import HTTPStatus
@@ -12,6 +13,7 @@ sys.path.insert(0, str(TEAM))
 import local_app
 from assistant_human import approval_grants as assistant_approval_grants
 from local_controller_harness import LocalContractCase
+from local_support.egress import APP_EGRESS_PROXY_ALIAS
 
 LOOKUP_INPUT = {"page": 1, "per_page": 25}
 LOOKUP_RESULT = {
@@ -100,6 +102,44 @@ class LocalLifecycleTests(LocalContractCase):
             {"assistant": "future-assistant", "installed": False},
         )
         self.assertEqual(events, ["reload", "reload", "trusted", "reload", ("remove", True), "create"])
+
+    def test_listing_fetches_the_egress_proxy_once_for_multiple_assistants(self) -> None:
+        controller, first, _events = self._lifecycle_controller()
+        first_spec = controller.registry["shimpz-cloudflare"]
+        first_spec.allowed_hosts = ("api.example.com",)
+        second_spec = copy.copy(first_spec)
+        second_spec.assistant_id = "future-assistant"
+        controller.registry[second_spec.assistant_id] = second_spec
+        second = copy.deepcopy(first)
+        second.labels[local_app.ASSISTANT_LABEL] = second_spec.assistant_id
+        second.attrs["Config"]["Labels"][local_app.ASSISTANT_LABEL] = second_spec.assistant_id
+        second.name = controller._container_name("team_1", second_spec.assistant_id)
+        proxy_environment = {"HTTPS_PROXY": "http://app-egress-proxy:8889"}
+        for container in (first, second):
+            container.attrs["Config"]["Env"] = [f"{key}={value}" for key, value in proxy_environment.items()]
+        network_name = controller._network_name("team_1")
+        proxy = SimpleNamespace(
+            attrs={
+                "NetworkSettings": {
+                    "Networks": {
+                        network_name: {
+                            "Aliases": [APP_EGRESS_PROXY_ALIAS],
+                        }
+                    }
+                }
+            }
+        )
+        controller.client.containers.list = lambda **_kwargs: [first, second]
+        controller._validate_egress_policy = lambda *_args: proxy_environment
+        controller._egress_proxy = mock.Mock(return_value=proxy)
+
+        result = controller.list_assistants("team_1")
+
+        self.assertEqual(
+            tuple(item["assistant"] for item in result["assistants"]),
+            ("future-assistant", "shimpz-cloudflare"),
+        )
+        controller._egress_proxy.assert_called_once_with()
 
     def test_release_update_rejects_a_previous_security_contract(self) -> None:
         controller, _container, events = self._lifecycle_controller()

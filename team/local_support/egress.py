@@ -225,8 +225,9 @@ class LocalEgressMixin:
                 code="egress-proxy-drift",
             )
 
-    def _validate_egress_proxy_attachment(self, network_name: str) -> None:
-        proxy = self._egress_proxy()
+    def _validate_egress_proxy_attachment(self, network_name: str, proxy=None) -> None:
+        if proxy is None:
+            proxy = self._egress_proxy()
         attached = ((proxy.attrs.get("NetworkSettings") or {}).get("Networks") or {}).get(network_name)
         if not isinstance(attached, dict) or APP_EGRESS_PROXY_ALIAS not in (attached.get("Aliases") or []):
             raise ApiProblem(

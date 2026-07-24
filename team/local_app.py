@@ -493,6 +493,14 @@ class LocalController(
         team_id = validate_team_id(team_id)
         self._network(team_id)
         output: list[dict[str, str]] = []
+        egress_proxy = None
+
+        def current_egress_proxy():
+            nonlocal egress_proxy
+            if egress_proxy is None:
+                egress_proxy = self._egress_proxy()
+            return egress_proxy
+
         try:
             containers = self.client.containers.list(**self._assistant_filters(team_id))
         except DockerException as exc:
@@ -516,6 +524,7 @@ class LocalController(
                 team_id,
                 spec,
                 self._network_name(team_id),
+                current_egress_proxy,
             )
             if self._has_current_assistant_artifact(config, spec):
                 self._admit_assistant_allowed_hosts(container, spec)

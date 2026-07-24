@@ -129,6 +129,7 @@ class LocalAssistantResourcesMixin:
         spec: AssistantSpec,
         network_name: str,
         environment: dict[str, str],
+        egress_proxy=None,
     ) -> tuple[str, ...]:
         try:
             reviewed_hosts = assistant_manifest.canonical_allowed_hosts(spec.allowed_hosts)
@@ -141,7 +142,8 @@ class LocalAssistantResourcesMixin:
         expected_proxy_environment = None
         if reviewed_hosts:
             expected_proxy_environment = self._validate_egress_policy(team_id, spec, reviewed_hosts)
-            self._validate_egress_proxy_attachment(network_name)
+            proxy = egress_proxy() if egress_proxy is not None else None
+            self._validate_egress_proxy_attachment(network_name, proxy)
         if not local_container_policy.egress_environment_valid(environment, expected_proxy_environment):
             raise ApiProblem(
                 HTTPStatus.CONFLICT,
@@ -156,6 +158,7 @@ class LocalAssistantResourcesMixin:
         team_id: str,
         spec: AssistantSpec,
         network_name: str,
+        egress_proxy=None,
     ) -> dict:
         config, environment = self._validate_container_profile(container, team_id, spec, network_name)
         self._validate_container_egress(
@@ -163,6 +166,7 @@ class LocalAssistantResourcesMixin:
             spec,
             network_name,
             environment,
+            egress_proxy,
         )
         return config
 
@@ -172,8 +176,9 @@ class LocalAssistantResourcesMixin:
         team_id: str,
         spec: AssistantSpec,
         network_name: str,
+        egress_proxy=None,
     ) -> dict:
-        config = self._validate_container_isolation(container, team_id, spec, network_name)
+        config = self._validate_container_isolation(container, team_id, spec, network_name, egress_proxy)
         self._admit_assistant_allowed_hosts(container, spec)
         return config
 
