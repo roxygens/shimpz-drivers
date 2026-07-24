@@ -33,7 +33,12 @@ from assistant_human import input_flow as assistant_input_flow
 _controller = controller_binding.current()
 
 
-def _current_team_anchor(team_id: str, container_id: str, owner: str):
+def _current_team_anchor(
+    team_id: str,
+    container_id: str,
+    owner: str,
+    inspect_memo: dict[str, dict[str, dict]] | None = None,
+):
     container = _controller._get_container(manifests.team_container_name(team_id))
     if container is None:
         raise _controller.ApiError(HTTPStatus.CONFLICT, "Team identity changed during the chat turn")
@@ -47,7 +52,7 @@ def _current_team_anchor(team_id: str, container_id: str, owner: str):
         or str(container.labels.get("team.owner", "")) != owner
     ):
         raise _controller.ApiError(HTTPStatus.CONFLICT, "Team identity changed during the chat turn")
-    _controller._require_running_team_isolation(container)
+    _controller._require_running_team_isolation(container, inspect_memo)
     return container
 
 
@@ -198,6 +203,45 @@ class HostedChatSegmentRequest:
     answer_logs: tuple[tuple[str, tuple[object, ...]], ...] = ()
 
 
+def _hosted_chat_current_identity(
+    request: HostedChatSegmentRequest,
+    assistants: tuple[_controller._ActiveAssistant, ...],
+    config: inference_config.InferenceConfig | None,
+    generation: int,
+) -> tuple[object, ...]:
+    if config is None:
+        raise AssertionError("hosted chat segment was not prepared")
+    inspect_memo: dict[str, dict[str, dict]] = {}
+    current_anchor = _controller._current_team_anchor(
+        request.team_id,
+        request.container.id,
+        request.owner,
+        inspect_memo,
+    )
+    team_name = _controller._team_name_from_anchor(current_anchor)
+    current_assistants = tuple(
+        _controller._installed_assistant(request.team_id, active.assistant_id, inspect_memo)[2] for active in assistants
+    )
+    files = _controller._chat_file_metadata(request.team_id, request.file_ids)
+    try:
+        current_config = _controller._inference_store.load(request.team_id)
+    except inference_config.InferenceConfigError as exc:
+        raise _controller.ApiError(HTTPStatus.CONFLICT, "configure this Team's model provider before chatting") from exc
+    _controller._require_model_credential_current(request.owner, config.provider, generation)
+    return (
+        current_anchor.id,
+        request.owner,
+        team_name,
+        tuple(
+            (active.assistant_id, container.id)
+            for active, container in zip(assistants, current_assistants, strict=True)
+        ),
+        files,
+        current_config,
+        generation,
+    )
+
+
 def _run_hosted_chat_segment(request: HostedChatSegmentRequest) -> chat_turn_engine.SegmentResult:
     team_id, assistant_ids, token, container, owner = (
         request.team_id,
@@ -211,6 +255,7 @@ def _run_hosted_chat_segment(request: HostedChatSegmentRequest) -> chat_turn_eng
     initial_identity: tuple[object, ...] = ()
     config: inference_config.InferenceConfig | None = None
     generation = 0
+    prepared_assistants: tuple[_controller._ActiveAssistant, ...] = ()
 
     def require_current_credential() -> None:
         if config is None:
@@ -242,16 +287,19 @@ def _run_hosted_chat_segment(request: HostedChatSegmentRequest) -> chat_turn_eng
         return invocation["result"]
 
     def prepare() -> chat_turn_engine.PreparedSegment:
-        nonlocal bindings, config, generation, initial_identity
-        team_name, assistants, files, config, api_key, generation, initial_identity = _controller._hosted_chat_setup(
-            team_id,
-            request.file_ids,
-            assistant_ids,
-            container,
-            owner,
+        nonlocal bindings, config, generation, initial_identity, prepared_assistants
+        team_name, prepared_assistants, files, config, api_key, generation, initial_identity = (
+            _controller._hosted_chat_setup(
+                team_id,
+                request.file_ids,
+                assistant_ids,
+                container,
+                owner,
+            )
         )
         genesis_by_id = {
-            active.assistant_id: _controller._require_assistant_genesis(active.container) for active in assistants
+            active.assistant_id: _controller._require_assistant_genesis(active.container)
+            for active in prepared_assistants
         }
         context = brain_runtime_client.RuntimeContext(
             thread_id=_controller._brain_thread_id(team_id, container.id),
@@ -269,13 +317,13 @@ def _run_hosted_chat_segment(request: HostedChatSegmentRequest) -> chat_turn_eng
                         for power_id, power in sorted(active.contract.powers.items())
                     ),
                 )
-                for active in assistants
+                for active in prepared_assistants
             ),
             provider=config.provider,
             model=config.model,
             api_key=api_key,
         )
-        bindings = {active.assistant_id: active for active in assistants}
+        bindings = {active.assistant_id: active for active in prepared_assistants}
         batch = power_execution.PowerBatch(
             _controller._power_execution_journal,
             container.id,
@@ -312,13 +360,11 @@ def _run_hosted_chat_segment(request: HostedChatSegmentRequest) -> chat_turn_eng
         return bool(requirements.accounts or requirements.secrets)
 
     def validate_context() -> None:
-        current_anchor = _controller._current_team_anchor(team_id, container.id, owner)
-        *_unused, current_identity = _controller._hosted_chat_setup(
-            team_id,
-            request.file_ids,
-            assistant_ids,
-            current_anchor,
-            owner,
+        current_identity = _controller._hosted_chat_current_identity(
+            request,
+            prepared_assistants,
+            config,
+            generation,
         )
         if current_identity != initial_identity:
             raise _controller.ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry")

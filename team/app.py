@@ -649,6 +649,9 @@ from assistant_human.hosted_chat_segment import (
     _hosted_approval_requirement as _hosted_approval_requirement,
 )
 from assistant_human.hosted_chat_segment import (
+    _hosted_chat_current_identity as _hosted_chat_current_identity,
+)
+from assistant_human.hosted_chat_segment import (
     _hosted_chat_setup as _hosted_chat_setup,
 )
 from assistant_human.hosted_chat_segment import (

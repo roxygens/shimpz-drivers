@@ -304,6 +304,52 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         self.assertEqual(requirements.inputs, (outcome.interaction,))
         self.assertEqual(requirements.approvals, ())
 
+    def test_hosted_context_validation_reuses_the_prepared_inventory(self) -> None:
+        anchor = SimpleNamespace(id="a" * 64, labels={"team.name": "Team"})
+        config = inference_config.InferenceConfig("openai", "gpt-test")
+        turn_token = "turn-token"
+
+        def run_with_validation(strategy, **_kwargs):
+            prepared = strategy.prepare()
+            strategy.validate_context()
+            return (
+                prepared.team_name,
+                prepared.identity,
+                chat_orchestrator.ChatOutcome("done", ()),
+                chat_turn_engine.SegmentRequirements(),
+            )
+
+        with (
+            hosted_harness._patched(
+                _active_team_assistants=lambda _team_id: (),
+                _storage=lambda: SimpleNamespace(metadata=lambda _team_id, _files: []),
+                _inference_store=SimpleNamespace(load=lambda _team_id: config),
+                _model_credential=lambda _owner, _provider: ("test-key", 7),
+                _require_model_credential_current=lambda *_args: None,
+                _current_team_anchor=lambda *_args: anchor,
+            ),
+            mock.patch.object(
+                hosted_app,
+                "_hosted_chat_setup",
+                wraps=hosted_app._hosted_chat_setup,
+            ) as setup,
+            mock.patch.object(hosted_app.chat_turn_engine, "run_segment", side_effect=run_with_validation),
+        ):
+            result = hosted_app._run_hosted_chat_segment(
+                hosted_app.HostedChatSegmentRequest(
+                    team_id="team_1",
+                    file_ids=[],
+                    assistant_ids=(),
+                    token=turn_token,
+                    container=anchor,
+                    owner="owner",
+                    message="Hello",
+                )
+            )
+
+        self.assertEqual(result.outcome.reply, "done")
+        setup.assert_called_once_with("team_1", [], (), anchor, "owner")
+
     def test_hosted_and_local_controllers_build_equivalent_real_segment_strategies(self) -> None:
         assistant_id = "shimpz-cloudflare"
         declared_contract = hosted_app.marketplace.APPS[assistant_id].assistant
