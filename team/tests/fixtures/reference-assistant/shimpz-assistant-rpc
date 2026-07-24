@@ -12,9 +12,9 @@ MAX_RESPONSE = 32 * 1024
 HELP_PATHS = {"/v1/help", *(f"/v1/help/{locale}" for locale in ("en", "pt", "es", "zh", "fr", "de", "ja", "ar"))}
 
 
-def main() -> int:
+def _request() -> tuple[str, str, bytes | None] | None:
     if len(sys.argv) != 3 or sys.argv[1] not in {"GET", "POST"}:
-        return 2
+        return None
     method, path = sys.argv[1:]
     if path not in {
         "/healthz",
@@ -22,17 +22,21 @@ def main() -> int:
         "/v1/powers/list-zones",
         "/v1/powers/list-dns-records",
     }:
-        return 2
+        return None
     raw = sys.stdin.buffer.read(MAX_BODY + 1)
     if len(raw) > MAX_BODY:
-        return 2
+        return None
     try:
         payload = json.loads(raw or b"{}")
     except json.JSONDecodeError:
-        return 2
+        return None
     if not isinstance(payload, dict):
-        return 2
+        return None
     encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8") if method == "POST" else None
+    return method, path, encoded
+
+
+def _relay(method: str, path: str, encoded: bytes | None) -> int:
     connection = http.client.HTTPConnection("127.0.0.1", 8080, timeout=3)
     try:
         headers = {"Content-Type": "application/json", "Content-Length": str(len(encoded))} if encoded else {}
@@ -56,6 +60,13 @@ def main() -> int:
         return 0
     finally:
         connection.close()
+
+
+def main() -> int:
+    request = _request()
+    if request is None:
+        return 2
+    return _relay(*request)
 
 
 if __name__ == "__main__":
