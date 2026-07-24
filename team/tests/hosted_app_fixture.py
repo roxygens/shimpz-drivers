@@ -133,6 +133,9 @@ with mock.patch.dict(
 ):
     spec.loader.exec_module(app)
 
+runtime_state = sys.modules["runtime_state"]
+hosted_resources = sys.modules["container_policy.hosted_resources"]
+
 # The loaded app keeps direct references to its fakes. Restore the process import table so discovery
 # order can never make unrelated tests import a partial Docker/client module.
 for module_name, module in tuple(sys.modules.items()):

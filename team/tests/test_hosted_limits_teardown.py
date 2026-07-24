@@ -11,12 +11,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hosted_app_fixture import _patched, app
+from hosted_app_fixture import _patched, app, hosted_resources, runtime_state
 
 
 class HostedLimitAndTeardownTests(unittest.TestCase):
     def tearDown(self) -> None:
-        app._capacity_reservations.clear()
+        runtime_state._capacity_reservations.clear()
 
     def test_fixed_window_rate_limiter_allows_denies_and_resets(self) -> None:
         limiter = app._FixedWindowRateLimiter(limit=2, window_seconds=10)
@@ -31,14 +31,12 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
     def test_capacity_reservations_count_inflight_memory_and_release(self) -> None:
         empty_usage = app._MemoryUsage(total=0, by_owner={})
         with (
-            _patched(
-                _memory_usage=lambda **_kwargs: empty_usage,
-                GLOBAL_MEMORY_BUDGET_BYTES=100,
-                OWNER_MEMORY_BUDGET_BYTES=100,
-            ),
+            mock.patch.object(hosted_resources, "_memory_usage", side_effect=lambda **_kwargs: empty_usage),
+            mock.patch.object(runtime_state, "GLOBAL_MEMORY_BUDGET_BYTES", 100),
+            mock.patch.object(runtime_state, "OWNER_MEMORY_BUDGET_BYTES", 100),
             app._reserve_capacity("team:one", "account_1", 60, team_slot=False),
         ):
-            self.assertIn("team:one", app._capacity_reservations)
+            self.assertIn("team:one", runtime_state._capacity_reservations)
             with (
                 self.assertRaises(app.ApiError) as exhausted,
                 app._reserve_capacity("app:one:extra", "account_1", 41, team_slot=False),
@@ -46,16 +44,14 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
                 self.fail("an over-budget reservation was admitted")
             self.assertEqual(exhausted.exception.status, HTTPStatus.TOO_MANY_REQUESTS)
 
-        self.assertEqual(app._capacity_reservations, {})
+        self.assertEqual(runtime_state._capacity_reservations, {})
 
     def test_capacity_rejects_duplicate_inflight_resource(self) -> None:
         empty_usage = app._MemoryUsage(total=0, by_owner={})
         with (
-            _patched(
-                _memory_usage=lambda **_kwargs: empty_usage,
-                GLOBAL_MEMORY_BUDGET_BYTES=100,
-                OWNER_MEMORY_BUDGET_BYTES=100,
-            ),
+            mock.patch.object(hosted_resources, "_memory_usage", side_effect=lambda **_kwargs: empty_usage),
+            mock.patch.object(runtime_state, "GLOBAL_MEMORY_BUDGET_BYTES", 100),
+            mock.patch.object(runtime_state, "OWNER_MEMORY_BUDGET_BYTES", 100),
             app._reserve_capacity("team:one", "account_1", 10, team_slot=False),
             self.assertRaises(app.ApiError) as duplicate,
             app._reserve_capacity("team:one", "account_1", 10, team_slot=False),
@@ -63,24 +59,25 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
             self.fail("a duplicate reservation was admitted")
 
         self.assertEqual(duplicate.exception.status, HTTPStatus.CONFLICT)
-        self.assertEqual(app._capacity_reservations, {})
+        self.assertEqual(runtime_state._capacity_reservations, {})
 
     def test_capacity_inventory_runs_outside_reservation_lock(self) -> None:
         lock_observations: list[tuple[str, bool]] = []
 
         def physical_teams(**_kwargs):
-            lock_observations.append(("teams", app._capacity_lock.locked()))
+            lock_observations.append(("teams", runtime_state._capacity_lock.locked()))
             return []
 
         def memory_usage(**_kwargs):
-            lock_observations.append(("memory", app._capacity_lock.locked()))
+            lock_observations.append(("memory", runtime_state._capacity_lock.locked()))
             return app._MemoryUsage(total=0, by_owner={})
 
         with (
-            _patched(_physical_teams=physical_teams, _memory_usage=memory_usage),
+            mock.patch.object(hosted_resources, "_physical_teams", side_effect=physical_teams),
+            mock.patch.object(hosted_resources, "_memory_usage", side_effect=memory_usage),
             app._reserve_capacity("team:one", "account_1", 10, team_slot=True),
         ):
-            self.assertIn("team:one", app._capacity_reservations)
+            self.assertIn("team:one", runtime_state._capacity_reservations)
 
         self.assertEqual(lock_observations, [("teams", False), ("memory", False)])
 

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hosted_app_fixture import _patched, app
+from hosted_app_fixture import app, hosted_resources
 
 TEAM_ID = "team_1"
 CONTAINER_ID = "a" * 64
@@ -57,10 +57,12 @@ class HostedAuthorizationTests(unittest.TestCase):
         for current in cases:
             with (
                 self.subTest(current=current),
-                _patched(
-                    _get_container=lambda _name, current=current: current,
-                    _cleanup_record=lambda _team_id: None,
+                mock.patch.object(
+                    hosted_resources,
+                    "_get_container",
+                    side_effect=lambda _name, current=current: current,
                 ),
+                mock.patch.object(hosted_resources, "_cleanup_record", return_value=None),
                 mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True),
                 self.assertRaises(app.ApiError) as caught,
             ):
@@ -71,7 +73,8 @@ class HostedAuthorizationTests(unittest.TestCase):
     def test_account_scope_failure_is_indistinguishable_from_missing_team(self) -> None:
         current = _container()
         with (
-            _patched(_get_container=lambda _name: current, _cleanup_record=lambda _team_id: None),
+            mock.patch.object(hosted_resources, "_get_container", return_value=current),
+            mock.patch.object(hosted_resources, "_cleanup_record", return_value=None),
             mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True),
             self.assertRaises(app.ApiError) as wrong_owner,
         ):
@@ -81,7 +84,10 @@ class HostedAuthorizationTests(unittest.TestCase):
                 require_isolation=False,
             )
 
-        with _patched(_get_container=lambda _name: None), self.assertRaises(app.ApiError) as missing:
+        with (
+            mock.patch.object(hosted_resources, "_get_container", return_value=None),
+            self.assertRaises(app.ApiError) as missing,
+        ):
             app._authorize(TEAM_ID, ("account", "account_2"))
 
         self.assertEqual(
@@ -96,7 +102,8 @@ class HostedAuthorizationTests(unittest.TestCase):
         self.assertEqual(lease.owner, "account_1")
 
         with (
-            _patched(_get_container=lambda _name: current, _cleanup_record=lambda _team_id: None),
+            mock.patch.object(hosted_resources, "_get_container", return_value=current),
+            mock.patch.object(hosted_resources, "_cleanup_record", return_value=None),
             mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True),
         ):
             self.assertIs(
@@ -105,7 +112,8 @@ class HostedAuthorizationTests(unittest.TestCase):
             )
 
         with (
-            _patched(_get_container=lambda _name: current, _cleanup_record=lambda _team_id: None),
+            mock.patch.object(hosted_resources, "_get_container", return_value=current),
+            mock.patch.object(hosted_resources, "_cleanup_record", return_value=None),
             mock.patch.object(app.network_policy, "brain_identity_valid", return_value=False),
             self.assertRaises(app.ApiError) as invalid_identity,
         ):
@@ -116,7 +124,8 @@ class HostedAuthorizationTests(unittest.TestCase):
         current = _container()
         cleanup = SimpleNamespace(nonce="cleanup")
         with (
-            _patched(_get_container=lambda _name: current, _cleanup_record=lambda _team_id: cleanup),
+            mock.patch.object(hosted_resources, "_get_container", return_value=current),
+            mock.patch.object(hosted_resources, "_cleanup_record", return_value=cleanup),
             mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True),
             self.assertRaises(app.ApiError) as blocked,
         ):
@@ -124,7 +133,8 @@ class HostedAuthorizationTests(unittest.TestCase):
         self.assertEqual(blocked.exception.status, HTTPStatus.CONFLICT)
 
         with (
-            _patched(_get_container=lambda _name: current, _cleanup_record=lambda _team_id: cleanup),
+            mock.patch.object(hosted_resources, "_get_container", return_value=current),
+            mock.patch.object(hosted_resources, "_cleanup_record", return_value=cleanup),
             mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True),
         ):
             self.assertIs(
@@ -173,10 +183,8 @@ class HostedAuthorizationTests(unittest.TestCase):
         handler._send_json = lambda status, payload, **_kwargs: sent.append((status, payload))
 
         with (
-            _patched(
-                _get_container=mock.Mock(return_value=container),
-                _cleanup_record=lambda _team_id: None,
-            ),
+            mock.patch.object(hosted_resources, "_get_container", return_value=container),
+            mock.patch.object(hosted_resources, "_cleanup_record", return_value=None),
             mock.patch.object(
                 app,
                 "_require_current_authorization",

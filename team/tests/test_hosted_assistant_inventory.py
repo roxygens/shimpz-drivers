@@ -4,7 +4,7 @@ import types
 import unittest
 from unittest import mock
 
-from hosted_app_fixture import _patched, app
+from hosted_app_fixture import _patched, app, runtime_state
 
 
 class HostedAssistantInventoryTests(unittest.TestCase):
@@ -44,8 +44,8 @@ class HostedAssistantInventoryTests(unittest.TestCase):
         )
         with (
             mock.patch.dict(app.marketplace.APPS, {second_id: spec}),
+            mock.patch.object(runtime_state, "_docker", engine),
             _patched(
-                _docker=engine,
                 _team_app_containers=lambda _team_id: candidates,
                 _installed_assistant=installed,
             ),
