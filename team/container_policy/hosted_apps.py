@@ -43,14 +43,21 @@ def _team_app_containers(team_id: str) -> list:
     return _controller._docker.containers.list(all=True, filters={"label": ["team.app.driver", f"team.id={team_id}"]})
 
 
-def _app_egress_token(team_id: str, app_id: str, *, create: bool = True) -> str | None:
+def _app_egress_token(
+    team_id: str,
+    app_id: str,
+    *,
+    create: bool = True,
+    store: egress_policy.EgressPolicyStore | None = None,
+) -> str | None:
     """The app instance's stable egress token (its Proxy-Authorization to app-egress-proxy).
 
     Kept in the policy volume (drivers + proxy only) and reused across reinstalls, exactly like
     shimpz-driver's per-app tokens — the proxy maps token → this instance's own allowlist.
     """
     try:
-        return _controller._egress_store().token(
+        current_store = store if store is not None else _controller._egress_store()
+        return current_store.token(
             manifests.team_app_container_name(team_id, app_id),
             create=create,
         )
@@ -58,16 +65,27 @@ def _app_egress_token(team_id: str, app_id: str, *, create: bool = True) -> str 
         _controller._raise_egress_error(exc)
 
 
-def _write_egress_policy(token: str, allowed_hosts: tuple[str, ...]) -> None:
+def _write_egress_policy(
+    token: str,
+    allowed_hosts: tuple[str, ...],
+    store: egress_policy.EgressPolicyStore | None = None,
+) -> None:
     try:
-        _controller._egress_store().write(token, allowed_hosts)
+        current_store = store if store is not None else _controller._egress_store()
+        current_store.write(token, allowed_hosts)
     except egress_policy.EgressPolicyError as exc:
         _controller._raise_egress_error(exc)
 
 
-def _validate_egress_policy(team_id: str, app_id: str, allowed_hosts: tuple[str, ...]) -> str:
+def _validate_egress_policy(
+    team_id: str,
+    app_id: str,
+    allowed_hosts: tuple[str, ...],
+    store: egress_policy.EgressPolicyStore | None = None,
+) -> str:
     try:
-        return _controller._egress_store().validate(
+        current_store = store if store is not None else _controller._egress_store()
+        return current_store.validate(
             manifests.team_app_container_name(team_id, app_id),
             allowed_hosts,
         )
@@ -75,15 +93,24 @@ def _validate_egress_policy(team_id: str, app_id: str, allowed_hosts: tuple[str,
         _controller._raise_egress_error(exc)
 
 
-def _validate_admitted_egress(team_id: str, app_id: str, allowed_hosts: tuple[str, ...]) -> str | None:
+def _validate_admitted_egress(
+    team_id: str,
+    app_id: str,
+    allowed_hosts: tuple[str, ...],
+    store: egress_policy.EgressPolicyStore | None = None,
+) -> str | None:
     if allowed_hosts:
-        return _controller._validate_egress_policy(team_id, app_id, allowed_hosts)
+        return _controller._validate_egress_policy(team_id, app_id, allowed_hosts, store)
     return None
 
 
-def _egress_proxy_environment(token: str) -> dict[str, str]:
+def _egress_proxy_environment(
+    token: str,
+    store: egress_policy.EgressPolicyStore | None = None,
+) -> dict[str, str]:
     try:
-        return _controller._egress_store().proxy_environment(token)
+        current_store = store if store is not None else _controller._egress_store()
+        return current_store.proxy_environment(token)
     except egress_policy.EgressPolicyError as exc:
         _controller._raise_egress_error(exc)
 
@@ -92,6 +119,7 @@ def _validate_assistant_proxy_environment(
     container,
     token: str | None,
     allowed_hosts: tuple[str, ...],
+    store: egress_policy.EgressPolicyStore | None = None,
 ) -> None:
     config = container.attrs.get("Config")
     raw_environment = config.get("Env") if isinstance(config, dict) else None
@@ -101,7 +129,7 @@ def _validate_assistant_proxy_environment(
     proxy_environment = {key: value for key, value in environment.items() if key.upper().endswith("_PROXY")}
     if allowed_hosts and token is None:
         raise _controller.ApiError(HTTPStatus.CONFLICT, "installed Assistant proxy environment failed its contract")
-    expected = _controller._egress_proxy_environment(token) if token is not None else {}
+    expected = _controller._egress_proxy_environment(token, store) if token is not None else {}
     if proxy_environment != expected:
         raise _controller.ApiError(HTTPStatus.CONFLICT, "installed Assistant proxy environment failed its contract")
 
@@ -110,25 +138,28 @@ def _reserve_egress_environment(
     team_id: str,
     app_id: str,
     allowed_hosts: tuple[str, ...],
+    store: egress_policy.EgressPolicyStore | None = None,
 ) -> tuple[str | None, dict[str, str]]:
     if not allowed_hosts:
         return None, {}
-    token = _controller._app_egress_token(team_id, app_id)
+    current_store = store if store is not None else _controller._egress_store()
+    token = _controller._app_egress_token(team_id, app_id, store=current_store)
     if token is None:
         raise _controller.ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant egress token is unavailable")
-    return token, _controller._egress_proxy_environment(token)
+    return token, _controller._egress_proxy_environment(token, current_store)
 
 
 def _activate_admitted_egress(
     network,
     token: str | None,
     allowed_hosts: tuple[str, ...],
+    store: egress_policy.EgressPolicyStore | None = None,
 ) -> None:
     if not allowed_hosts:
         return
     if token is None:
         raise _controller.ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "Assistant egress admission failed")
-    _controller._write_egress_policy(token, allowed_hosts)
+    _controller._write_egress_policy(token, allowed_hosts, store)
     # Only the authenticated app proxy may join the core network. The broad Brain proxy
     # is confined to the separate Brain-egress network and is unreachable from this App.
     _controller._safe_connect(
@@ -348,6 +379,7 @@ def _admit_existing_app(
     owner: str,
     existing,
 ) -> dict[str, object]:
+    egress_store = _controller._egress_store()
     try:
         existing.reload()
     except docker.errors.DockerException as exc:
@@ -374,8 +406,8 @@ def _admit_existing_app(
             f"installed app {app_id!r} uses a different image; uninstall it before reinstalling",
         )
     admitted_hosts = _controller._admit_app_contract(spec, existing)
-    token = _controller._validate_admitted_egress(team_id, app_id, admitted_hosts)
-    _controller._validate_assistant_proxy_environment(existing, token, admitted_hosts)
+    token = _controller._validate_admitted_egress(team_id, app_id, admitted_hosts, egress_store)
+    _controller._validate_assistant_proxy_environment(existing, token, admitted_hosts, egress_store)
     ready, status = _controller._app_ready_now(existing, spec.port, spec.health_path)
     if not ready:
         raise _controller.ApiError(
@@ -421,10 +453,11 @@ def _provision_app_transaction(
     # Return the same explicit admission error as Team create instead of relying on a
     # lower-level Docker create failure when the hostile-tenant runtime is unavailable.
     _controller._require_team_runtime()
+    egress_store = _controller._egress_store()
     try:
         database_url = pgdriver_client.create_app_db(team_id, app_id)["database_url"] if spec.db else ""
         network = _controller._ensure_team_network(team_id)
-        token, proxy_env = _controller._reserve_egress_environment(team_id, app_id, spec.allowed_hosts)
+        token, proxy_env = _controller._reserve_egress_environment(team_id, app_id, spec.allowed_hosts, egress_store)
         kwargs = manifests.build_team_app_kwargs(
             team_id,
             app_id,
@@ -439,8 +472,8 @@ def _provision_app_transaction(
         network.disconnect(container)
         network.connect(container, aliases=[app_id, f"{app_id}.team"])
         admitted_hosts = _controller._admit_app_contract(spec, container)
-        _controller._validate_assistant_proxy_environment(container, token, admitted_hosts)
-        _controller._activate_admitted_egress(network, token, admitted_hosts)
+        _controller._validate_assistant_proxy_environment(container, token, admitted_hosts, egress_store)
+        _controller._activate_admitted_egress(network, token, admitted_hosts, egress_store)
         _controller._start_team_with_isolation(container)
         healthy, reason = _controller._wait_app_healthy(container, spec.port, spec.health_path)
         if not healthy:

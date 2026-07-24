@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import json
 import os
 import tempfile
@@ -14,6 +15,8 @@ from pathlib import Path
 from unittest import mock
 
 from hosted_app_fixture import ANCHOR_ID, _patched, app
+
+hosted_apps = importlib.import_module("container_policy.hosted_apps")
 
 
 class _RouteHarness:
@@ -263,6 +266,32 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
                     app._validate_egress_policy("team_1", "shimpz-cloudflare", hosts)
         self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
 
+    def test_egress_reservation_constructs_one_store_for_the_operation(self) -> None:
+        hosts = ("api.open-meteo.com",)
+        with tempfile.TemporaryDirectory() as directory:
+            policy_root = Path(directory)
+            policy_root.chmod(0o770)
+            with (
+                _patched(
+                    APP_EGRESS_POLICY_DIR=policy_root,
+                    APP_EGRESS_POLICY_GID=os.getgid(),
+                ),
+                mock.patch.object(
+                    hosted_apps.egress_policy,
+                    "EgressPolicyStore",
+                    wraps=hosted_apps.egress_policy.EgressPolicyStore,
+                ) as store_constructor,
+            ):
+                token, environment = app._reserve_egress_environment("team_1", "shimpz-cloudflare", hosts)
+
+        self.assertIsNotNone(token)
+        self.assertEqual(environment, app._egress_proxy_environment(token))
+        store_constructor.assert_called_once_with(
+            policy_root,
+            os.getgid(),
+            "localhost,127.0.0.1,::1,postgres,.team",
+        )
+
     def test_nonempty_hosts_require_the_exact_admitted_proxy_token(self) -> None:
         token = "a" * 32
         hosts = ("api.open-meteo.com",)
@@ -407,6 +436,11 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             )
         return anchor, _patched(
             _active_team_assistants=lambda _team_id: (assistant,),
+            _installed_assistant=lambda _team_id, assistant_id, *_args: (
+                assistant_id,
+                contract,
+                assistant.container,
+            ),
             _require_assistant_genesis=lambda _container: "Use only the declared Cloudflare Powers.",
             _chat_file_metadata=lambda _team_id, _files: [],
             _inference_store=types.SimpleNamespace(load=lambda _team_id: config),

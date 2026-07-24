@@ -213,8 +213,9 @@ def _installed_assistant(
         raise _controller.ApiError(HTTPStatus.CONFLICT, "installed Assistant failed its identity contract")
     _controller._require_running_team_isolation(container, inspect_memo)
     allowed_hosts = _controller._require_assistant_allowed_hosts(spec, container)
-    token = _controller._validate_admitted_egress(team_id, assistant_id, allowed_hosts)
-    _controller._validate_assistant_proxy_environment(container, token, allowed_hosts)
+    egress_store = _controller._egress_store()
+    token = _controller._validate_admitted_egress(team_id, assistant_id, allowed_hosts, egress_store)
+    _controller._validate_assistant_proxy_environment(container, token, allowed_hosts, egress_store)
     return assistant_id, contract, container
 
 

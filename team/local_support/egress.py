@@ -82,9 +82,17 @@ class LocalEgressMixin:
     def _egress_policy_identity(self, team_id: str, assistant_id: str) -> str:
         return f"{self.space_id}\0{team_id}\0{assistant_id}"
 
-    def _egress_token(self, team_id: str, assistant_id: str, *, create: bool) -> str | None:
+    def _egress_token(
+        self,
+        team_id: str,
+        assistant_id: str,
+        *,
+        create: bool,
+        store: egress_policy.EgressPolicyStore | None = None,
+    ) -> str | None:
         try:
-            return _egress_store().token(
+            current_store = store if store is not None else _egress_store()
+            return current_store.token(
                 self._egress_policy_identity(team_id, assistant_id),
                 create=create,
             )
@@ -92,28 +100,43 @@ class LocalEgressMixin:
             _raise_egress_problem(exc)
 
     @staticmethod
-    def _proxy_environment(token: str) -> dict[str, str]:
+    def _proxy_environment(
+        token: str,
+        store: egress_policy.EgressPolicyStore | None = None,
+    ) -> dict[str, str]:
         try:
-            return _egress_store().proxy_environment(token)
+            current_store = store if store is not None else _egress_store()
+            return current_store.proxy_environment(token)
         except egress_policy.EgressPolicyError as exc:
             _raise_egress_problem(exc)
+
+    def _reserve_assistant_egress_environment(
+        self,
+        team_id: str,
+        assistant_id: str,
+    ) -> tuple[str | None, dict[str, str], egress_policy.EgressPolicyStore]:
+        store = _egress_store()
+        token = self._egress_token(team_id, assistant_id, create=True, store=store)
+        environment = self._proxy_environment(token, store) if token is not None else {}
+        return token, environment, store
 
     def _write_egress_policy(
         self,
         team_id: str,
         spec: AssistantSpec,
         allowed_hosts: tuple[str, ...],
+        store: egress_policy.EgressPolicyStore | None = None,
     ) -> dict[str, str]:
         try:
-            store = _egress_store()
-            token = store.token(
+            current_store = store if store is not None else _egress_store()
+            token = current_store.token(
                 self._egress_policy_identity(team_id, spec.assistant_id),
                 create=True,
             )
             if token is None:
                 raise egress_policy.EgressPolicyUnavailableError("egress token was not created")
-            store.write(token, allowed_hosts)
-            return store.proxy_environment(token)
+            current_store.write(token, allowed_hosts)
+            return current_store.proxy_environment(token)
         except egress_policy.EgressPolicyError as exc:
             _raise_egress_problem(exc)
 
@@ -122,14 +145,16 @@ class LocalEgressMixin:
         team_id: str,
         spec: AssistantSpec,
         allowed_hosts: tuple[str, ...],
+        store: egress_policy.EgressPolicyStore | None = None,
     ) -> dict[str, str]:
         try:
-            store = _egress_store()
-            token = store.validate_admitted(
-                self._read_admitted_egress_policy(team_id, spec.assistant_id),
+            current_store = store if store is not None else _egress_store()
+            admitted = self._read_admitted_egress_policy(team_id, spec.assistant_id, current_store)
+            token = current_store.validate_admitted(
+                admitted,
                 allowed_hosts,
             )
-            return store.proxy_environment(token)
+            return current_store.proxy_environment(token)
         except egress_policy.EgressPolicyError as exc:
             _raise_egress_problem(exc)
 
@@ -137,18 +162,26 @@ class LocalEgressMixin:
         self,
         team_id: str,
         assistant_id: str,
+        store: egress_policy.EgressPolicyStore | None = None,
     ) -> tuple[str, tuple[str, ...]] | None:
         """Read only a canonical policy previously admitted and owned by this controller."""
         try:
-            return _egress_store().admitted(
+            current_store = store if store is not None else _egress_store()
+            return current_store.admitted(
                 self._egress_policy_identity(team_id, assistant_id),
             )
         except egress_policy.EgressPolicyError as exc:
             _raise_egress_problem(exc)
 
-    def _remove_egress_policy(self, team_id: str, assistant_id: str) -> None:
+    def _remove_egress_policy(
+        self,
+        team_id: str,
+        assistant_id: str,
+        store: egress_policy.EgressPolicyStore | None = None,
+    ) -> None:
         try:
-            _egress_store().remove(
+            current_store = store if store is not None else _egress_store()
+            current_store.remove(
                 self._egress_policy_identity(team_id, assistant_id),
             )
         except egress_policy.EgressPolicyError as exc:
@@ -335,14 +368,16 @@ class LocalEgressMixin:
         spec: AssistantSpec,
         network,
         allowed_hosts: tuple[str, ...],
+        store: egress_policy.EgressPolicyStore | None = None,
     ) -> dict[str, str]:
         if not allowed_hosts:
             return {}
-        environment = self._write_egress_policy(team_id, spec, allowed_hosts)
+        current_store = store if store is not None else _egress_store()
+        environment = self._write_egress_policy(team_id, spec, allowed_hosts, current_store)
         try:
             self._connect_egress_proxy(network)
         except ApiProblem:
-            self._remove_egress_policy(team_id, spec.assistant_id)
+            self._remove_egress_policy(team_id, spec.assistant_id, current_store)
             raise
         return environment
 

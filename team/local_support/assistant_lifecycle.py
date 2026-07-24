@@ -85,17 +85,20 @@ class LocalAssistantLifecycleMixin:
     def _create_assistant_container(self, team_id: str, spec: AssistantSpec, network, image) -> None:
         container = None
         egress_prepared = False
+        egress_store = None
         try:
             proxy_environment: dict[str, str] = {}
             if spec.allowed_hosts:
-                token = self._egress_token(team_id, spec.assistant_id, create=True)
+                token, proxy_environment, egress_store = self._reserve_assistant_egress_environment(
+                    team_id,
+                    spec.assistant_id,
+                )
                 if token is None:
                     raise ApiProblem(
                         HTTPStatus.SERVICE_UNAVAILABLE,
                         "Assistant egress token could not be saved",
                         code="egress-policy-unavailable",
                     )
-                proxy_environment = self._proxy_environment(token)
                 egress_prepared = True
             container = self.client.containers.create(
                 image=spec.image,
@@ -135,7 +138,7 @@ class LocalAssistantLifecycleMixin:
                 )
             allowed_hosts = self._admit_assistant_allowed_hosts(container, spec)
             if allowed_hosts:
-                self._activate_assistant_egress(team_id, spec, network, allowed_hosts)
+                self._activate_assistant_egress(team_id, spec, network, allowed_hosts, egress_store)
             container.start()
             self._validate_container(container, team_id, spec, network.name)
             self._wait_ready(container, spec)

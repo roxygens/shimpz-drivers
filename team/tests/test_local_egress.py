@@ -141,6 +141,27 @@ class LocalAssistantEgressTests(unittest.TestCase):
             environment,
         )
 
+    def test_activation_constructs_one_policy_store_for_the_operation(self) -> None:
+        with mock.patch.object(
+            local_egress.egress_policy,
+            "EgressPolicyStore",
+            wraps=local_egress.egress_policy.EgressPolicyStore,
+        ) as store_constructor:
+            self.controller._activate_assistant_egress(
+                "team_1",
+                self.spec,
+                self.network,
+                tuple(sorted(self.spec.allowed_hosts)),
+            )
+
+        store_constructor.assert_called_once_with(
+            self.policy_root,
+            os.getgid(),
+            "127.0.0.1,localhost",
+            local_egress.APP_EGRESS_PROXY_ALIAS,
+            local_egress.APP_EGRESS_PROXY_PORT,
+        )
+
     def test_last_uninstall_removes_policy_and_detaches_proxy(self) -> None:
         environment = self.controller._activate_assistant_egress(
             "team_1",
