@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -402,6 +403,9 @@ class LocalOAuthAccountTests(unittest.TestCase):
             controller.space_id = "local-space"
             controller.brain_runtime = Runtime()
             controller.power_state = SimpleNamespace()
+            controller.storage = SimpleNamespace(
+                metadata_connection=lambda _team_id, _files: contextlib.nullcontext(None),
+            )
             controller.assistant_accounts = oauth_account_store.OAuthAccountStore(
                 Path(directory) / "state" / "accounts.json",
                 Path(directory) / "key" / "aes256.key",

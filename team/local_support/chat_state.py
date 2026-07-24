@@ -32,7 +32,12 @@ MAX_CHAT_FILES = 8
 
 
 class LocalChatStateMixin:
-    def _chat_file_metadata(self, team_id: str, file_ids: object) -> list[dict[str, object]]:
+    def _chat_file_metadata(
+        self,
+        team_id: str,
+        file_ids: object,
+        metadata_connection=None,
+    ) -> list[dict[str, object]]:
         if not isinstance(file_ids, list) or len(file_ids) > MAX_CHAT_FILES:
             raise ApiProblem(
                 HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -40,7 +45,7 @@ class LocalChatStateMixin:
                 code="invalid-files",
             )
         try:
-            return self.storage.metadata(team_id, file_ids)
+            return self.storage.metadata(team_id, file_ids, metadata_connection)
         except team_storage.StorageNotFoundError as exc:
             raise ApiProblem(HTTPStatus.NOT_FOUND, "selected file not found", code="file-not-found") from exc
         except team_storage.StorageInputError as exc:
@@ -54,6 +59,7 @@ class LocalChatStateMixin:
         file_ids: object,
         provider: str,
         assistant_ids: tuple[str, ...],
+        metadata_connection=None,
     ) -> tuple[
         str,
         str,
@@ -63,7 +69,7 @@ class LocalChatStateMixin:
     ]:
         with self._lock(team_id):
             network = self._network(team_id)
-            team_name = self._validate_network(network, team_id)
+            team_name = self._validate_network(network, team_id, refresh=False)
             network_id = getattr(network, "id", None)
             if not isinstance(network_id, str) or not network_id:
                 raise ApiProblem(HTTPStatus.CONFLICT, "Team resource ownership conflict", code="ownership-conflict")
@@ -77,7 +83,7 @@ class LocalChatStateMixin:
                     "a selected Assistant is unavailable",
                     code="assistant-unavailable",
                 ) from None
-            files = self._chat_file_metadata(team_id, file_ids)
+            files = self._chat_file_metadata(team_id, file_ids, metadata_connection)
             try:
                 config = self.inference_store.load(team_id)
             except inference_config.InferenceConfigError as exc:
@@ -148,6 +154,14 @@ class LocalChatStateMixin:
                 code="docker-unavailable",
             ) from exc
         active: list[_ActiveAssistant] = []
+        egress_proxy = None
+
+        def current_egress_proxy():
+            nonlocal egress_proxy
+            if egress_proxy is None:
+                egress_proxy = self._egress_proxy()
+            return egress_proxy
+
         for container in containers:
             assistant_id = (container.labels or {}).get(ASSISTANT_LABEL)
             spec = self.registry.get(assistant_id)
@@ -157,14 +171,20 @@ class LocalChatStateMixin:
                     "an installed Assistant is no longer allowlisted",
                     code="assistant-registry-drift",
                 )
-            self._validate_container(container, team_id, spec, network_name)
+            self._validate_container(
+                container,
+                team_id,
+                spec,
+                network_name,
+                current_egress_proxy,
+                refresh=False,
+            )
             if container.id in self._blocked_power_workloads:
                 raise ApiProblem(
                     HTTPStatus.SERVICE_UNAVAILABLE,
                     "Assistant Power execution is blocked until this Assistant is reinstalled",
                     code="assistant-power-blocked",
                 )
-            container.reload()
             if container.status == "running":
                 active.append(_ActiveAssistant(spec=spec, container_id=container.id, container=container))
         active.sort(key=lambda item: item.spec.assistant_id)

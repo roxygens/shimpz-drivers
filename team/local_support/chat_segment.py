@@ -36,6 +36,14 @@ class LocalChatSegmentMixin:
         self,
         request: SegmentRequest,
     ) -> chat_turn_engine.SegmentResult:
+        with self.storage.metadata_connection(request.team_id, request.file_ids) as metadata_connection:
+            return self._run_chat_segment_with_metadata(request, metadata_connection)
+
+    def _run_chat_segment_with_metadata(
+        self,
+        request: SegmentRequest,
+        metadata_connection,
+    ) -> chat_turn_engine.SegmentResult:
         answers_by_interrupt = dict(request.answer_logs)
         if len(answers_by_interrupt) != len(request.answer_logs):
             raise ApiProblem(
@@ -66,6 +74,7 @@ class LocalChatSegmentMixin:
                 request.file_ids,
                 request.provider,
                 request.assistant_ids,
+                metadata_connection,
             )
             identity = self._chat_identity(team_name, network_id, assistants, files, config)
             genesis_by_id = {active.spec.assistant_id: self._active_assistant_genesis(active) for active in assistants}
@@ -133,6 +142,7 @@ class LocalChatSegmentMixin:
                 request.provider,
                 request.assistant_ids,
                 identity,
+                metadata_connection,
             )
 
         current_message = request.message

@@ -104,9 +104,12 @@ def _local_controller(local_active, config, events: list[str], fail):
     controller.power_state = SimpleNamespace()
     controller._lock = lambda _team_id: contextlib.nullcontext()
     controller._network = lambda _team_id: SimpleNamespace(id="a" * 64, name="team-network")
-    controller._validate_network = lambda _network, _team_id: "Team"
+    controller._validate_network = lambda _network, _team_id, **_kwargs: "Team"
     controller._active_chat_assistants = lambda _team_id, _network_name: (local_active,)
-    controller.storage = SimpleNamespace(metadata=lambda _team_id, _files: [])
+    controller.storage = SimpleNamespace(
+        metadata=lambda _team_id, _files, _connection=None: [],
+        metadata_connection=lambda _team_id, _files: contextlib.nullcontext(None),
+    )
     controller.inference_store = SimpleNamespace(load=lambda _team_id: config)
     controller._active_assistant_genesis = lambda _active: "Use the declared Power."
 

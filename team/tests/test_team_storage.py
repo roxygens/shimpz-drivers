@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 TEAM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEAM))
@@ -137,6 +138,32 @@ class TeamStorageTests(unittest.TestCase):
                 storage.put("beta", name, b"x")
         with self.assertRaises(team_storage.StorageError):
             storage.put("beta", "safe.txt", b"x", "text/plain; charset=utf-8")
+
+    def test_selected_metadata_reuses_one_bounded_reader(self) -> None:
+        storage = team_storage.TeamStorage(self.root, limit_bytes=128)
+        selected = storage.put("alpha", "selected.txt", b"selected", "text/plain")
+        storage.put("alpha", "other.txt", b"other", "text/plain")
+        storage.list = mock.Mock(side_effect=AssertionError("metadata must not scan the full inventory"))
+        statements: list[str] = []
+
+        with (
+            mock.patch.object(storage, "_connect", wraps=storage._connect) as connect,
+            storage.metadata_connection("alpha", [selected["id"]]) as reader,
+        ):
+            self.assertIsNotNone(reader)
+            reader.connection.set_trace_callback(statements.append)
+            first = storage.metadata("alpha", [selected["id"]], reader)
+            second = storage.metadata("alpha", [selected["id"]], reader)
+            with self.assertRaises(team_storage.StorageError):
+                storage.metadata("beta", [selected["id"]], reader)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first[0]["name"], "selected.txt")
+        connect.assert_called_once()
+        selects = [statement for statement in statements if statement.startswith("SELECT ")]
+        self.assertEqual(len(selects), 2)
+        self.assertTrue(all(" WHERE id IN (" in statement for statement in selects))
+        storage.list.assert_not_called()
 
     def test_database_page_ceiling_and_integrity_check_fail_closed(self) -> None:
         storage = team_storage.TeamStorage(self.root, limit_bytes=64)

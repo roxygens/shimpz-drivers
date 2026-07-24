@@ -196,7 +196,6 @@ class LocalEgressMixin:
             )
         try:
             proxy = self.client.containers.get(APP_EGRESS_PROXY_CONTAINER)
-            proxy.reload()
         except (NotFound, DockerException) as exc:
             raise ApiProblem(
                 HTTPStatus.SERVICE_UNAVAILABLE,
@@ -385,8 +384,9 @@ class LocalEgressMixin:
     def _labels_include(actual: object, expected: dict[str, str]) -> bool:
         return isinstance(actual, dict) and all(actual.get(key) == value for key, value in expected.items())
 
-    def _validate_network(self, network, team_id: str) -> str:
-        network.reload()
+    def _validate_network(self, network, team_id: str, *, refresh: bool = True) -> str:
+        if refresh:
+            network.reload()
         attrs = network.attrs
         expected = self._base_labels(team_id, "team")
         labels = attrs.get("Labels") or {}

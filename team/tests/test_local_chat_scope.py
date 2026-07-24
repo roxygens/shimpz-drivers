@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import sys
 import tempfile
 from dataclasses import replace
@@ -40,6 +41,69 @@ OUTDATED_ASSISTANT_IMAGE = "ghcr.io/theshimpz/shimpz-space@sha256:" + "a" * 64
 
 
 class LocalChatScopeTests(LocalContractCase):
+    def test_chat_setup_validates_the_network_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, object())
+            labels = controller._base_labels("team_1", "team")
+            labels[local_app.TEAM_NAME_LABEL] = "Marketing"
+            network = SimpleNamespace(
+                id="a" * 64,
+                name=controller._network_name("team_1"),
+                attrs={
+                    "Name": controller._network_name("team_1"),
+                    "Driver": "bridge",
+                    "Internal": True,
+                    "Attachable": False,
+                    "Labels": labels,
+                },
+                reload=mock.Mock(),
+            )
+            controller.client = SimpleNamespace(networks=SimpleNamespace(get=lambda _name: network))
+            controller._network = local_app.LocalController._network.__get__(controller)
+            controller._validate_network = local_app.LocalController._validate_network.__get__(controller)
+
+            setup = controller._chat_setup("team_1", [], "openai", ())
+
+        self.assertEqual(setup[0], "Marketing")
+        network.reload.assert_called_once_with()
+
+    def test_chat_reuses_one_selected_file_connection_across_revalidation(self) -> None:
+        class Runtime:
+            @staticmethod
+            def start(_context, _message):
+                return brain_runtime_client.RuntimeTurn(status="completed", reply="Done.", powers=())
+
+        file_id = "a" * 32
+        connection = object()
+        opened = 0
+        metadata_connections = []
+
+        @contextlib.contextmanager
+        def metadata_connection(_team_id, _file_ids):
+            nonlocal opened
+            opened += 1
+            yield connection
+
+        def metadata(_team_id, _file_ids, current_connection=None):
+            metadata_connections.append(current_connection)
+            return [{"id": file_id, "name": "brief.txt", "media_type": "text/plain", "size": 5}]
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, Runtime())
+            controller.storage = SimpleNamespace(metadata=metadata, metadata_connection=metadata_connection)
+
+            response = controller.chat(
+                "team_1",
+                {"message": "Summarize", "files": [file_id], "assistant_ids": []},
+                "openai",
+                "sk-test-0123456789",
+            )
+
+        self.assertEqual(response["reply"], "Done.")
+        self.assertEqual(opened, 1)
+        self.assertGreaterEqual(len(metadata_connections), 2)
+        self.assertTrue(all(current is connection for current in metadata_connections))
+
     def test_power_output_containing_a_human_answer_is_blocked_and_redacted(self) -> None:
         answer = "human-submitted-private-value"
         with tempfile.TemporaryDirectory() as directory:

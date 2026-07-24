@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -111,7 +112,10 @@ class LocalContractCase(unittest.TestCase):
             image,
             with_test_secrets=configure_secrets is not None,
         )
-        controller.storage = SimpleNamespace(metadata=lambda _team_id, _files: [])
+        controller.storage = SimpleNamespace(
+            metadata=lambda _team_id, _files, _connection=None: [],
+            metadata_connection=lambda _team_id, _files: nullcontext(None),
+        )
         controller.inference_store = inference_config.InferenceConfigStore(Path(directory) / "inference")
         controller.inference_store.save(
             "team_1",
@@ -184,7 +188,7 @@ class LocalContractCase(unittest.TestCase):
         container = SimpleNamespace(id="assistant-container", status="running", reload=lambda: None)
         network = SimpleNamespace(id="a" * 64, name="team-network")
         controller._network = lambda _team_id: network
-        controller._validate_network = lambda _network, _team_id: "Marketing"
+        controller._validate_network = lambda _network, _team_id, **_kwargs: "Marketing"
         controller._assistant_container = lambda _team_id, _assistant: container
         controller._validate_container = lambda *_args: None
         controller._active_chat_assistants = lambda _team_id, _network: (

@@ -143,8 +143,11 @@ class LocalAssistantResourcesMixin:
         team_id: str,
         spec: AssistantSpec,
         network_name: str,
+        *,
+        refresh: bool = True,
     ) -> tuple[dict, dict[str, str]]:
-        container.reload()
+        if refresh:
+            container.reload()
         expected_labels = self._assistant_labels(team_id, spec)
         expected_labels.pop(IMAGE_LABEL)
         admitted = local_container_policy.inspect_profile(
@@ -200,8 +203,16 @@ class LocalAssistantResourcesMixin:
         spec: AssistantSpec,
         network_name: str,
         egress_proxy=None,
+        *,
+        refresh: bool = True,
     ) -> dict:
-        config, environment = self._validate_container_profile(container, team_id, spec, network_name)
+        config, environment = self._validate_container_profile(
+            container,
+            team_id,
+            spec,
+            network_name,
+            refresh=refresh,
+        )
         self._validate_container_egress(
             team_id,
             spec,
@@ -218,8 +229,17 @@ class LocalAssistantResourcesMixin:
         spec: AssistantSpec,
         network_name: str,
         egress_proxy=None,
+        *,
+        refresh: bool = True,
     ) -> dict:
-        config = self._validate_container_isolation(container, team_id, spec, network_name, egress_proxy)
+        config = self._validate_container_isolation(
+            container,
+            team_id,
+            spec,
+            network_name,
+            egress_proxy,
+            refresh=refresh,
+        )
         self._admit_assistant_allowed_hosts(container, spec)
         return config
 
@@ -236,6 +256,22 @@ class LocalAssistantResourcesMixin:
                 code="assistant-update-required",
             )
 
-    def _validate_container(self, container, team_id: str, spec: AssistantSpec, network_name: str) -> None:
-        config = self._validate_container_security(container, team_id, spec, network_name)
+    def _validate_container(
+        self,
+        container,
+        team_id: str,
+        spec: AssistantSpec,
+        network_name: str,
+        egress_proxy=None,
+        *,
+        refresh: bool = True,
+    ) -> None:
+        config = self._validate_container_security(
+            container,
+            team_id,
+            spec,
+            network_name,
+            egress_proxy,
+            refresh=refresh,
+        )
         self._validate_current_assistant_artifact(config, spec)

@@ -695,7 +695,7 @@ class LocalContractTests(LocalContractCase):
             containers=SimpleNamespace(list=lambda **_kwargs: []),
             networks=SimpleNamespace(list=lambda **_kwargs: [network]),
         )
-        controller._validate_network = lambda _network, team_id: events.append(("validate-network", team_id))
+        controller._validate_network = lambda _network, team_id, **_kwargs: events.append(("validate-network", team_id))
         controller._delete_all_secret_state = lambda: events.append("delete-secrets")
         controller._delete_all_account_state = lambda: events.append("delete-accounts")
         controller._revoke_all_approval_grants = lambda: events.append("revoke-approvals")
@@ -833,7 +833,7 @@ class LocalContractTests(LocalContractCase):
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, Runtime())
             names = iter(("Marketing", "Renamed"))
-            controller._validate_network = lambda _network, _team_id: next(names)
+            controller._validate_network = lambda _network, _team_id, **_kwargs: next(names)
 
             with self.assertRaises(local_app.ApiProblem) as caught:
                 controller.chat(

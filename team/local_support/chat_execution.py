@@ -189,8 +189,9 @@ class LocalChatExecutionMixin:
         provider: str,
         assistant_ids: tuple[str, ...],
         identity: tuple[object, ...],
+        metadata_connection=None,
     ) -> None:
-        current = self._chat_setup(team_id, file_ids, provider, assistant_ids)
+        current = self._chat_setup(team_id, file_ids, provider, assistant_ids, metadata_connection)
         if self._chat_identity(*current) != identity:
             raise ApiProblem(
                 HTTPStatus.CONFLICT,

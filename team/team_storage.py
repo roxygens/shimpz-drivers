@@ -15,8 +15,9 @@ import shutil
 import sqlite3
 import stat
 import time
-from collections.abc import Callable
-from contextlib import closing
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_LIMIT_BYTES = 100 * 1024 * 1024
@@ -27,6 +28,16 @@ MAX_MEDIA_TYPE_BYTES = 127
 _TEAM_ID = re.compile(r"[a-z0-9_]{1,40}")
 _FILE_ID = re.compile(r"[a-f0-9]{32}")
 _MEDIA_TYPE = re.compile(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*")
+_METADATA_SELECTS = (
+    "SELECT id,name,media_type,size FROM files WHERE id IN (?)",
+    "SELECT id,name,media_type,size FROM files WHERE id IN (?,?)",
+    "SELECT id,name,media_type,size FROM files WHERE id IN (?,?,?)",
+    "SELECT id,name,media_type,size FROM files WHERE id IN (?,?,?,?)",
+    "SELECT id,name,media_type,size FROM files WHERE id IN (?,?,?,?,?)",
+    "SELECT id,name,media_type,size FROM files WHERE id IN (?,?,?,?,?,?)",
+    "SELECT id,name,media_type,size FROM files WHERE id IN (?,?,?,?,?,?,?)",
+    "SELECT id,name,media_type,size FROM files WHERE id IN (?,?,?,?,?,?,?,?)",
+)
 
 
 class StorageError(RuntimeError):
@@ -43,6 +54,12 @@ class StorageNotFoundError(StorageError):
 
 class StorageInputError(StorageError):
     """Client-supplied file metadata or content is invalid."""
+
+
+@dataclass(frozen=True, slots=True)
+class _MetadataReader:
+    team_id: str
+    connection: sqlite3.Connection
 
 
 def _team_id(value: object) -> str:
@@ -317,20 +334,58 @@ class TeamStorage:
             content,
         )
 
-    def metadata(self, team_id: str, file_ids: list[object]) -> list[dict[str, object]]:
+    @staticmethod
+    def _metadata_ids(file_ids: list[object]) -> list[str]:
         if not isinstance(file_ids, list) or len(file_ids) > 8:
             raise StorageInputError("at most 8 file ids may be selected")
         safe_ids = [_file_id(file_id) for file_id in file_ids]
         if len(set(safe_ids)) != len(safe_ids):
             raise StorageInputError("file ids must be unique")
+        return safe_ids
+
+    @contextmanager
+    def metadata_connection(
+        self,
+        team_id: str,
+        file_ids: list[object],
+    ) -> Iterator[_MetadataReader | None]:
+        """Keep one selected-file reader open across a chat turn."""
+        safe_ids = self._metadata_ids(file_ids)
+        if not safe_ids:
+            yield None
+            return
+        safe_team_id = _team_id(team_id)
+        limit_bytes = self._limit(safe_team_id)
+        with closing(self._connect(safe_team_id, create=False, limit_bytes=limit_bytes)) as connection:
+            yield _MetadataReader(safe_team_id, connection)
+
+    def metadata(
+        self,
+        team_id: str,
+        file_ids: list[object],
+        reader: _MetadataReader | None = None,
+    ) -> list[dict[str, object]]:
+        safe_ids = self._metadata_ids(file_ids)
+        if not safe_ids:
+            return []
+        safe_team_id = _team_id(team_id)
+        if reader is None:
+            with self.metadata_connection(team_id, file_ids) as current:
+                return self.metadata(team_id, file_ids, current)
+        if reader.team_id != safe_team_id:
+            raise StorageError("metadata reader belongs to another Team")
+        rows = reader.connection.execute(
+            _METADATA_SELECTS[len(safe_ids) - 1],
+            safe_ids,
+        ).fetchall()
         by_id = {
-            item["id"]: {
-                "id": item["id"],
-                "name": item["name"],
-                "media_type": item["media_type"],
-                "size": item["size"],
+            row[0]: {
+                "id": row[0],
+                "name": row[1],
+                "media_type": row[2],
+                "size": row[3],
             }
-            for item in self.list(team_id)["files"]
+            for row in rows
         }
         try:
             return [by_id[file_id] for file_id in safe_ids]
