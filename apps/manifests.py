@@ -7,9 +7,7 @@ never carries any of them, so there is nothing for a caller to override.
 
 from __future__ import annotations
 
-import ipaddress
 import os
-from pathlib import PurePosixPath
 
 import docker
 import docker.types
@@ -24,8 +22,8 @@ APP_NETWORK_PREFIX = os.environ.get("SHIMPZ_APP_NETWORK_PREFIX", "net_app_")
 # Multi-instance (R137): SHIMPZ_SUFFIX names this instance's resources; empty (the default) keeps
 # every generated name byte-identical to the single-instance era — prod is untouched by design.
 APP_CONTAINER_PREFIX = f"app{os.environ.get('SHIMPZ_SUFFIX', '')}_"
-CONTAINER_ALL_INTERFACES = str(ipaddress.IPv4Address(0))
-CONTAINER_TMP = str(PurePosixPath("/") / "tmp")
+CONTAINER_ALL_INTERFACES = "0.0.0.0"
+CONTAINER_TMP = "/tmp"
 
 # 1g, not 512m: real uvicorn backends idle near 500 MiB — three sat pinned at 91–99% of the old
 # 512m cap for days, one allocation from an OOM-kill (Round 125). A limit is not a reservation
