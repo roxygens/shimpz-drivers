@@ -11,7 +11,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hosted_app_fixture import app, hosted_lifecycle, hosted_resources, runtime_state
+from hosted_app_fixture import hosted_lifecycle, hosted_resources, runtime_state
+
+cleanup_state = hosted_lifecycle.cleanup_state
+pgdriver_client = hosted_lifecycle.pgdriver_client
 
 
 class HostedLimitAndTeardownTests(unittest.TestCase):
@@ -19,7 +22,7 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
         runtime_state._capacity_reservations.clear()
 
     def test_fixed_window_rate_limiter_allows_denies_and_resets(self) -> None:
-        limiter = app._FixedWindowRateLimiter(limit=2, window_seconds=10)
+        limiter = runtime_state._FixedWindowRateLimiter(limit=2, window_seconds=10)
 
         self.assertEqual(limiter.consume("account", now=0), 0)
         self.assertEqual(limiter.consume("account", now=1), 0)
@@ -29,17 +32,17 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
         self.assertEqual(limiter.consume("account", now=10), 0)
 
     def test_capacity_reservations_count_inflight_memory_and_release(self) -> None:
-        empty_usage = app._MemoryUsage(total=0, by_owner={})
+        empty_usage = hosted_resources._MemoryUsage(total=0, by_owner={})
         with (
             mock.patch.object(hosted_resources, "_memory_usage", side_effect=lambda **_kwargs: empty_usage),
             mock.patch.object(runtime_state, "GLOBAL_MEMORY_BUDGET_BYTES", 100),
             mock.patch.object(runtime_state, "OWNER_MEMORY_BUDGET_BYTES", 100),
-            app._reserve_capacity("team:one", "account_1", 60, team_slot=False),
+            hosted_resources._reserve_capacity("team:one", "account_1", 60, team_slot=False),
         ):
             self.assertIn("team:one", runtime_state._capacity_reservations)
             with (
-                self.assertRaises(app.ApiError) as exhausted,
-                app._reserve_capacity("app:one:extra", "account_1", 41, team_slot=False),
+                self.assertRaises(runtime_state.ApiError) as exhausted,
+                hosted_resources._reserve_capacity("app:one:extra", "account_1", 41, team_slot=False),
             ):
                 self.fail("an over-budget reservation was admitted")
             self.assertEqual(exhausted.exception.status, HTTPStatus.TOO_MANY_REQUESTS)
@@ -47,14 +50,14 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
         self.assertEqual(runtime_state._capacity_reservations, {})
 
     def test_capacity_rejects_duplicate_inflight_resource(self) -> None:
-        empty_usage = app._MemoryUsage(total=0, by_owner={})
+        empty_usage = hosted_resources._MemoryUsage(total=0, by_owner={})
         with (
             mock.patch.object(hosted_resources, "_memory_usage", side_effect=lambda **_kwargs: empty_usage),
             mock.patch.object(runtime_state, "GLOBAL_MEMORY_BUDGET_BYTES", 100),
             mock.patch.object(runtime_state, "OWNER_MEMORY_BUDGET_BYTES", 100),
-            app._reserve_capacity("team:one", "account_1", 10, team_slot=False),
-            self.assertRaises(app.ApiError) as duplicate,
-            app._reserve_capacity("team:one", "account_1", 10, team_slot=False),
+            hosted_resources._reserve_capacity("team:one", "account_1", 10, team_slot=False),
+            self.assertRaises(runtime_state.ApiError) as duplicate,
+            hosted_resources._reserve_capacity("team:one", "account_1", 10, team_slot=False),
         ):
             self.fail("a duplicate reservation was admitted")
 
@@ -70,12 +73,12 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
 
         def memory_usage(**_kwargs):
             lock_observations.append(("memory", runtime_state._capacity_lock.locked()))
-            return app._MemoryUsage(total=0, by_owner={})
+            return hosted_resources._MemoryUsage(total=0, by_owner={})
 
         with (
             mock.patch.object(hosted_resources, "_physical_teams", side_effect=physical_teams),
             mock.patch.object(hosted_resources, "_memory_usage", side_effect=memory_usage),
-            app._reserve_capacity("team:one", "account_1", 10, team_slot=True),
+            hosted_resources._reserve_capacity("team:one", "account_1", 10, team_slot=True),
         ):
             self.assertIn("team:one", runtime_state._capacity_reservations)
 
@@ -94,7 +97,7 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as directory,
-            mock.patch.object(app.cleanup_state, "STATE_DIR", Path(directory)),
+            mock.patch.object(cleanup_state, "STATE_DIR", Path(directory)),
             mock.patch.multiple(
                 hosted_lifecycle,
                 _owned_teardown_brain=lambda *_args: (True, brain),
@@ -108,11 +111,11 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
                 _remove_teardown_brain=phase("brain"),
                 _teardown_volumes=phase("volumes"),
             ),
-            mock.patch.object(app.pgdriver_client, "drop_team", side_effect=phase("database")),
-            mock.patch.object(app.pgdriver_client, "finalize_team_drop", side_effect=phase("finalize")),
+            mock.patch.object(pgdriver_client, "drop_team", side_effect=phase("database")),
+            mock.patch.object(pgdriver_client, "finalize_team_drop", side_effect=phase("finalize")),
         ):
-            result = app._teardown("team_1", owner="account_1", brain_id=brain.id)
-            pending = app.cleanup_state.load("team_1")
+            result = hosted_lifecycle._teardown("team_1", owner="account_1", brain_id=brain.id)
+            pending = cleanup_state.load("team_1")
 
         self.assertTrue(result.complete)
         self.assertIsNone(pending)
@@ -137,7 +140,7 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
         brain = SimpleNamespace(id="b" * 64)
         with (
             tempfile.TemporaryDirectory() as directory,
-            mock.patch.object(app.cleanup_state, "STATE_DIR", Path(directory)),
+            mock.patch.object(cleanup_state, "STATE_DIR", Path(directory)),
             mock.patch.multiple(
                 hosted_lifecycle,
                 _owned_teardown_brain=lambda *_args: (True, brain),
@@ -145,8 +148,8 @@ class HostedLimitAndTeardownTests(unittest.TestCase):
                 _teardown_apps=lambda _team_id: False,
             ),
         ):
-            result = app._teardown("team_1", owner="account_1", brain_id=brain.id)
-            pending = app.cleanup_state.load("team_1")
+            result = hosted_lifecycle._teardown("team_1", owner="account_1", brain_id=brain.id)
+            pending = cleanup_state.load("team_1")
 
         self.assertFalse(result.complete)
         self.assertIsNotNone(pending)

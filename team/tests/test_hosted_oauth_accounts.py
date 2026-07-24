@@ -11,14 +11,28 @@ from http import HTTPStatus
 from pathlib import Path
 from unittest import mock
 
+import assistant_account_challenges
+import assistant_account_flow
+import assistant_secret_challenges
+import assistant_secret_store
+import brain_runtime_client
+import chat_orchestrator
+import marketplace
+import oauth_account_store
+import oauth_http_client
+import power_journal
+
 TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS))
 
 import hosted_app_fixture as harness
 
 app = harness.app
-_patched = harness._patched
 hosted_chat_api = harness.hosted_chat_api
+hosted_assistants = harness.hosted_assistants
+hosted_apps = harness.hosted_apps
+hosted_chat_segment = harness.hosted_chat_segment
+hosted_lifecycle = harness.hosted_lifecycle
 hosted_resources = harness.hosted_resources
 runtime_state = harness.runtime_state
 
@@ -50,7 +64,7 @@ class _Runtime:
     def __init__(self) -> None:
         self.start_calls = 0
         self.resume_calls = 0
-        self.request = app.brain_runtime_client.PowerRequest(
+        self.request = brain_runtime_client.PowerRequest(
             "lookup",
             ASSISTANT_ID,
             "list-zones",
@@ -59,13 +73,13 @@ class _Runtime:
 
     def start(self, _context, _message):
         self.start_calls += 1
-        return app.brain_runtime_client.RuntimeTurn("power-required", "", (self.request,))
+        return brain_runtime_client.RuntimeTurn("power-required", "", (self.request,))
 
     def resume(self, _context, results):
         self.resume_calls += 1
         if set(results) != {"lookup"}:
             raise AssertionError("the admitted Power must resume once")
-        return app.brain_runtime_client.RuntimeTurn("completed", "Connected lookup complete.", ())
+        return brain_runtime_client.RuntimeTurn("completed", "Connected lookup complete.", ())
 
 
 class HostedOAuthAccountTests(unittest.TestCase):
@@ -73,11 +87,11 @@ class HostedOAuthAccountTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        self.store = app.oauth_account_store.OAuthAccountStore(
+        self.store = oauth_account_store.OAuthAccountStore(
             root / "state" / "accounts.json",
             root / "key" / "aes256.key",
         )
-        trusted = app.marketplace.APPS[ASSISTANT_ID].assistant
+        trusted = marketplace.APPS[ASSISTANT_ID].assistant
         assert trusted is not None
         self.contract = replace(
             trusted,
@@ -90,10 +104,10 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 for power_id, power in trusted.powers.items()
             },
             secrets={},
-            accounts={"cloudflare": app.marketplace.AccountSpec("cloudflare", SCOPES)},
+            accounts={"cloudflare": marketplace.AccountSpec("cloudflare", SCOPES)},
         )
         self.container = types.SimpleNamespace(id="b" * 64)
-        self.active = app._ActiveAssistant(ASSISTANT_ID, self.contract, self.container)
+        self.active = hosted_assistants._ActiveAssistant(ASSISTANT_ID, self.contract, self.container)
 
     def _connect(self) -> None:
         self.store.put(
@@ -102,11 +116,11 @@ class HostedOAuthAccountTests(unittest.TestCase):
             "cloudflare",
             "cloudflare",
             SCOPES,
-            app.oauth_http_client.OAuthTokenSet(ACCESS_TOKEN, "refresh-token-value-123456789", SCOPES, 3600),
+            oauth_http_client.OAuthTokenSet(ACCESS_TOKEN, "refresh-token-value-123456789", SCOPES, 3600),
         )
 
     def test_refresh_uses_the_configured_hosted_oauth_client(self) -> None:
-        token_set = app.oauth_http_client.OAuthTokenSet(ACCESS_TOKEN, "new-refresh-token", SCOPES, 3600)
+        token_set = oauth_http_client.OAuthTokenSet(ACCESS_TOKEN, "new-refresh-token", SCOPES, 3600)
         oauth_http = mock.Mock()
         oauth_http.refresh.return_value = token_set
         client_secret = "-".join(("hosted", "client", "secret", "value"))
@@ -118,7 +132,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
             _cloudflare_oauth_client_id="client-id",
             _cloudflare_oauth_client_secret=client_secret,
         ):
-            result = app._refresh_oauth_account("cloudflare", SCOPES, refresh_token, None)
+            result = hosted_assistants._refresh_oauth_account("cloudflare", SCOPES, refresh_token, None)
 
         self.assertIs(result, token_set)
         oauth_http.refresh.assert_called_once_with(
@@ -152,8 +166,8 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 _assistant_rpc=rpc,
             ),
         ):
-            result = app._invoke_assistant_power(
-                app.PowerInvocationRequest(
+            result = hosted_assistants._invoke_assistant_power(
+                hosted_assistants.PowerInvocationRequest(
                     team_id=TEAM_ID,
                     token=turn_token,
                     assistant_id=ASSISTANT_ID,
@@ -164,9 +178,9 @@ class HostedOAuthAccountTests(unittest.TestCase):
                     inspect_memo=inspect_memo,
                 )
             )
-            payload = app.assistant_account_flow.inventory_payload(
+            payload = assistant_account_flow.inventory_payload(
                 TEAM_ID,
-                [app._hosted_secret_spec(self.active)],
+                [hosted_assistants._hosted_secret_spec(self.active)],
                 self.store,
             )
 
@@ -202,10 +216,10 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.container),
                 _assistant_rpc=lambda *_args, **_kwargs: _zones(ACCESS_TOKEN),
             ),
-            self.assertRaises(app.ApiError) as caught,
+            self.assertRaises(runtime_state.ApiError) as caught,
         ):
-            app._invoke_assistant_power(
-                app.PowerInvocationRequest(
+            hosted_assistants._invoke_assistant_power(
+                hosted_assistants.PowerInvocationRequest(
                     team_id=TEAM_ID,
                     token=turn_token,
                     assistant_id=ASSISTANT_ID,
@@ -221,8 +235,8 @@ class HostedOAuthAccountTests(unittest.TestCase):
 
     def test_admitted_contract_prunes_removed_accounts_and_cancels_paused_turn(self) -> None:
         self._connect()
-        challenge_store = app.assistant_account_challenges.AccountChallengeStore()
-        requirement = app.assistant_account_challenges.AccountRequirement(
+        challenge_store = assistant_account_challenges.AccountChallengeStore()
+        requirement = assistant_account_challenges.AccountRequirement(
             ASSISTANT_ID,
             "Shimpz Cloudflare",
             ("list-zones",),
@@ -230,7 +244,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
         )
         challenge_store.create(TEAM_ID, (requirement,), object())
         without_accounts = replace(
-            app.marketplace.APPS[ASSISTANT_ID],
+            marketplace.APPS[ASSISTANT_ID],
             assistant=replace(self.contract, accounts={}),
         )
 
@@ -238,7 +252,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
             mock.patch.object(runtime_state, "_assistant_accounts", self.store),
             mock.patch.object(runtime_state, "_assistant_account_challenges", challenge_store),
         ):
-            app._retain_admitted_assistant_accounts(TEAM_ID, ASSISTANT_ID, without_accounts)
+            hosted_apps._retain_admitted_assistant_accounts(TEAM_ID, ASSISTANT_ID, without_accounts)
 
         self.assertIsNone(challenge_store.current(TEAM_ID))
         self.assertEqual(self.store.metadata(TEAM_ID, ASSISTANT_ID, {}), ())
@@ -254,23 +268,23 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 )
                 for power_id, power in self.contract.powers.items()
             },
-            secrets={"lookup-key": app.marketplace.SecretSpec("Lookup key", "Required for this lookup.")},
+            secrets={"lookup-key": marketplace.SecretSpec("Lookup key", "Required for this lookup.")},
         )
-        active = app._ActiveAssistant(ASSISTANT_ID, private_contract, self.container)
+        active = hosted_assistants._ActiveAssistant(ASSISTANT_ID, private_contract, self.container)
         anchor = types.SimpleNamespace(
             id=ANCHOR_ID,
             labels={"team.name": "Marketing", "team.owner": "account_1"},
         )
         runtime = _Runtime()
-        account_challenges = app.assistant_account_challenges.AccountChallengeStore()
-        secret_challenges = app.assistant_secret_challenges.SecretChallengeStore()
+        account_challenges = assistant_account_challenges.AccountChallengeStore()
+        secret_challenges = assistant_secret_challenges.SecretChallengeStore()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            secret_store = app.assistant_secret_store.AssistantSecretStore(
+            secret_store = assistant_secret_store.AssistantSecretStore(
                 root / "secret-state" / "secrets.json",
                 root / "secret-key" / "aes256.key",
             )
-            journal = app.power_journal.PowerJournal(root / "journal" / "journal.sqlite3")
+            journal = power_journal.PowerJournal(root / "journal" / "journal.sqlite3")
             self.addCleanup(journal.close)
             rpc_calls: list[dict[str, object]] = []
 
@@ -283,25 +297,6 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 yield "resumed-turn", anchor
 
             with (
-                _patched(
-                    _active_team_assistants=lambda _team_id: (active,),
-                    _installed_assistant=lambda *_args: (ASSISTANT_ID, private_contract, self.container),
-                    _require_assistant_genesis=lambda _container: "Use only the declared X Power.",
-                    _chat_file_metadata=lambda _team_id, _files: [],
-                    _inference_store=types.SimpleNamespace(
-                        load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test")
-                    ),
-                    _model_credential=lambda _owner, _provider: ("model-key-value", 7),
-                    _require_model_credential_current=lambda *_args: None,
-                    _current_team_anchor=lambda *_args: anchor,
-                    _brain_runtime=runtime,
-                    _power_execution_journal=lambda: journal,
-                    _assistant_accounts=self.store,
-                    _assistant_account_challenges=account_challenges,
-                    _assistant_secrets=secret_store,
-                    _assistant_secret_challenges=secret_challenges,
-                    _commit_chat_terminal=lambda *_args: True,
-                ),
                 mock.patch.multiple(
                     runtime_state,
                     _brain_runtime=runtime,
@@ -331,7 +326,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 ),
                 mock.patch.object(harness.hosted_chat_segment, "_current_team_anchor", return_value=anchor),
             ):
-                account_prompt = app._chat_in_turn(
+                account_prompt = hosted_chat_segment._chat_in_turn(
                     TEAM_ID,
                     "Look up Cloudflare.",
                     [],
@@ -347,10 +342,10 @@ class HostedOAuthAccountTests(unittest.TestCase):
 
                 self._connect()
                 with mock.patch.object(hosted_chat_api, "_exclusive_chat_turn", exclusive):
-                    secret_prompt = app._resume_chat_accounts(
+                    secret_prompt = hosted_chat_api._resume_chat_accounts(
                         TEAM_ID,
                         account_prompt["challenge_id"],
-                        app._AuthorizationLease(
+                        hosted_resources._AuthorizationLease(
                             TEAM_ID,
                             ANCHOR_ID,
                             "account_1",
@@ -366,14 +361,14 @@ class HostedOAuthAccountTests(unittest.TestCase):
             self.assertIsNotNone(secret_challenges.current(TEAM_ID))
 
     def test_authorize_and_callback_expose_no_oauth_private_material(self) -> None:
-        challenge_store = app.assistant_account_challenges.AccountChallengeStore()
-        continuation = app.chat_orchestrator.ChatContinuation(
-            app.brain_runtime_client.RuntimeTurn("power-required", "", ()),
+        challenge_store = assistant_account_challenges.AccountChallengeStore()
+        continuation = chat_orchestrator.ChatContinuation(
+            brain_runtime_client.RuntimeTurn("power-required", "", ()),
             (),
             (),
             0,
         )
-        pending = app._PendingHostedChat(
+        pending = hosted_assistants._PendingHostedChat(
             continuation,
             (ASSISTANT_ID,),
             (),
@@ -383,7 +378,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
         challenge = challenge_store.create(
             TEAM_ID,
             (
-                app.assistant_account_challenges.AccountRequirement(
+                assistant_account_challenges.AccountRequirement(
                     ASSISTANT_ID,
                     "Shimpz Cloudflare",
                     ("list-zones",),
@@ -408,7 +403,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
             ),
             disconnect=lambda *_args: True,
         )
-        lease = app._AuthorizationLease(
+        lease = hosted_resources._AuthorizationLease(
             TEAM_ID,
             ANCHOR_ID,
             "account_1",
@@ -426,13 +421,13 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 _authorize=lambda *_args, **_kwargs: lease,
             ),
         ):
-            started = app._start_oauth_account(
+            started = hosted_chat_api._start_oauth_account(
                 TEAM_ID,
                 challenge.id,
                 "browser-session-binding-value",
                 lease,
             )
-            completed = app._complete_oauth_account(
+            completed = hosted_chat_api._complete_oauth_account(
                 {
                     "state": "provider-state-value",
                     "code": "provider-code-value",
@@ -440,8 +435,8 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 },
                 ("account", "account_1"),
             )
-            with self.assertRaises(app.ApiError) as extra_field:
-                app._complete_oauth_account(
+            with self.assertRaises(runtime_state.ApiError) as extra_field:
+                hosted_chat_api._complete_oauth_account(
                     {
                         "state": "provider-state-value",
                         "code": "provider-code-value",
@@ -479,11 +474,11 @@ class HostedOAuthAccountTests(unittest.TestCase):
 
     def test_team_teardown_cancels_account_turn_and_purges_tokens(self) -> None:
         self._connect()
-        challenges = app.assistant_account_challenges.AccountChallengeStore()
+        challenges = assistant_account_challenges.AccountChallengeStore()
         challenges.create(
             TEAM_ID,
             (
-                app.assistant_account_challenges.AccountRequirement(
+                assistant_account_challenges.AccountRequirement(
                     ASSISTANT_ID,
                     "Shimpz Cloudflare",
                     ("list-zones",),
@@ -496,7 +491,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
             mock.patch.object(runtime_state, "_assistant_accounts", self.store),
             mock.patch.object(runtime_state, "_assistant_account_challenges", challenges),
         ):
-            self.assertTrue(app._teardown_assistant_accounts(TEAM_ID))
+            self.assertTrue(hosted_lifecycle._teardown_assistant_accounts(TEAM_ID))
 
         self.assertIsNone(challenges.current(TEAM_ID))
         self.assertEqual(self.store.metadata(TEAM_ID, ASSISTANT_ID, self.contract.accounts)[0].status, "missing")

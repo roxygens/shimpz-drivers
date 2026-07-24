@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import importlib.util
 import os
 import sys
@@ -140,6 +139,7 @@ hosted_lifecycle = sys.modules["container_policy.hosted_lifecycle"]
 hosted_assistants = sys.modules["assistant_human.hosted_assistants"]
 hosted_chat_api = sys.modules["assistant_human.hosted_chat_api"]
 hosted_chat_segment = sys.modules["assistant_human.hosted_chat_segment"]
+hosted_controller = sys.modules["http_boundary.hosted_controller"]
 
 # The loaded app keeps direct references to its fakes. Restore the process import table so discovery
 # order can never make unrelated tests import a partial Docker/client module.
@@ -176,15 +176,3 @@ for module_name in (
         sys.modules[module_name] = previous
 
 ANCHOR_ID = "a" * 64
-
-
-@contextlib.contextmanager
-def _patched(**replacements):
-    originals = {name: getattr(app, name) for name in replacements}
-    try:
-        for name, replacement in replacements.items():
-            setattr(app, name, replacement)
-        yield
-    finally:
-        for name, original in originals.items():
-            setattr(app, name, original)

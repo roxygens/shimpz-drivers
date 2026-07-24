@@ -11,7 +11,7 @@ sys.path.insert(0, str(TEAM))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import local_app
-from hosted_app_fixture import app
+from hosted_app_fixture import hosted_assistants
 
 SECRET = "private-test-credential-123456789"
 
@@ -20,7 +20,7 @@ class SecretScanTests(unittest.TestCase):
     @staticmethod
     def _decisions(value: object, secrets: dict[str, str]) -> tuple[bool, bool]:
         return (
-            app._contains_secret(value, secrets),
+            hosted_assistants._contains_secret(value, secrets),
             local_app.LocalController._contains_secret(value, secrets),
         )
 

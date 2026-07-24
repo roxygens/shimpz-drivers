@@ -9,6 +9,16 @@ from http import HTTPStatus
 from pathlib import Path
 from unittest import mock
 
+import assistant_secret_store
+import brain_runtime_client
+import marketplace
+import oauth_account_store
+import power_execution
+import power_journal
+from assistant_human import approval_challenges as assistant_approval_challenges
+from assistant_human import approval_grants as assistant_approval_grants
+from assistant_human import input_challenges as assistant_input_challenges
+
 TESTS = Path(__file__).resolve().parent
 
 import sys
@@ -18,17 +28,17 @@ sys.path.insert(0, str(TESTS))
 import hosted_app_fixture as harness
 
 app = harness.app
-_patched = harness._patched
 hosted_assistants = harness.hosted_assistants
 hosted_apps = harness.hosted_apps
 hosted_chat_api = harness.hosted_chat_api
 hosted_chat_segment = harness.hosted_chat_segment
+hosted_resources = harness.hosted_resources
 runtime_state = harness.runtime_state
 
 TEAM_ID = "team_1"
 ANCHOR_ID = "a" * 64
 ASSISTANT_ID = "shimpz-cloudflare"
-IMAGE = app.marketplace.APPS[ASSISTANT_ID].image
+IMAGE = marketplace.APPS[ASSISTANT_ID].image
 LOOKUP_INPUT = {"page": 1, "per_page": 25}
 LOOKUP_RESULT = {
     "zones": [],
@@ -40,7 +50,7 @@ class _Runtime:
     def __init__(self) -> None:
         self.starts = 0
         self.resumes: list[dict[str, object]] = []
-        self.request = app.brain_runtime_client.PowerRequest(
+        self.request = brain_runtime_client.PowerRequest(
             "power-1",
             ASSISTANT_ID,
             "list-zones",
@@ -49,11 +59,11 @@ class _Runtime:
 
     def start(self, _context, _message):
         self.starts += 1
-        return app.brain_runtime_client.RuntimeTurn("power-required", "", (self.request,))
+        return brain_runtime_client.RuntimeTurn("power-required", "", (self.request,))
 
     def resume(self, _context, results):
         self.resumes.append(dict(results))
-        return app.brain_runtime_client.RuntimeTurn("completed", "Completed.", ())
+        return brain_runtime_client.RuntimeTurn("completed", "Completed.", ())
 
 
 class HostedHumanInteractionTests(unittest.TestCase):
@@ -62,23 +72,23 @@ class HostedHumanInteractionTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         root = Path(self.temporary.name)
         self.runtime = _Runtime()
-        self.journal = app.power_journal.PowerJournal(root / "power-journal" / "journal.sqlite3")
+        self.journal = power_journal.PowerJournal(root / "power-journal" / "journal.sqlite3")
         self.addCleanup(self.journal.close)
-        self.input_challenges = app.assistant_input_challenges.InputChallengeStore()
-        self.approval_challenges = app.assistant_approval_challenges.ApprovalChallengeStore()
-        self.approval_grants = app.assistant_approval_grants.ApprovalGrantStore(
+        self.input_challenges = assistant_input_challenges.InputChallengeStore()
+        self.approval_challenges = assistant_approval_challenges.ApprovalChallengeStore()
+        self.approval_grants = assistant_approval_grants.ApprovalGrantStore(
             root / "assistant-approvals" / "grants.sqlite3"
         )
         self.addCleanup(self.approval_grants.close)
-        self.secret_store = app.assistant_secret_store.AssistantSecretStore(
+        self.secret_store = assistant_secret_store.AssistantSecretStore(
             root / "assistant-secrets" / "state" / "secrets.json",
             root / "assistant-secrets" / "key" / "aes256.key",
         )
-        self.account_store = app.oauth_account_store.OAuthAccountStore(
+        self.account_store = oauth_account_store.OAuthAccountStore(
             root / "assistant-accounts" / "state" / "accounts.json",
             root / "assistant-accounts" / "key" / "aes256.key",
         )
-        trusted = app.marketplace.APPS[ASSISTANT_ID].assistant
+        trusted = marketplace.APPS[ASSISTANT_ID].assistant
         assert trusted is not None
         self.contract = replace(
             trusted,
@@ -90,7 +100,7 @@ class HostedHumanInteractionTests(unittest.TestCase):
             id="b" * 64,
             attrs={"Config": {"Image": IMAGE}},
         )
-        self.active = app._ActiveAssistant(ASSISTANT_ID, self.contract, self.assistant)
+        self.active = hosted_assistants._ActiveAssistant(ASSISTANT_ID, self.contract, self.assistant)
         self.anchor = types.SimpleNamespace(
             id=ANCHOR_ID,
             labels={"team.name": "Marketing", "team.owner": "account_1"},
@@ -100,27 +110,6 @@ class HostedHumanInteractionTests(unittest.TestCase):
     @contextlib.contextmanager
     def _environment(self, rpc):
         with (
-            _patched(
-                _active_team_assistants=lambda _team_id: (self.active,),
-                _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.assistant),
-                _require_assistant_genesis=lambda _container: "Use only the declared Cloudflare Powers.",
-                _chat_file_metadata=lambda _team_id, _files: [],
-                _inference_store=types.SimpleNamespace(
-                    load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test")
-                ),
-                _model_credential=lambda _owner, _provider: ("model-secret", 7),
-                _require_model_credential_current=lambda *_args: None,
-                _current_team_anchor=lambda *_args: self.anchor,
-                _brain_runtime=self.runtime,
-                _power_execution_journal=lambda: self.journal,
-                _assistant_secrets=self.secret_store,
-                _assistant_accounts=self.account_store,
-                _assistant_input_challenges=self.input_challenges,
-                _assistant_approval_challenges=self.approval_challenges,
-                _assistant_approval_grants=self.approval_grants,
-                _token_cancelled=lambda _token: False,
-                _commit_chat_terminal=lambda *_args: True,
-            ),
             mock.patch.multiple(
                 runtime_state,
                 _brain_runtime=self.runtime,
@@ -160,13 +149,13 @@ class HostedHumanInteractionTests(unittest.TestCase):
 
     @staticmethod
     def _lease(owner: str = "account_1", team_id: str = TEAM_ID) -> object:
-        return app._AuthorizationLease(team_id, ANCHOR_ID, owner, ("account", owner))
+        return hosted_resources._AuthorizationLease(team_id, ANCHOR_ID, owner, ("account", owner))
 
     def test_typed_input_is_team_and_owner_bound_then_replays_into_the_exact_power(self) -> None:
         def rpc(_team_id, _token, _container, _command, _method, _path, payload):
             self.rpc_answers.append(payload["answers"])
             if not payload["answers"]:
-                return app.power_execution.RpcSuspension(
+                return power_execution.RpcSuspension(
                     {
                         "ordinal": 0,
                         "kind": "request",
@@ -180,7 +169,7 @@ class HostedHumanInteractionTests(unittest.TestCase):
             return LOOKUP_RESULT
 
         with self._environment(rpc):
-            challenge = app._chat_in_turn(
+            challenge = hosted_chat_segment._chat_in_turn(
                 TEAM_ID,
                 "Choose a zone.",
                 [],
@@ -190,12 +179,12 @@ class HostedHumanInteractionTests(unittest.TestCase):
                 "account_1",
             )
             submission = {"challenge_id": challenge["challenge_id"], "answer": "example.com"}
-            with self.assertRaises(app.ApiError) as cross_team:
-                app._submit_chat_input("team_2", submission, self._lease(team_id="team_2"))
-            with self.assertRaises(app.ApiError) as cross_owner:
-                app._submit_chat_input(TEAM_ID, submission, self._lease(owner="account_2"))
+            with self.assertRaises(runtime_state.ApiError) as cross_team:
+                hosted_chat_api._submit_chat_input("team_2", submission, self._lease(team_id="team_2"))
+            with self.assertRaises(runtime_state.ApiError) as cross_owner:
+                hosted_chat_api._submit_chat_input(TEAM_ID, submission, self._lease(owner="account_2"))
             with mock.patch.object(hosted_chat_api, "_exclusive_chat_turn", self._exclusive):
-                response = app._submit_chat_input(TEAM_ID, submission, self._lease())
+                response = hosted_chat_api._submit_chat_input(TEAM_ID, submission, self._lease())
 
         self.assertEqual(challenge["status"], "input-required")
         self.assertEqual(cross_team.exception.status, HTTPStatus.CONFLICT)
@@ -213,10 +202,10 @@ class HostedHumanInteractionTests(unittest.TestCase):
 
         with (
             self._environment(rpc),
-            self.assertRaises(app.ApiError) as caught,
+            self.assertRaises(runtime_state.ApiError) as caught,
         ):
-            app._invoke_assistant_power(
-                app.PowerInvocationRequest(
+            hosted_assistants._invoke_assistant_power(
+                hosted_assistants.PowerInvocationRequest(
                     team_id=TEAM_ID,
                     token=turn_token,
                     assistant_id=ASSISTANT_ID,
@@ -235,7 +224,7 @@ class HostedHumanInteractionTests(unittest.TestCase):
         def rpc(_team_id, _token, _container, _command, _method, _path, payload):
             self.rpc_answers.append(payload["answers"])
             if not payload["answers"]:
-                return app.power_execution.RpcSuspension(
+                return power_execution.RpcSuspension(
                     {
                         "ordinal": 0,
                         "kind": "approval",
@@ -250,7 +239,7 @@ class HostedHumanInteractionTests(unittest.TestCase):
             return LOOKUP_RESULT
 
         with self._environment(rpc):
-            challenge = app._chat_in_turn(
+            challenge = hosted_chat_segment._chat_in_turn(
                 TEAM_ID,
                 "Publish.",
                 [],
@@ -260,11 +249,11 @@ class HostedHumanInteractionTests(unittest.TestCase):
                 "account_1",
             )
             submission = {"challenge_id": challenge["challenge_id"], "approved": True}
-            with self.assertRaises(app.ApiError) as cross_owner:
-                app._submit_chat_approval(TEAM_ID, submission, self._lease(owner="account_2"))
+            with self.assertRaises(runtime_state.ApiError) as cross_owner:
+                hosted_chat_api._submit_chat_approval(TEAM_ID, submission, self._lease(owner="account_2"))
             with mock.patch.object(hosted_chat_api, "_exclusive_chat_turn", self._exclusive):
-                first = app._submit_chat_approval(TEAM_ID, submission, self._lease())
-            second = app._chat_in_turn(
+                first = hosted_chat_api._submit_chat_approval(TEAM_ID, submission, self._lease())
+            second = hosted_chat_segment._chat_in_turn(
                 TEAM_ID,
                 "Publish again.",
                 [],

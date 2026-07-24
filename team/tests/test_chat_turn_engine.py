@@ -21,6 +21,7 @@ import hosted_app_fixture as hosted_harness
 import inference_config
 import local_app
 import local_registry
+import marketplace
 import power_execution
 from local_support import chat_segment as local_chat_segment
 from local_support.chat_segment import SegmentRequest
@@ -355,8 +356,8 @@ class SharedChatTurnEngineTest(unittest.TestCase):
                 side_effect=run_with_validation,
             ),
         ):
-            result = hosted_app._run_hosted_chat_segment(
-                hosted_app.HostedChatSegmentRequest(
+            result = hosted_harness.hosted_chat_segment._run_hosted_chat_segment(
+                hosted_harness.hosted_chat_segment.HostedChatSegmentRequest(
                     team_id="team_1",
                     file_ids=[],
                     assistant_ids=(),
@@ -372,24 +373,28 @@ class SharedChatTurnEngineTest(unittest.TestCase):
 
     def test_hosted_and_local_controllers_build_equivalent_real_segment_strategies(self) -> None:
         assistant_id = "shimpz-cloudflare"
-        declared_contract = hosted_app.marketplace.APPS[assistant_id].assistant
+        declared_contract = marketplace.APPS[assistant_id].assistant
         if declared_contract is None:
             self.fail("the hosted Assistant contract is unavailable")
         declared_power = declared_contract.powers["list-zones"]
-        hosted_power = hosted_app.marketplace.PowerSpec(
+        hosted_power = marketplace.PowerSpec(
             declared_power.method,
             declared_power.path,
             declared_power.summary,
             declared_power.input_schema,
             declared_power.output_schema,
         )
-        hosted_contract = hosted_app.marketplace.AssistantContract(
+        hosted_contract = marketplace.AssistantContract(
             "assistant-rpc",
             {"list-zones": hosted_power},
             {},
         )
         assistant_container = SimpleNamespace(id="b" * 64)
-        hosted_active = hosted_app._ActiveAssistant(assistant_id, hosted_contract, assistant_container)
+        hosted_active = hosted_harness.hosted_assistants._ActiveAssistant(
+            assistant_id,
+            hosted_contract,
+            assistant_container,
+        )
 
         local_power = local_registry.PowerSpec(
             declared_power.method,
@@ -470,8 +475,8 @@ class SharedChatTurnEngineTest(unittest.TestCase):
                 side_effect=capture("hosted"),
             ),
         ):
-            hosted_app._run_hosted_chat_segment(
-                hosted_app.HostedChatSegmentRequest(
+            hosted_harness.hosted_chat_segment._run_hosted_chat_segment(
+                hosted_harness.hosted_chat_segment.HostedChatSegmentRequest(
                     team_id="team_1",
                     file_ids=[],
                     assistant_ids=(assistant_id,),

@@ -19,13 +19,20 @@ sys.path.insert(0, str(TESTS))
 import hosted_app_fixture as harness
 
 app = harness.app
-_patched = harness._patched
 hosted_apps = harness.hosted_apps
 hosted_assistants = harness.hosted_assistants
 hosted_chat_api = harness.hosted_chat_api
 hosted_chat_segment = harness.hosted_chat_segment
+hosted_lifecycle = harness.hosted_lifecycle
 hosted_resources = harness.hosted_resources
 runtime_state = harness.runtime_state
+assistant_secret_challenges = runtime_state.assistant_secret_challenges
+assistant_secret_flow = hosted_chat_api.assistant_secret_flow
+assistant_secret_store = runtime_state.assistant_secret_store
+audit = hosted_assistants.audit
+brain_runtime_client = runtime_state.brain_runtime_client
+marketplace = hosted_assistants.marketplace
+power_journal = runtime_state.power_journal
 
 TEAM_ID = "team_1"
 ANCHOR_ID = "a" * 64
@@ -70,13 +77,13 @@ class _Runtime:
     def __init__(self) -> None:
         self.resume_calls = 0
         self.requests = (
-            app.brain_runtime_client.PowerRequest(
+            brain_runtime_client.PowerRequest(
                 "public-read",
                 ASSISTANT_ID,
                 "list-zones",
                 ZONE_INPUT,
             ),
-            app.brain_runtime_client.PowerRequest(
+            brain_runtime_client.PowerRequest(
                 "identity-read",
                 ASSISTANT_ID,
                 "list-dns-records",
@@ -85,13 +92,13 @@ class _Runtime:
         )
 
     def start(self, _context, _message):
-        return app.brain_runtime_client.RuntimeTurn("power-required", "", self.requests)
+        return brain_runtime_client.RuntimeTurn("power-required", "", self.requests)
 
     def resume(self, _context, results):
         self.resume_calls += 1
         if set(results) != {"public-read", "identity-read"}:
             raise AssertionError("the complete Power batch must resume together")
-        return app.brain_runtime_client.RuntimeTurn("completed", "Cloudflare account connected.", ())
+        return brain_runtime_client.RuntimeTurn("completed", "Cloudflare account connected.", ())
 
 
 class _RouteHarness:
@@ -99,7 +106,7 @@ class _RouteHarness:
         self.body = body
         self.sent: list[tuple[HTTPStatus, dict[str, object], bool]] = []
 
-    def _read_body(self, *, max_bytes: int = app.MAX_JSON_BODY_BYTES) -> dict[str, object]:
+    def _read_body(self, *, max_bytes: int = runtime_state.MAX_JSON_BODY_BYTES) -> dict[str, object]:
         del max_bytes
         return self.body
 
@@ -121,18 +128,18 @@ class HostedAssistantSecretTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         root = Path(self.temporary.name)
-        self.secret_store = app.assistant_secret_store.AssistantSecretStore(
+        self.secret_store = assistant_secret_store.AssistantSecretStore(
             root / "state" / "secrets.json",
             root / "key" / "aes256.key",
         )
-        self.challenge_store = app.assistant_secret_challenges.SecretChallengeStore()
-        self.journal = app.power_journal.PowerJournal(root / "journal" / "journal.sqlite3")
+        self.challenge_store = assistant_secret_challenges.SecretChallengeStore()
+        self.journal = power_journal.PowerJournal(root / "journal" / "journal.sqlite3")
         self.addCleanup(self.journal.close)
         self.runtime = _Runtime()
-        trusted_contract = app.marketplace.APPS[ASSISTANT_ID].assistant
+        trusted_contract = marketplace.APPS[ASSISTANT_ID].assistant
         assert trusted_contract is not None
         secret_contract = {
-            secret_id: app.marketplace.SecretSpec(secret_id.replace("-", " ").title(), "Test credential.")
+            secret_id: marketplace.SecretSpec(secret_id.replace("-", " ").title(), "Test credential.")
             for secret_id in SECRET_VALUES
         }
         self.contract = replace(
@@ -149,7 +156,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
             accounts={},
         )
         self.assistant_container = types.SimpleNamespace(id="b" * 64)
-        self.active = app._ActiveAssistant(ASSISTANT_ID, self.contract, self.assistant_container)
+        self.active = hosted_assistants._ActiveAssistant(ASSISTANT_ID, self.contract, self.assistant_container)
         self.anchor = types.SimpleNamespace(
             id=ANCHOR_ID,
             labels={"team.name": "Marketing", "team.owner": "account_1"},
@@ -163,23 +170,6 @@ class HostedAssistantSecretTests(unittest.TestCase):
     @contextlib.contextmanager
     def _environment(self):
         with (
-            _patched(
-                _active_team_assistants=lambda _team_id: (self.active,),
-                _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.assistant_container),
-                _require_assistant_genesis=lambda _container: "Use only the declared Cloudflare Powers.",
-                _chat_file_metadata=lambda _team_id, _files: [],
-                _inference_store=types.SimpleNamespace(
-                    load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test")
-                ),
-                _model_credential=lambda _owner, _provider: ("model-secret-not-an-assistant-secret", 7),
-                _require_model_credential_current=lambda *_args: None,
-                _current_team_anchor=lambda *_args: self.anchor,
-                _brain_runtime=self.runtime,
-                _power_execution_journal=lambda: self.journal,
-                _assistant_secrets=self.secret_store,
-                _assistant_secret_challenges=self.challenge_store,
-                _commit_chat_terminal=lambda *_args: True,
-            ),
             mock.patch.multiple(
                 runtime_state,
                 _brain_runtime=self.runtime,
@@ -225,7 +215,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
 
     def test_missing_batch_pauses_then_resumes_with_exact_secret_envelopes(self) -> None:
         with self._environment():
-            challenge = app._chat_in_turn(
+            challenge = hosted_chat_segment._chat_in_turn(
                 TEAM_ID,
                 "Read the public profile and my connected identity.",
                 [],
@@ -254,10 +244,15 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 yield "resumed-turn", self.anchor
 
             with mock.patch.object(hosted_chat_api, "_exclusive_chat_turn", exclusive):
-                result = app._submit_chat_secrets(
+                result = hosted_chat_api._submit_chat_secrets(
                     TEAM_ID,
                     self._submission(challenge),
-                    app._AuthorizationLease(TEAM_ID, ANCHOR_ID, "account_1", ("account", "account_1")),
+                    hosted_resources._AuthorizationLease(
+                        TEAM_ID,
+                        ANCHOR_ID,
+                        "account_1",
+                        ("account", "account_1"),
+                    ),
                 )
 
         self.assertEqual(result["reply"], "Cloudflare account connected.")
@@ -297,29 +292,34 @@ class HostedAssistantSecretTests(unittest.TestCase):
             self.assertNotIn(secret, state)
             self.assertNotIn(secret.encode(), journal)
             self.assertNotIn(secret, json.dumps(result))
-        inventory = app.assistant_secret_flow.inventory_payload(
+        inventory = assistant_secret_flow.inventory_payload(
             TEAM_ID,
-            [app._hosted_secret_spec(self.active)],
+            [hosted_assistants._hosted_secret_spec(self.active)],
             self.secret_store,
         )
         self.assertTrue(all(item["configured"] for item in inventory["assistants"][0]["secrets"]))
         self.assertTrue(all(item["mask"] for item in inventory["assistants"][0]["secrets"]))
 
-        with self._environment(), self.assertRaises(app.ApiError) as replay:
-            app._submit_chat_secrets(
+        with self._environment(), self.assertRaises(runtime_state.ApiError) as replay:
+            hosted_chat_api._submit_chat_secrets(
                 TEAM_ID,
                 self._submission(challenge),
-                app._AuthorizationLease(TEAM_ID, ANCHOR_ID, "account_1", ("account", "account_1")),
+                hosted_resources._AuthorizationLease(
+                    TEAM_ID,
+                    ANCHOR_ID,
+                    "account_1",
+                    ("account", "account_1"),
+                ),
             )
         self.assertEqual(replay.exception.status, HTTPStatus.CONFLICT)
 
     def test_oversized_secret_envelope_is_rejected_before_the_power_journal(self) -> None:
         oversized = dict(SECRET_VALUES)
-        oversized["x-bearer-token"] = "x" * app.assistant_secret_store.MAX_SECRET_BYTES
+        oversized["x-bearer-token"] = "x" * assistant_secret_store.MAX_SECRET_BYTES
         self.secret_store.put_many(TEAM_ID, ASSISTANT_ID, oversized)
 
-        with self._environment(), self.assertRaises(app.ApiError) as caught:
-            app._chat_in_turn(
+        with self._environment(), self.assertRaises(runtime_state.ApiError) as caught:
+            hosted_chat_segment._chat_in_turn(
                 TEAM_ID,
                 "Read the public profile and my connected identity.",
                 [],
@@ -337,7 +337,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
 
     def test_invalid_submission_is_rejected_before_claim_or_storage(self) -> None:
         with self._environment():
-            challenge = app._chat_in_turn(
+            challenge = hosted_chat_segment._chat_in_turn(
                 TEAM_ID,
                 "Read the public profile and my connected identity.",
                 [],
@@ -353,11 +353,16 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 *values,
                 {"assistant_id": ASSISTANT_ID, "secret_id": "undeclared", "value": "attacker-value"},
             ]
-            with self.assertRaises(app.ApiError) as caught:
-                app._submit_chat_secrets(
+            with self.assertRaises(runtime_state.ApiError) as caught:
+                hosted_chat_api._submit_chat_secrets(
                     TEAM_ID,
                     invalid,
-                    app._AuthorizationLease(TEAM_ID, ANCHOR_ID, "account_1", ("account", "account_1")),
+                    hosted_resources._AuthorizationLease(
+                        TEAM_ID,
+                        ANCHOR_ID,
+                        "account_1",
+                        ("account", "account_1"),
+                    ),
                 )
 
         self.assertEqual(caught.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
@@ -367,7 +372,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
 
     def test_storage_failure_keeps_the_one_use_challenge_retryable(self) -> None:
         with self._environment():
-            challenge = app._chat_in_turn(
+            challenge = hosted_chat_segment._chat_in_turn(
                 TEAM_ID,
                 "Read the public profile and my connected identity.",
                 [],
@@ -383,16 +388,21 @@ class HostedAssistantSecretTests(unittest.TestCase):
 
             original = self.secret_store.put_for_assistants
             self.secret_store.put_for_assistants = mock.Mock(
-                side_effect=app.assistant_secret_store.AssistantSecretError("storage unavailable")
+                side_effect=assistant_secret_store.AssistantSecretError("storage unavailable")
             )
             with (
                 mock.patch.object(hosted_chat_api, "_exclusive_chat_turn", exclusive),
-                self.assertRaises(app.ApiError) as caught,
+                self.assertRaises(runtime_state.ApiError) as caught,
             ):
-                app._submit_chat_secrets(
+                hosted_chat_api._submit_chat_secrets(
                     TEAM_ID,
                     self._submission(challenge),
-                    app._AuthorizationLease(TEAM_ID, ANCHOR_ID, "account_1", ("account", "account_1")),
+                    hosted_resources._AuthorizationLease(
+                        TEAM_ID,
+                        ANCHOR_ID,
+                        "account_1",
+                        ("account", "account_1"),
+                    ),
                 )
             self.secret_store.put_for_assistants = original
 
@@ -411,10 +421,10 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.assistant_container),
                 _assistant_rpc=lambda *_args, **_kwargs: _zones(secret),
             ),
-            self.assertRaises(app.ApiError) as caught,
+            self.assertRaises(runtime_state.ApiError) as caught,
         ):
-            app._invoke_assistant_power(
-                app.PowerInvocationRequest(
+            hosted_assistants._invoke_assistant_power(
+                hosted_assistants.PowerInvocationRequest(
                     team_id=TEAM_ID,
                     token=turn_token,
                     assistant_id=ASSISTANT_ID,
@@ -455,7 +465,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
         pending = self.challenge_store.create(
             TEAM_ID,
             (
-                app.assistant_secret_challenges.SecretRequirement(
+                assistant_secret_challenges.SecretRequirement(
                     ASSISTANT_ID,
                     "Shimpz Cloudflare",
                     ("list-zones",),
@@ -471,10 +481,10 @@ class HostedAssistantSecretTests(unittest.TestCase):
             mock.patch.object(
                 hosted_apps,
                 "_teardown_app",
-                return_value=app._CleanupResult(True, True),
+                return_value=hosted_resources._CleanupResult(True, True),
             ),
         ):
-            result = app._uninstall_app(TEAM_ID, ASSISTANT_ID, object())
+            result = hosted_apps._uninstall_app(TEAM_ID, ASSISTANT_ID, object())
         self.assertTrue(result["uninstalled"])
         self.assertIsNone(self.challenge_store.current(TEAM_ID))
         self.assertTrue(pending.id)
@@ -482,13 +492,13 @@ class HostedAssistantSecretTests(unittest.TestCase):
 
     def test_hosted_rotation_is_atomic_masked_and_invalidates_a_stale_challenge(self) -> None:
         declared = {
-            "primary-token": app.marketplace.SecretSpec("Primary token", "Primary credential."),
-            "secondary-token": app.marketplace.SecretSpec("Secondary token", "Secondary credential."),
+            "primary-token": marketplace.SecretSpec("Primary token", "Primary credential."),
+            "secondary-token": marketplace.SecretSpec("Secondary token", "Secondary credential."),
         }
-        contract = app.marketplace.AssistantContract("assistant-rpc", {}, declared)
+        contract = marketplace.AssistantContract("assistant-rpc", {}, declared)
         container = types.SimpleNamespace(id="c" * 64)
-        active = app._ActiveAssistant(ASSISTANT_ID, contract, container)
-        spec = app._hosted_secret_spec(active)
+        active = hosted_assistants._ActiveAssistant(ASSISTANT_ID, contract, container)
+        spec = hosted_assistants._hosted_secret_spec(active)
         original = {
             "primary-token": "primary-original-credential",
             "secondary-token": "secondary-original-credential",
@@ -498,7 +508,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
         pending = self.challenge_store.create(
             TEAM_ID,
             (
-                app.assistant_secret_challenges.SecretRequirement(
+                assistant_secret_challenges.SecretRequirement(
                     ASSISTANT_ID,
                     "Shimpz Cloudflare",
                     ("read-account",),
@@ -507,7 +517,12 @@ class HostedAssistantSecretTests(unittest.TestCase):
             ),
             object(),
         )
-        lease = app._AuthorizationLease(TEAM_ID, ANCHOR_ID, "account_1", ("account", "account_1"))
+        lease = hosted_resources._AuthorizationLease(
+            TEAM_ID,
+            ANCHOR_ID,
+            "account_1",
+            ("account", "account_1"),
+        )
         invalid = {
             "assistant_id": ASSISTANT_ID,
             "values": [
@@ -528,12 +543,12 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 _assistant_secret_challenges=self.challenge_store,
             ),
         ):
-            with self.assertRaises(app.ApiError) as rejected:
-                app._replace_assistant_secrets(TEAM_ID, invalid, lease)
+            with self.assertRaises(runtime_state.ApiError) as rejected:
+                hosted_assistants._replace_assistant_secrets(TEAM_ID, invalid, lease)
             self.assertEqual(rejected.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
             self.assertEqual(self.challenge_store.current(TEAM_ID).id, pending.id)
 
-            response = app._replace_assistant_secrets(
+            response = hosted_assistants._replace_assistant_secrets(
                 TEAM_ID,
                 {
                     "assistant_id": ASSISTANT_ID,
@@ -550,23 +565,25 @@ class HostedAssistantSecretTests(unittest.TestCase):
         for value in (*original.values(), replacement, "must-not-commit", "attacker-controlled"):
             self.assertNotIn(value, serialized)
         metadata = {item["id"]: item for item in response["assistants"][0]["secrets"]}
-        self.assertEqual(metadata["primary-token"]["mask"], app.assistant_secret_store.mask_secret(replacement))
+        self.assertEqual(metadata["primary-token"]["mask"], assistant_secret_store.mask_secret(replacement))
         self.assertTrue(metadata["secondary-token"]["configured"])
 
     def test_hosted_rotation_is_rejected_before_authorization_or_storage_during_chat(self) -> None:
         self.secret_store.put_many(TEAM_ID, ASSISTANT_ID, {"primary-token": "original-credential"})
         before = self.secret_store.state_path.read_bytes()
-        lock = app._chat_lock_for(TEAM_ID)
+        lock = runtime_state._chat_lock_for(TEAM_ID)
         self.assertTrue(lock.acquire(blocking=False))
         try:
             with (
-                _patched(
-                    _require_current_authorization=lambda *_args, **_kwargs: self.fail("authorization ran during chat"),
-                    _assistant_secrets=self.secret_store,
+                mock.patch.object(
+                    hosted_resources,
+                    "_require_current_authorization",
+                    side_effect=lambda *_args, **_kwargs: self.fail("authorization ran during chat"),
                 ),
-                self.assertRaises(app.ApiError) as rejected,
+                mock.patch.object(runtime_state, "_assistant_secrets", self.secret_store),
+                self.assertRaises(runtime_state.ApiError) as rejected,
             ):
-                app._replace_assistant_secrets(TEAM_ID, {}, object())
+                hosted_assistants._replace_assistant_secrets(TEAM_ID, {}, object())
         finally:
             lock.release()
 
@@ -588,7 +605,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 "_replace_assistant_secrets",
                 return_value=response,
             ) as replace_secrets,
-            mock.patch.object(app.audit, "log"),
+            mock.patch.object(audit, "log"),
         ):
             lease = object()
             app.Handler._route_assistant_secret_replace(
@@ -601,8 +618,8 @@ class HostedAssistantSecretTests(unittest.TestCase):
         self.assertEqual(handler.sent, [(HTTPStatus.OK, response, True)])
 
     def test_idempotent_install_prunes_obsolete_secrets_after_admission(self) -> None:
-        declared = {"retained-token": app.marketplace.SecretSpec("Retained token", "Still declared.")}
-        contract = app.marketplace.AssistantContract("assistant-rpc", {}, declared)
+        declared = {"retained-token": marketplace.SecretSpec("Retained token", "Still declared.")}
+        contract = marketplace.AssistantContract("assistant-rpc", {}, declared)
         spec = types.SimpleNamespace(
             assistant=contract,
             image="registry.example/shimpz-cloudflare@sha256:" + ("d" * 64),
@@ -632,7 +649,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
         self.challenge_store.create(
             TEAM_ID,
             (
-                app.assistant_secret_challenges.SecretRequirement(
+                assistant_secret_challenges.SecretRequirement(
                     ASSISTANT_ID,
                     "Shimpz Cloudflare",
                     ("old-power",),
@@ -658,7 +675,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
             mock.patch.object(hosted_apps, "_validate_assistant_proxy_environment", return_value=None),
             mock.patch.object(hosted_apps, "_app_ready_now", return_value=(True, "running")),
         ):
-            result = app._install_app(
+            result = hosted_apps._install_app(
                 TEAM_ID,
                 ASSISTANT_ID,
                 spec,
@@ -684,7 +701,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
         self.challenge_store.create(
             TEAM_ID,
             (
-                app.assistant_secret_challenges.SecretRequirement(
+                assistant_secret_challenges.SecretRequirement(
                     ASSISTANT_ID,
                     "Shimpz Cloudflare",
                     ("read",),
@@ -697,20 +714,20 @@ class HostedAssistantSecretTests(unittest.TestCase):
             mock.patch.object(runtime_state, "_assistant_secrets", self.secret_store),
             mock.patch.object(runtime_state, "_assistant_secret_challenges", self.challenge_store),
         ):
-            complete = app._teardown_assistant_secrets(TEAM_ID)
+            complete = hosted_lifecycle._teardown_assistant_secrets(TEAM_ID)
 
         self.assertTrue(complete)
         self.assertIsNone(self.challenge_store.current(TEAM_ID))
         self.assertFalse(self.secret_store.metadata(TEAM_ID, ASSISTANT_ID, ("retained-token",))[0].configured)
 
     def test_chat_rechecks_a_pending_secret_challenge_after_acquiring_its_slot(self) -> None:
-        requirement = app.assistant_secret_challenges.SecretRequirement(
+        requirement = assistant_secret_challenges.SecretRequirement(
             ASSISTANT_ID,
             "Shimpz Cloudflare",
             ("list-zones",),
             (("x-bearer-token", "X Bearer Token", "Required."),),
         )
-        pending = app.assistant_secret_challenges.PendingSecretChallenge(
+        pending = assistant_secret_challenges.PendingSecretChallenge(
             "f" * 32,
             TEAM_ID,
             1.0,
@@ -736,19 +753,25 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 side_effect=lambda *_args: self.fail("a pending continuation started another turn"),
             ),
         ):
-            result = app._chat(TEAM_ID, "hello", [], (ASSISTANT_ID,), types.SimpleNamespace(owner="account_1"))
+            result = hosted_chat_api._chat(
+                TEAM_ID,
+                "hello",
+                [],
+                (ASSISTANT_ID,),
+                types.SimpleNamespace(owner="account_1"),
+            )
 
-        self.assertEqual(result, app.assistant_secret_flow.challenge_payload(pending))
+        self.assertEqual(result, assistant_secret_flow.challenge_payload(pending))
         self.assertEqual(current.call_count, 2)
 
     def test_stream_rechecks_pending_secrets_before_sending_any_stream_bytes(self) -> None:
-        requirement = app.assistant_secret_challenges.SecretRequirement(
+        requirement = assistant_secret_challenges.SecretRequirement(
             ASSISTANT_ID,
             "Shimpz Cloudflare",
             ("list-zones",),
             (("x-bearer-token", "X Bearer Token", "Required."),),
         )
-        pending = app.assistant_secret_challenges.PendingSecretChallenge(
+        pending = assistant_secret_challenges.PendingSecretChallenge(
             "e" * 32,
             TEAM_ID,
             1.0,
@@ -763,9 +786,6 @@ class HostedAssistantSecretTests(unittest.TestCase):
             yield "turn-token", self.anchor
 
         with (
-            _patched(
-                _assistant_secret_challenges=types.SimpleNamespace(current=current),
-            ),
             mock.patch.object(
                 runtime_state,
                 "_assistant_secret_challenges",
@@ -789,7 +809,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
             [
                 (
                     HTTPStatus.PRECONDITION_REQUIRED,
-                    app.assistant_secret_flow.challenge_payload(pending),
+                    assistant_secret_flow.challenge_payload(pending),
                     True,
                 )
             ],

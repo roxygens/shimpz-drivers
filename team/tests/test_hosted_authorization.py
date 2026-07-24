@@ -11,7 +11,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hosted_app_fixture import app, hosted_resources
+from hosted_app_fixture import app, hosted_controller, hosted_resources, runtime_state
+
+manifests = hosted_resources.manifests
+network_policy = hosted_resources.network_policy
 
 TEAM_ID = "team_1"
 CONTAINER_ID = "a" * 64
@@ -23,7 +26,7 @@ def _container(*, container_id: str = CONTAINER_ID, owner: str = "account_1") ->
 
 
 def _routable_container() -> SimpleNamespace:
-    name = app.manifests.team_container_name(TEAM_ID)
+    name = manifests.team_container_name(TEAM_ID)
     labels = {
         "team.driver": "1",
         "team.id": TEAM_ID,
@@ -43,8 +46,8 @@ def _lease(
     container_id: str = CONTAINER_ID,
     owner: str = "account_1",
     principal: tuple[str, str | None] = ("account", "account_1"),
-) -> app._AuthorizationLease:
-    return app._AuthorizationLease(TEAM_ID, container_id, owner, principal)
+) -> hosted_resources._AuthorizationLease:
+    return hosted_resources._AuthorizationLease(TEAM_ID, container_id, owner, principal)
 
 
 class HostedAuthorizationTests(unittest.TestCase):
@@ -63,10 +66,10 @@ class HostedAuthorizationTests(unittest.TestCase):
                     side_effect=lambda _name, current=current: current,
                 ),
                 mock.patch.object(hosted_resources, "_cleanup_record", return_value=None),
-                mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True),
-                self.assertRaises(app.ApiError) as caught,
+                mock.patch.object(network_policy, "brain_identity_valid", return_value=True),
+                self.assertRaises(runtime_state.ApiError) as caught,
             ):
-                app._require_current_authorization(TEAM_ID, _lease(), require_isolation=False)
+                hosted_resources._require_current_authorization(TEAM_ID, _lease(), require_isolation=False)
 
             self.assertEqual(caught.exception.status, HTTPStatus.NOT_FOUND)
 
@@ -75,10 +78,10 @@ class HostedAuthorizationTests(unittest.TestCase):
         with (
             mock.patch.object(hosted_resources, "_get_container", return_value=current),
             mock.patch.object(hosted_resources, "_cleanup_record", return_value=None),
-            mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True),
-            self.assertRaises(app.ApiError) as wrong_owner,
+            mock.patch.object(network_policy, "brain_identity_valid", return_value=True),
+            self.assertRaises(runtime_state.ApiError) as wrong_owner,
         ):
-            app._require_current_authorization(
+            hosted_resources._require_current_authorization(
                 TEAM_ID,
                 _lease(principal=("account", "account_2")),
                 require_isolation=False,
@@ -86,9 +89,9 @@ class HostedAuthorizationTests(unittest.TestCase):
 
         with (
             mock.patch.object(hosted_resources, "_get_container", return_value=None),
-            self.assertRaises(app.ApiError) as missing,
+            self.assertRaises(runtime_state.ApiError) as missing,
         ):
-            app._authorize(TEAM_ID, ("account", "account_2"))
+            hosted_resources._authorize(TEAM_ID, ("account", "account_2"))
 
         self.assertEqual(
             (wrong_owner.exception.status, wrong_owner.exception.message),
@@ -97,27 +100,27 @@ class HostedAuthorizationTests(unittest.TestCase):
 
     def test_operator_bypasses_ownership_but_not_container_identity(self) -> None:
         current = _container(owner="account_1")
-        with mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True):
-            lease = app._authorize_container(TEAM_ID, ("operator", None), current)
+        with mock.patch.object(network_policy, "brain_identity_valid", return_value=True):
+            lease = hosted_resources._authorize_container(TEAM_ID, ("operator", None), current)
         self.assertEqual(lease.owner, "account_1")
 
         with (
             mock.patch.object(hosted_resources, "_get_container", return_value=current),
             mock.patch.object(hosted_resources, "_cleanup_record", return_value=None),
-            mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True),
+            mock.patch.object(network_policy, "brain_identity_valid", return_value=True),
         ):
             self.assertIs(
-                app._require_current_authorization(TEAM_ID, lease, require_isolation=False),
+                hosted_resources._require_current_authorization(TEAM_ID, lease, require_isolation=False),
                 current,
             )
 
         with (
             mock.patch.object(hosted_resources, "_get_container", return_value=current),
             mock.patch.object(hosted_resources, "_cleanup_record", return_value=None),
-            mock.patch.object(app.network_policy, "brain_identity_valid", return_value=False),
-            self.assertRaises(app.ApiError) as invalid_identity,
+            mock.patch.object(network_policy, "brain_identity_valid", return_value=False),
+            self.assertRaises(runtime_state.ApiError) as invalid_identity,
         ):
-            app._require_current_authorization(TEAM_ID, lease, require_isolation=False)
+            hosted_resources._require_current_authorization(TEAM_ID, lease, require_isolation=False)
         self.assertEqual(invalid_identity.exception.status, HTTPStatus.NOT_FOUND)
 
     def test_pending_cleanup_blocks_normal_use_but_allows_teardown(self) -> None:
@@ -126,19 +129,19 @@ class HostedAuthorizationTests(unittest.TestCase):
         with (
             mock.patch.object(hosted_resources, "_get_container", return_value=current),
             mock.patch.object(hosted_resources, "_cleanup_record", return_value=cleanup),
-            mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True),
-            self.assertRaises(app.ApiError) as blocked,
+            mock.patch.object(network_policy, "brain_identity_valid", return_value=True),
+            self.assertRaises(runtime_state.ApiError) as blocked,
         ):
-            app._require_current_authorization(TEAM_ID, _lease(), require_isolation=False)
+            hosted_resources._require_current_authorization(TEAM_ID, _lease(), require_isolation=False)
         self.assertEqual(blocked.exception.status, HTTPStatus.CONFLICT)
 
         with (
             mock.patch.object(hosted_resources, "_get_container", return_value=current),
             mock.patch.object(hosted_resources, "_cleanup_record", return_value=cleanup),
-            mock.patch.object(app.network_policy, "brain_identity_valid", return_value=True),
+            mock.patch.object(network_policy, "brain_identity_valid", return_value=True),
         ):
             self.assertIs(
-                app._require_current_authorization(
+                hosted_resources._require_current_authorization(
                     TEAM_ID,
                     _lease(),
                     require_isolation=False,
@@ -161,7 +164,7 @@ class HostedAuthorizationTests(unittest.TestCase):
         wrong = self._handler(("Authorization", "Bearer wrong"))
 
         self.assertEqual(operator._principal(), ("operator", None))
-        with mock.patch.object(app.hosted_http.accounts_client, "verify", return_value="account_1") as verify:
+        with mock.patch.object(hosted_controller.accounts_client, "verify", return_value="account_1") as verify:
             self.assertEqual(account._principal(), ("account", "account_1"))
         verify.assert_called_once_with("account-session")
 

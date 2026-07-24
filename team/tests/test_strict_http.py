@@ -14,7 +14,7 @@ sys.path.insert(0, str(TEAM))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import local_app
-from hosted_app_fixture import app
+from hosted_app_fixture import app, runtime_state
 from http_boundary import strict as strict_http
 
 
@@ -40,7 +40,7 @@ class SharedStrictHttpTest(unittest.TestCase):
             hosted = self._handler(app.Handler, body, headers)
             local = self._handler(local_app.Handler, body, headers)
             with self.subTest(body=body):
-                with self.assertRaises(app.ApiError) as hosted_error:
+                with self.assertRaises(runtime_state.ApiError) as hosted_error:
                     hosted._read_body()
                 with self.assertRaises(local_app.ApiProblem) as local_error:
                     local._body()
@@ -52,7 +52,7 @@ class SharedStrictHttpTest(unittest.TestCase):
         local = self._handler(local_app.Handler, b"", ())
         local.path = hosted.path
 
-        with self.assertRaises(app.ApiError) as hosted_error:
+        with self.assertRaises(runtime_state.ApiError) as hosted_error:
             hosted._route("GET", ("operator", None))
         with self.assertRaises(local_app.ApiProblem) as local_error:
             local._path_parts()

@@ -4,14 +4,16 @@ import types
 import unittest
 from unittest import mock
 
-from hosted_app_fixture import app, hosted_apps, hosted_assistants, runtime_state
+from hosted_app_fixture import hosted_apps, hosted_assistants, hosted_resources, runtime_state
+
+marketplace = hosted_assistants.marketplace
 
 
 class HostedAssistantInventoryTests(unittest.TestCase):
     def test_active_assistants_inspect_network_members_once_per_listing(self) -> None:
         first_id = "shimpz-cloudflare"
         second_id = "second-assistant"
-        spec = app.marketplace.APPS[first_id]
+        spec = marketplace.APPS[first_id]
         candidate_ids = (first_id, second_id)
         candidates = [
             types.SimpleNamespace(
@@ -36,19 +38,19 @@ class HostedAssistantInventoryTests(unittest.TestCase):
 
         def installed(_team_id: str, assistant_id: str, inspect_memo, candidate):
             admitted_candidates.append(candidate)
-            app._network_container_metadata(network, inspect_memo)
+            hosted_resources._network_container_metadata(network, inspect_memo)
             return assistant_id, spec.assistant, candidate
 
         engine = types.SimpleNamespace(
             containers=types.SimpleNamespace(get=lambda member_id: members[member_id]),
         )
         with (
-            mock.patch.dict(app.marketplace.APPS, {second_id: spec}),
+            mock.patch.dict(marketplace.APPS, {second_id: spec}),
             mock.patch.object(runtime_state, "_docker", engine),
             mock.patch.object(hosted_apps, "_team_app_containers", return_value=candidates),
             mock.patch.object(hosted_assistants, "_installed_assistant", side_effect=installed),
         ):
-            active = app._active_team_assistants("team_1")
+            active = hosted_assistants._active_team_assistants("team_1")
 
         self.assertEqual(tuple(item.assistant_id for item in active), (second_id, first_id))
         self.assertEqual(admitted_candidates, candidates)

@@ -15,18 +15,29 @@ from unittest import mock
 
 from hosted_app_fixture import (
     ANCHOR_ID,
-    _patched,
     app,
     hosted_apps,
     hosted_assistants,
     hosted_chat_api,
     hosted_chat_segment,
+    hosted_controller,
     hosted_lifecycle,
     hosted_resources,
     runtime_state,
 )
 
-hosted_egress_policy = app._egress_store.__globals__["egress_policy"]
+assistant_account_challenges = runtime_state.assistant_account_challenges
+assistant_manifest = hosted_apps.assistant_manifest
+assistant_secret_challenges = runtime_state.assistant_secret_challenges
+brain_runtime_client = runtime_state.brain_runtime_client
+chat_orchestrator = hosted_chat_segment.chat_orchestrator
+manifests = hosted_apps.manifests
+marketplace = hosted_apps.marketplace
+network_policy = hosted_resources.network_policy
+oauth_account_store = runtime_state.oauth_account_store
+oauth_http_client = runtime_state.oauth_http_client
+power_journal = runtime_state.power_journal
+hosted_egress_policy = hosted_apps.egress_policy
 
 
 class _RouteHarness:
@@ -47,16 +58,16 @@ class _RouteHarness:
 
 class HostedHttpBoundaryTests(unittest.TestCase):
     def test_every_hosted_operation_has_one_dispatch_handler(self) -> None:
-        strict_http = app.hosted_http.strict_http
+        strict_http = hosted_controller.strict_http
         hosted_operations = {
             route.operation
             for route in strict_http.CONTROLLER_ROUTES
             if strict_http.HOSTED_CONTROLLER in route.profiles
         }
         dispatch_groups = (
-            set(app.hosted_http._GLOBAL_ROUTES),
-            set(app.hosted_http._PREAUTHORIZED_ROUTES),
-            set(app.hosted_http._AUTHORIZED_ROUTES),
+            set(hosted_controller._GLOBAL_ROUTES),
+            set(hosted_controller._PREAUTHORIZED_ROUTES),
+            set(hosted_controller._AUTHORIZED_ROUTES),
         )
         self.assertEqual(set().union(*dispatch_groups), hosted_operations)
         self.assertEqual(sum(map(len, dispatch_groups)), len(hosted_operations))
@@ -80,9 +91,9 @@ class HostedHttpBoundaryTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-            app.hosted_http.strict_http.hmac,
+            hosted_controller.strict_http.hmac,
             "compare_digest",
-            wraps=app.hosted_http.strict_http.hmac.compare_digest,
+            wraps=hosted_controller.strict_http.hmac.compare_digest,
         ) as compare:
             self.assertEqual(accepted._principal(), ("operator", None))
             self.assertIsNone(wrong._principal())
@@ -113,7 +124,7 @@ class HostedHttpBoundaryTests(unittest.TestCase):
         for body, extra_headers, expected_status in cases:
             headers = (("Content-Length", str(len(body))), *extra_headers)
             handler = self._handler(body, *headers)
-            with self.subTest(body=body, headers=headers), self.assertRaises(app.ApiError) as caught:
+            with self.subTest(body=body, headers=headers), self.assertRaises(runtime_state.ApiError) as caught:
                 handler._read_body()
             self.assertEqual(caught.exception.status, expected_status)
 
@@ -126,9 +137,9 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
         )
 
     def test_manifest_must_match_reviewed_hosts_before_admission(self) -> None:
-        spec = app.marketplace.APPS["shimpz-cloudflare"]
+        spec = marketplace.APPS["shimpz-cloudflare"]
         container = types.SimpleNamespace(id="assistant-generation")
-        reviewed_contracts: list[app.assistant_manifest.ManifestContract] = []
+        reviewed_contracts: list[assistant_manifest.ManifestContract] = []
 
         def admit(_container, reviewed):
             reviewed_contracts.append(reviewed)
@@ -150,7 +161,7 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
                 return_value="Use reviewed Powers.",
             ),
         ):
-            self.assertEqual(app._admit_app_contract(spec, container), tuple(sorted(spec.allowed_hosts)))
+            self.assertEqual(hosted_apps._admit_app_contract(spec, container), tuple(sorted(spec.allowed_hosts)))
         self.assertEqual(len(reviewed_contracts), 1)
         self.assertEqual(
             {account.id: (account.provider, account.scopes) for account in reviewed_contracts[0].accounts},
@@ -168,32 +179,32 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
         with (
             mock.patch.multiple(
                 runtime_state,
-                _assistant_allowed_hosts_cache=app.assistant_manifest.ManifestContractCache(),
+                _assistant_allowed_hosts_cache=assistant_manifest.ManifestContractCache(),
                 _assistant_machine_contract_cache=machine_cache,
             ),
-            mock.patch.object(app.assistant_manifest, "read_container_manifest_contract", return_value=exact),
+            mock.patch.object(assistant_manifest, "read_container_manifest_contract", return_value=exact),
         ):
-            self.assertEqual(app._require_assistant_allowed_hosts(spec, container), exact.allowed_hosts)
+            self.assertEqual(hosted_apps._require_assistant_allowed_hosts(spec, container), exact.allowed_hosts)
         for declared in drifted:
             with (
                 self.subTest(declared=declared),
                 mock.patch.multiple(
                     runtime_state,
-                    _assistant_allowed_hosts_cache=app.assistant_manifest.ManifestContractCache(),
+                    _assistant_allowed_hosts_cache=assistant_manifest.ManifestContractCache(),
                     _assistant_machine_contract_cache=machine_cache,
                 ),
                 mock.patch.object(
-                    app.assistant_manifest,
+                    assistant_manifest,
                     "read_container_manifest_contract",
                     return_value=declared,
                 ),
-                self.assertRaises(app.ApiError) as drift,
+                self.assertRaises(runtime_state.ApiError) as drift,
             ):
-                app._require_assistant_allowed_hosts(spec, container)
+                hosted_apps._require_assistant_allowed_hosts(spec, container)
             self.assertEqual(drift.exception.status, HTTPStatus.CONFLICT)
 
         def reject(_container, _reviewed):
-            raise app.assistant_manifest.ManifestError("mismatch")
+            raise assistant_manifest.ManifestError("mismatch")
 
         with (
             mock.patch.multiple(
@@ -201,14 +212,14 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
                 _assistant_allowed_hosts_cache=types.SimpleNamespace(get=reject),
                 _assistant_machine_contract_cache=machine_cache,
             ),
-            self.assertRaises(app.ApiError) as caught,
+            self.assertRaises(runtime_state.ApiError) as caught,
         ):
-            app._admit_app_contract(spec, container)
+            hosted_apps._admit_app_contract(spec, container)
         self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
 
     def test_manifest_mismatch_rolls_back_before_policy_proxy_or_start(self) -> None:
         events: list[object] = []
-        spec = app.marketplace.APPS["shimpz-cloudflare"]
+        spec = marketplace.APPS["shimpz-cloudflare"]
         state = {"created": False}
         container = types.SimpleNamespace(
             id="assistant-generation",
@@ -230,7 +241,7 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
 
         def reject(_spec, _container):
             events.append("admit")
-            raise app.ApiError(HTTPStatus.CONFLICT, "allowed_hosts mismatch")
+            raise runtime_state.ApiError(HTTPStatus.CONFLICT, "allowed_hosts mismatch")
 
         with tempfile.TemporaryDirectory() as directory:
             Path(directory).chmod(0o770)
@@ -263,11 +274,11 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
                     side_effect=lambda *_args: events.append("write-policy"),
                 ),
                 mock.patch.object(hosted_apps, "_team_app_containers", return_value=[]),
-                mock.patch.object(app.manifests, "build_team_app_kwargs", return_value={}),
-                mock.patch.object(app.network_policy, "app_identity_valid", return_value=True),
-                self.assertRaises(app.ApiError) as caught,
+                mock.patch.object(manifests, "build_team_app_kwargs", return_value={}),
+                mock.patch.object(network_policy, "app_identity_valid", return_value=True),
+                self.assertRaises(runtime_state.ApiError) as caught,
             ):
-                app._install_app(
+                hosted_apps._install_app(
                     "team_1",
                     "shimpz-cloudflare",
                     spec,
@@ -297,17 +308,17 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
                 APP_EGRESS_POLICY_DIR=Path(directory),
                 APP_EGRESS_POLICY_GID=os.getgid(),
             ):
-                token = app._app_egress_token("team_1", "shimpz-cloudflare")
+                token = hosted_apps._app_egress_token("team_1", "shimpz-cloudflare")
                 assert token is not None
-                app._write_egress_policy(token, hosts)
+                hosted_apps._write_egress_policy(token, hosts)
                 self.assertEqual(
-                    app._validate_egress_policy("team_1", "shimpz-cloudflare", hosts),
+                    hosted_apps._validate_egress_policy("team_1", "shimpz-cloudflare", hosts),
                     token,
                 )
 
                 (Path(directory) / f"{token}.json").write_text('["evil.example"]', encoding="ascii")
-                with self.assertRaises(app.ApiError) as caught:
-                    app._validate_egress_policy("team_1", "shimpz-cloudflare", hosts)
+                with self.assertRaises(runtime_state.ApiError) as caught:
+                    hosted_apps._validate_egress_policy("team_1", "shimpz-cloudflare", hosts)
         self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
 
     def test_egress_reservation_constructs_one_store_for_the_operation(self) -> None:
@@ -327,10 +338,14 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
                     wraps=hosted_egress_policy.EgressPolicyStore,
                 ) as store_constructor,
             ):
-                token, environment = app._reserve_egress_environment("team_1", "shimpz-cloudflare", hosts)
+                token, environment = hosted_apps._reserve_egress_environment(
+                    "team_1",
+                    "shimpz-cloudflare",
+                    hosts,
+                )
 
         self.assertIsNotNone(token)
-        self.assertEqual(environment, app._egress_proxy_environment(token))
+        self.assertEqual(environment, hosted_apps._egress_proxy_environment(token))
         store_constructor.assert_called_once_with(
             policy_root,
             os.getgid(),
@@ -340,8 +355,12 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
     def test_nonempty_hosts_require_the_exact_admitted_proxy_token(self) -> None:
         token = "a" * 32
         hosts = ("api.open-meteo.com",)
-        expected = app._egress_proxy_environment(token)
-        app._validate_assistant_proxy_environment(self._container_with_environment(expected), token, hosts)
+        expected = hosted_apps._egress_proxy_environment(token)
+        hosted_apps._validate_assistant_proxy_environment(
+            self._container_with_environment(expected),
+            token,
+            hosts,
+        )
 
         drifted_environments = {
             "wrong-token": {**expected, "HTTPS_PROXY": expected["HTTPS_PROXY"].replace(token, "b" * 32)},
@@ -350,8 +369,8 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             "all-proxy": {**expected, "all_proxy": "http://app-egress-proxy:8889"},
         }
         for name, environment in drifted_environments.items():
-            with self.subTest(name=name), self.assertRaises(app.ApiError) as caught:
-                app._validate_assistant_proxy_environment(
+            with self.subTest(name=name), self.assertRaises(runtime_state.ApiError) as caught:
+                hosted_apps._validate_assistant_proxy_environment(
                     self._container_with_environment(environment),
                     token,
                     hosts,
@@ -359,15 +378,15 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
 
     def test_empty_hosts_forbid_every_proxy_environment_variable(self) -> None:
-        app._validate_assistant_proxy_environment(
+        hosted_apps._validate_assistant_proxy_environment(
             self._container_with_environment({"SHIMPZ_TEAM_ID": "team_1"}),
             None,
             (),
         )
 
         for key in ("HTTPS_PROXY", "http_proxy", "ALL_PROXY", "no_proxy", "FTP_PROXY", "custom_proxy"):
-            with self.subTest(key=key), self.assertRaises(app.ApiError) as caught:
-                app._validate_assistant_proxy_environment(
+            with self.subTest(key=key), self.assertRaises(runtime_state.ApiError) as caught:
+                hosted_apps._validate_assistant_proxy_environment(
                     self._container_with_environment({key: "unexpected"}),
                     None,
                     (),
@@ -375,8 +394,8 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
 
     def test_empty_hosts_build_no_proxy_environment(self) -> None:
-        spec = app.marketplace.APPS["shimpz-cloudflare"]
-        kwargs = app.manifests.build_team_app_kwargs("team_1", "shimpz-cloudflare", spec)
+        spec = marketplace.APPS["shimpz-cloudflare"]
+        kwargs = manifests.build_team_app_kwargs("team_1", "shimpz-cloudflare", spec)
         environment = kwargs["environment"]
 
         self.assertFalse({key for key in environment if key.upper().endswith("_PROXY")})
@@ -385,17 +404,17 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
 class HostedCredentialLeaseTests(unittest.TestCase):
     def setUp(self) -> None:
         """Keep pending private-input state isolated from every hosted test."""
-        original_accounts = app._assistant_account_challenges
-        original_secrets = app._assistant_secret_challenges
-        app._assistant_account_challenges = app.assistant_account_challenges.AccountChallengeStore()
-        app._assistant_secret_challenges = app.assistant_secret_challenges.SecretChallengeStore()
-        self.addCleanup(setattr, app, "_assistant_account_challenges", original_accounts)
-        self.addCleanup(setattr, app, "_assistant_secret_challenges", original_secrets)
+        original_accounts = runtime_state._assistant_account_challenges
+        original_secrets = runtime_state._assistant_secret_challenges
+        runtime_state._assistant_account_challenges = assistant_account_challenges.AccountChallengeStore()
+        runtime_state._assistant_secret_challenges = assistant_secret_challenges.SecretChallengeStore()
+        self.addCleanup(setattr, runtime_state, "_assistant_account_challenges", original_accounts)
+        self.addCleanup(setattr, runtime_state, "_assistant_secret_challenges", original_secrets)
 
     def _journal_chat_environment(self, journal, runtime, rpc):
-        contract = app.marketplace.APPS["shimpz-cloudflare"].assistant
+        contract = marketplace.APPS["shimpz-cloudflare"].assistant
         assert contract is not None
-        assistant = app._ActiveAssistant(
+        assistant = hosted_assistants._ActiveAssistant(
             "shimpz-cloudflare",
             contract,
             types.SimpleNamespace(id="b" * 64),
@@ -414,7 +433,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 "configured-test-secret",
             ),
         )
-        account_store = app.oauth_account_store.OAuthAccountStore(
+        account_store = oauth_account_store.OAuthAccountStore(
             journal.path.parent / "oauth-state" / "accounts.json",
             journal.path.parent / "oauth-key" / "aes256.key",
         )
@@ -425,7 +444,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 account_id,
                 declaration.provider,
                 declaration.scopes,
-                app.oauth_http_client.OAuthTokenSet(
+                oauth_http_client.OAuthTokenSet(
                     f"synthetic-hosted-access-token-{account_id}",
                     f"synthetic-hosted-refresh-token-{account_id}",
                     declaration.scopes,
@@ -433,28 +452,6 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 ),
             )
         environment = contextlib.ExitStack()
-        environment.enter_context(
-            _patched(
-                _active_team_assistants=lambda _team_id: (assistant,),
-                _installed_assistant=lambda _team_id, assistant_id, *_args: (
-                    assistant_id,
-                    contract,
-                    assistant.container,
-                ),
-                _require_assistant_genesis=lambda _container: "Use only the declared Cloudflare Powers.",
-                _chat_file_metadata=lambda _team_id, _files: [],
-                _inference_store=types.SimpleNamespace(load=lambda _team_id: config),
-                _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
-                _require_model_credential_current=lambda *_args: None,
-                _current_team_anchor=lambda *_args: anchor,
-                _brain_runtime=runtime,
-                _power_execution_journal=lambda: journal,
-                _assistant_secrets=secret_store,
-                _assistant_accounts=account_store,
-                _invoke_assistant_power=rpc,
-                _commit_chat_terminal=lambda _team_id, _token: True,
-            )
-        )
         environment.enter_context(
             mock.patch.multiple(
                 hosted_assistants,
@@ -492,36 +489,43 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         return anchor, environment
 
     def test_hosted_thread_identity_is_generation_scoped_and_closed(self) -> None:
-        first = app._brain_thread_id("team_1", ANCHOR_ID)
-        second = app._brain_thread_id("team_1", "b" * 64)
+        first = hosted_resources._brain_thread_id("team_1", ANCHOR_ID)
+        second = hosted_resources._brain_thread_id("team_1", "b" * 64)
 
         self.assertEqual(first, f"hosted:team_1:{ANCHOR_ID}:default")
         self.assertNotEqual(first, second)
         for team_id, anchor_id in (("bad team", ANCHOR_ID), ("team_1", "not-a-container")):
-            with self.subTest(team_id=team_id, anchor_id=anchor_id), self.assertRaises(app.ApiError) as caught:
-                app._brain_thread_id(team_id, anchor_id)
+            with (
+                self.subTest(team_id=team_id, anchor_id=anchor_id),
+                self.assertRaises(runtime_state.ApiError) as caught,
+            ):
+                hosted_resources._brain_thread_id(team_id, anchor_id)
             self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
 
     def test_team_name_contract_rejects_padding_controls_and_oversize_values(self) -> None:
-        self.assertEqual(app._validated_team_name("Marketing"), "Marketing")
+        self.assertEqual(hosted_resources._validated_team_name("Marketing"), "Marketing")
         for invalid in ("", " Marketing", "Marketing ", "Marketing\n", "x" * 81, None):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                app._validated_team_name(invalid)
+                hosted_resources._validated_team_name(invalid)
 
     def test_hosted_lifecycle_rejects_an_active_chat_before_any_mutation(self) -> None:
-        spec = app.marketplace.APPS["shimpz-cloudflare"]
+        spec = marketplace.APPS["shimpz-cloudflare"]
         lease = types.SimpleNamespace(owner="account_1")
         operations = (
-            lambda: app._install_app("team_1", "shimpz-cloudflare", spec, "account_1", lease),
-            lambda: app._uninstall_app("team_1", "shimpz-cloudflare", lease),
-            lambda: app._lifecycle("team_1", "restart", lease),
+            lambda: hosted_apps._install_app("team_1", "shimpz-cloudflare", spec, "account_1", lease),
+            lambda: hosted_apps._uninstall_app("team_1", "shimpz-cloudflare", lease),
+            lambda: hosted_lifecycle._lifecycle("team_1", "restart", lease),
         )
-        chat_lock = app._chat_lock_for("team_1")
+        chat_lock = runtime_state._chat_lock_for("team_1")
         self.assertTrue(chat_lock.acquire(blocking=False))
         try:
-            with _patched(_lock_for=lambda _team_id: self.fail("lifecycle mutation acquired its inner lock")):
+            with mock.patch.object(
+                runtime_state,
+                "_lock_for",
+                side_effect=lambda _team_id: self.fail("lifecycle mutation acquired its inner lock"),
+            ):
                 for operation in operations:
-                    with self.subTest(operation=operation), self.assertRaises(app.ApiError) as caught:
+                    with self.subTest(operation=operation), self.assertRaises(runtime_state.ApiError) as caught:
                         operation()
                     self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
         finally:
@@ -588,27 +592,31 @@ class HostedCredentialLeaseTests(unittest.TestCase):
 
     def test_hosted_chat_scope_is_explicit_bounded_and_selects_only_requested_assistants(self) -> None:
         contract = types.SimpleNamespace(powers={})
-        places = app._ActiveAssistant("places", contract, types.SimpleNamespace(id="places-container"))
-        weather = app._ActiveAssistant("weather", contract, types.SimpleNamespace(id="weather-container"))
+        places = hosted_assistants._ActiveAssistant("places", contract, types.SimpleNamespace(id="places-container"))
+        weather = hosted_assistants._ActiveAssistant(
+            "weather",
+            contract,
+            types.SimpleNamespace(id="weather-container"),
+        )
 
-        self.assertEqual(app._chat_assistant_ids([]), ())
-        self.assertEqual(app._chat_assistant_ids(["weather", "places"]), ("places", "weather"))
+        self.assertEqual(hosted_assistants._chat_assistant_ids([]), ())
+        self.assertEqual(hosted_assistants._chat_assistant_ids(["weather", "places"]), ("places", "weather"))
         self.assertEqual(
-            app._select_team_assistants((places, weather), ("weather",)),
+            hosted_assistants._select_team_assistants((places, weather), ("weather",)),
             (weather,),
         )
 
         for invalid in (
             ["weather", "weather"],
             ["bad_assistant"],
-            [f"helper-{index}" for index in range(app.MAX_CHAT_ASSISTANTS + 1)],
+            [f"helper-{index}" for index in range(hosted_assistants.MAX_CHAT_ASSISTANTS + 1)],
         ):
-            with self.subTest(invalid=invalid), self.assertRaises(app.ApiError) as caught:
-                app._chat_assistant_ids(invalid)
+            with self.subTest(invalid=invalid), self.assertRaises(runtime_state.ApiError) as caught:
+                hosted_assistants._chat_assistant_ids(invalid)
             self.assertEqual(caught.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
 
-        with self.assertRaises(app.ApiError) as unavailable:
-            app._select_team_assistants((places,), ("weather",))
+        with self.assertRaises(runtime_state.ApiError) as unavailable:
+            hosted_assistants._select_team_assistants((places,), ("weather",))
         self.assertEqual(unavailable.exception.status, HTTPStatus.CONFLICT)
         self.assertEqual(unavailable.exception.message, "a selected Assistant is unavailable")
 
@@ -618,18 +626,18 @@ class HostedCredentialLeaseTests(unittest.TestCase):
 
             def start(self, context, _message):
                 self.context = context
-                return app.brain_runtime_client.RuntimeTurn("completed", "Brain only.", ())
+                return brain_runtime_client.RuntimeTurn("completed", "Brain only.", ())
 
             def resume(self, _context, _results):
                 raise AssertionError("a Brain-only reply must not resume")
 
         runtime = Runtime()
         with tempfile.TemporaryDirectory() as directory:
-            journal = app.power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
+            journal = power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
             self.addCleanup(journal.close)
             anchor, environment = self._journal_chat_environment(journal, runtime, mock.Mock())
             with environment:
-                result = app._chat_in_turn(
+                result = hosted_chat_segment._chat_in_turn(
                     "team_1",
                     "Hello",
                     [],
@@ -656,13 +664,16 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         def require_current(owner: str, provider: str, generation: int) -> None:
             checks.append((owner, provider, generation))
             if len(checks) == 2:
-                raise app.ApiError(HTTPStatus.CONFLICT, "model credential changed or was revoked; retry")
+                raise runtime_state.ApiError(
+                    HTTPStatus.CONFLICT,
+                    "model credential changed or was revoked; retry",
+                )
 
         with (
             mock.patch.multiple(
                 hosted_assistants,
                 _active_team_assistants=lambda _team_id: (
-                    app._ActiveAssistant(
+                    hosted_assistants._ActiveAssistant(
                         "hello-pulse",
                         contract,
                         assistant_container,
@@ -687,11 +698,11 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             mock.patch.object(
                 hosted_chat_segment.chat_orchestrator,
                 "run_until_pause",
-                return_value=app.chat_orchestrator.ChatOutcome(reply="late reply", powers=()),
+                return_value=chat_orchestrator.ChatOutcome(reply="late reply", powers=()),
             ),
-            self.assertRaises(app.ApiError) as caught,
+            self.assertRaises(runtime_state.ApiError) as caught,
         ):
-            app._chat_in_turn(
+            hosted_chat_segment._chat_in_turn(
                 "team_1",
                 "hello",
                 [],
@@ -734,11 +745,11 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 [assistant.genesis for assistant in context.assistants],
                 ["Compose Powers for places-container.", "Compose Powers for weather-container."],
             )
-            self.assertEqual(context.thread_id, app._brain_thread_id("team_1", ANCHOR_ID))
+            self.assertEqual(context.thread_id, hosted_resources._brain_thread_id("team_1", ANCHOR_ID))
             self.assertTrue(callable(strategy.validate_power))
             requests = (
-                app.brain_runtime_client.PowerRequest("place-1", "places", "search", {"name": "Berlin"}),
-                app.brain_runtime_client.PowerRequest(
+                brain_runtime_client.PowerRequest("place-1", "places", "search", {"name": "Berlin"}),
+                brain_runtime_client.PowerRequest(
                     "weather-1",
                     "weather",
                     "current",
@@ -749,11 +760,11 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             for request in requests:
                 strategy.invoke_power(request)
             strategy.batch_delivered(requests)
-            return app.chat_orchestrator.ChatOutcome(
+            return chat_orchestrator.ChatOutcome(
                 reply="Berlin weather is ready.",
                 powers=(
-                    app.chat_orchestrator.InvokedPower("places", "search"),
-                    app.chat_orchestrator.InvokedPower("weather", "current"),
+                    chat_orchestrator.InvokedPower("places", "search"),
+                    chat_orchestrator.InvokedPower("weather", "current"),
                 ),
             )
 
@@ -763,14 +774,14 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             return {"result": {"ok": True}}
 
         with tempfile.TemporaryDirectory() as directory:
-            journal = app.power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
+            journal = power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
             self.addCleanup(journal.close)
             with (
                 mock.patch.multiple(
                     hosted_assistants,
                     _active_team_assistants=lambda _team_id: (
-                        app._ActiveAssistant("places", place_contract, place_container),
-                        app._ActiveAssistant("weather", weather_contract, weather_container),
+                        hosted_assistants._ActiveAssistant("places", place_contract, place_container),
+                        hosted_assistants._ActiveAssistant("weather", weather_contract, weather_container),
                     ),
                     _chat_file_metadata=lambda _team_id, _files: [],
                     _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
@@ -792,7 +803,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 mock.patch.object(hosted_chat_segment, "_current_team_anchor", return_value=anchor),
                 mock.patch.object(hosted_chat_segment.chat_orchestrator, "run_until_pause", side_effect=run),
             ):
-                result = app._chat_in_turn(
+                result = hosted_chat_segment._chat_in_turn(
                     "team_1",
                     "Find Berlin weather",
                     [],
@@ -806,7 +817,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         self.assertEqual(result, {"team_id": "team_1", "team_name": "Marketing", "reply": "Berlin weather is ready."})
 
     def test_completed_power_is_cached_until_a_successful_brain_resume(self) -> None:
-        request = app.brain_runtime_client.PowerRequest(
+        request = brain_runtime_client.PowerRequest(
             "power-1",
             "shimpz-cloudflare",
             "list-zones",
@@ -819,25 +830,25 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 self.results: list[dict[str, object]] = []
 
             def start(self, _context, _message):
-                return app.brain_runtime_client.RuntimeTurn("power-required", "", (request,))
+                return brain_runtime_client.RuntimeTurn("power-required", "", (request,))
 
             def resume(self, _context, results):
                 self.resume_calls += 1
                 self.results.append(results)
                 if self.resume_calls == 1:
-                    raise app.brain_runtime_client.BrainRuntimeError("private-provider-response")
-                return app.brain_runtime_client.RuntimeTurn("completed", "Cached reply", ())
+                    raise brain_runtime_client.BrainRuntimeError("private-provider-response")
+                return brain_runtime_client.RuntimeTurn("completed", "Cached reply", ())
 
         runtime = Runtime()
         power_result = {"zones": [], "page": 1, "per_page": 25, "total_pages": 0}
         rpc = mock.Mock(return_value={"result": power_result})
         with tempfile.TemporaryDirectory() as directory:
-            journal = app.power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
+            journal = power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
             self.addCleanup(journal.close)
             anchor, environment = self._journal_chat_environment(journal, runtime, rpc)
             with mock.patch.object(journal, "delivered", wraps=journal.delivered) as delivered, environment:
-                with self.assertRaises(app.ApiError) as failed:
-                    app._chat_in_turn(
+                with self.assertRaises(runtime_state.ApiError) as failed:
+                    hosted_chat_segment._chat_in_turn(
                         "team_1",
                         "Greet me",
                         [],
@@ -850,7 +861,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 self.assertNotIn("private-provider-response", str(failed.exception))
                 delivered.assert_not_called()
 
-                result = app._chat_in_turn(
+                result = hosted_chat_segment._chat_in_turn(
                     "team_1",
                     "Greet me",
                     [],
@@ -872,24 +883,24 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         self.assertEqual(result["reply"], "Cached reply")
 
     def test_uncertain_power_fails_closed_before_a_second_rpc(self) -> None:
-        normalized = app.brain_runtime_client.PowerRequest(
+        normalized = brain_runtime_client.PowerRequest(
             "power-1",
             "shimpz-cloudflare",
             "list-zones",
             {"page": 1, "per_page": 25},
         )
-        thread_id = app._brain_thread_id("team_1", ANCHOR_ID)
+        thread_id = hosted_resources._brain_thread_id("team_1", ANCHOR_ID)
 
         class Runtime:
             @staticmethod
             def start(_context, _message):
-                raw = app.brain_runtime_client.PowerRequest(
+                raw = brain_runtime_client.PowerRequest(
                     "power-1",
                     "shimpz-cloudflare",
                     "list-zones",
                     {"page": 1, "per_page": 25},
                 )
-                return app.brain_runtime_client.RuntimeTurn("power-required", "", (raw,))
+                return brain_runtime_client.RuntimeTurn("power-required", "", (raw,))
 
             @staticmethod
             def resume(_context, _results):
@@ -898,9 +909,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         runtime = Runtime()
         rpc = mock.Mock(side_effect=AssertionError("an uncertain Power must not execute"))
         with tempfile.TemporaryDirectory() as directory:
-            journal = app.power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
+            journal = power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
             self.addCleanup(journal.close)
-            operation = app._power_operation(
+            operation = hosted_assistants._power_operation(
                 normalized,
                 "b" * 64,
                 account_generations=(("cloudflare", 1),),
@@ -909,8 +920,8 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             journal.begin(batch, operation)
             anchor, environment = self._journal_chat_environment(journal, runtime, rpc)
 
-            with environment, self.assertRaises(app.ApiError) as failed:
-                app._chat_in_turn(
+            with environment, self.assertRaises(runtime_state.ApiError) as failed:
+                hosted_chat_segment._chat_in_turn(
                     "team_1",
                     "Greet me",
                     [],
@@ -930,15 +941,15 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             path = Path(directory) / "private" / "journal.sqlite3"
             with mock.patch.multiple(runtime_state, POWER_JOURNAL_PATH=path, _power_journal_instance=None):
                 self.assertFalse(path.exists())
-                journal = app._power_execution_journal()
+                journal = runtime_state._power_execution_journal()
                 self.addCleanup(journal.close)
                 self.assertTrue(path.exists())
-                self.assertIs(app._power_execution_journal(), journal)
+                self.assertIs(runtime_state._power_execution_journal(), journal)
 
     def test_destroy_deletes_generation_after_chat_drain_before_teardown(self) -> None:
         events: list[object] = []
-        expected_thread = app._brain_thread_id("team_1", ANCHOR_ID)
-        lease = app._AuthorizationLease(
+        expected_thread = hosted_resources._brain_thread_id("team_1", ANCHOR_ID)
+        lease = hosted_resources._AuthorizationLease(
             team_id="team_1",
             container_id=ANCHOR_ID,
             owner="account_1",
@@ -962,7 +973,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
 
         def teardown(team_id: str, *, owner: str, brain_id: str):
             events.append(("teardown", team_id, owner, brain_id))
-            return app._CleanupResult(True, True)
+            return hosted_resources._CleanupResult(True, True)
 
         journal = types.SimpleNamespace(purge=lambda generation: events.append(("journal-purged", generation)))
 
@@ -982,7 +993,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             ),
             mock.patch.object(hosted_lifecycle, "_teardown", side_effect=teardown),
         ):
-            result = app._destroy("team_1", lease)
+            result = hosted_lifecycle._destroy("team_1", lease)
 
         self.assertEqual(
             events,
@@ -1000,9 +1011,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
 
     def test_destroy_retries_thread_delete_without_teardown_after_redacted_failure(self) -> None:
         delete_calls: list[str] = []
-        teardown = mock.Mock(return_value=app._CleanupResult(True, True))
+        teardown = mock.Mock(return_value=hosted_resources._CleanupResult(True, True))
         clear = mock.Mock()
-        lease = app._AuthorizationLease(
+        lease = hosted_resources._AuthorizationLease(
             team_id="team_1",
             container_id=ANCHOR_ID,
             owner="account_1",
@@ -1022,7 +1033,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         def delete_thread(thread_id: str) -> None:
             delete_calls.append(thread_id)
             if len(delete_calls) == 1:
-                raise app.brain_runtime_client.BrainRuntimeError("persisted-private-data")
+                raise brain_runtime_client.BrainRuntimeError("persisted-private-data")
 
         purge_calls: list[str] = []
         journal = types.SimpleNamespace(purge=lambda generation: purge_calls.append(generation))
@@ -1039,17 +1050,17 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             mock.patch.object(hosted_resources, "_require_cleanup_authorization", return_value=object()),
             mock.patch.object(hosted_lifecycle, "_teardown", teardown),
         ):
-            with self.assertRaises(app.ApiError) as caught:
-                app._destroy("team_1", lease)
+            with self.assertRaises(runtime_state.ApiError) as caught:
+                hosted_lifecycle._destroy("team_1", lease)
             self.assertEqual(caught.exception.status, HTTPStatus.SERVICE_UNAVAILABLE)
             self.assertEqual(caught.exception.message, "Team conversation state could not be deleted")
             self.assertNotIn("persisted-private-data", str(caught.exception))
             teardown.assert_not_called()
             clear.assert_not_called()
 
-            result = app._destroy("team_1", lease)
+            result = hosted_lifecycle._destroy("team_1", lease)
 
-        expected_thread = app._brain_thread_id("team_1", ANCHOR_ID)
+        expected_thread = hosted_resources._brain_thread_id("team_1", ANCHOR_ID)
         self.assertEqual(delete_calls, [expected_thread, expected_thread])
         self.assertEqual(purge_calls, [ANCHOR_ID])
         teardown.assert_called_once_with("team_1", owner="account_1", brain_id=ANCHOR_ID)
@@ -1057,9 +1068,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
         self.assertTrue(result["destroyed"])
 
     def test_destroy_journal_failure_is_redacted_before_teardown(self) -> None:
-        teardown = mock.Mock(return_value=app._CleanupResult(True, True))
+        teardown = mock.Mock(return_value=hosted_resources._CleanupResult(True, True))
         clear = mock.Mock()
-        lease = app._AuthorizationLease(
+        lease = hosted_resources._AuthorizationLease(
             team_id="team_1",
             container_id=ANCHOR_ID,
             owner="account_1",
@@ -1079,7 +1090,7 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 cls.released = True
 
         def fail_purge(_generation: str) -> None:
-            raise app.power_journal.PowerJournalError("private-journal-state")
+            raise power_journal.PowerJournalError("private-journal-state")
 
         with (
             mock.patch.multiple(
@@ -1092,9 +1103,9 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             ),
             mock.patch.object(hosted_resources, "_require_cleanup_authorization", return_value=object()),
             mock.patch.object(hosted_lifecycle, "_teardown", teardown),
-            self.assertRaises(app.ApiError) as failed,
+            self.assertRaises(runtime_state.ApiError) as failed,
         ):
-            app._destroy("team_1", lease)
+            hosted_lifecycle._destroy("team_1", lease)
 
         self.assertEqual(failed.exception.status, HTTPStatus.SERVICE_UNAVAILABLE)
         self.assertEqual(failed.exception.message, "Team Power execution state could not be deleted")
