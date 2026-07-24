@@ -184,7 +184,11 @@ def _close_exec_stream(stream) -> None:
     power_execution.close_exec_stream(stream)
 
 
-def _installed_assistant(team_id: str, assistant_id: object):
+def _installed_assistant(
+    team_id: str,
+    assistant_id: object,
+    inspect_memo: dict[str, dict[str, dict]] | None = None,
+):
     assistant_id, spec = marketplace.resolve(assistant_id)
     contract = spec.assistant
     if contract is None:
@@ -207,7 +211,7 @@ def _installed_assistant(team_id: str, assistant_id: object):
         or str(container.attrs.get("Config", {}).get("Image", "")) != spec.image
     ):
         raise _controller.ApiError(HTTPStatus.CONFLICT, "installed Assistant failed its identity contract")
-    _controller._require_running_team_isolation(container)
+    _controller._require_running_team_isolation(container, inspect_memo)
     allowed_hosts = _controller._require_assistant_allowed_hosts(spec, container)
     token = _controller._validate_admitted_egress(team_id, assistant_id, allowed_hosts)
     _controller._validate_assistant_proxy_environment(container, token, allowed_hosts)
@@ -217,6 +221,7 @@ def _installed_assistant(team_id: str, assistant_id: object):
 def _active_team_assistants(team_id: str) -> tuple[_ActiveAssistant, ...]:
     active: list[_controller._ActiveAssistant] = []
     seen: set[str] = set()
+    inspect_memo: dict[str, dict[str, dict]] = {}
     try:
         installed = _controller._team_app_containers(team_id)
     except docker.errors.DockerException as exc:
@@ -236,7 +241,7 @@ def _active_team_assistants(team_id: str) -> tuple[_ActiveAssistant, ...]:
             continue
         if assistant_id in seen:
             raise _controller.ApiError(HTTPStatus.CONFLICT, "duplicate installed Assistant identity")
-        current_id, contract, container = _controller._installed_assistant(team_id, assistant_id)
+        current_id, contract, container = _controller._installed_assistant(team_id, assistant_id, inspect_memo)
         seen.add(current_id)
         active.append(_controller._ActiveAssistant(current_id, contract, container))
     active.sort(key=lambda item: item.assistant_id)

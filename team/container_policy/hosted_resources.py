@@ -107,7 +107,12 @@ def _trusted_workload_image(container, team_id: str) -> tuple[str, str]:
     return image_ref, _controller._trusted_image_id(image_ref)
 
 
-def _require_team_isolation_mode(container, *, require_running: bool) -> None:
+def _require_team_isolation_mode(
+    container,
+    *,
+    require_running: bool,
+    inspect_memo: dict[str, dict[str, dict]] | None = None,
+) -> None:
     """Validate exact static posture, plus live network membership whenever the workload is running."""
     runtime = _controller._team_runtime(container)
     if runtime != manifests.RUNTIME:
@@ -158,6 +163,7 @@ def _require_team_isolation_mode(container, *, require_running: bool) -> None:
         # endpoints; a running anchor must additionally be visible as the live Brain role.
         require_brain=running and network_policy.brain_identity_valid(container.attrs, team_id),
         require_dependencies=True,
+        inspect_memo=inspect_memo,
     )
     if not network_policy.workload_endpoint_valid(
         network.attrs,
@@ -186,9 +192,12 @@ def _require_team_isolation(container) -> None:
     _controller._require_team_isolation_mode(container, require_running=False)
 
 
-def _require_running_team_isolation(container) -> None:
+def _require_running_team_isolation(
+    container,
+    inspect_memo: dict[str, dict[str, dict]] | None = None,
+) -> None:
     """Require a running workload and its complete live core-network membership."""
-    _controller._require_team_isolation_mode(container, require_running=True)
+    _controller._require_team_isolation_mode(container, require_running=True, inspect_memo=inspect_memo)
 
 
 def _team_not_running(container) -> bool:
@@ -457,7 +466,13 @@ def _reserve_capacity(
                 _controller._capacity_generation += 1
 
 
-def _network_container_metadata(network) -> dict[str, dict]:
+def _network_container_metadata(
+    network,
+    inspect_memo: dict[str, dict[str, dict]] | None = None,
+) -> dict[str, dict]:
+    network_id = getattr(network, "id", None)
+    if inspect_memo is not None and isinstance(network_id, str) and network_id in inspect_memo:
+        return inspect_memo[network_id]
     try:
         network.reload()
         member_ids = network.attrs.get("Containers", {})
@@ -477,6 +492,13 @@ def _network_container_metadata(network) -> dict[str, dict]:
             "cannot verify Team network isolation",
         ) from exc
     else:
+        if inspect_memo is not None:
+            if not isinstance(network_id, str) or not network_id:
+                raise _controller.ApiError(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "cannot verify Team network isolation",
+                )
+            inspect_memo[network_id] = containers
         return containers
 
 
@@ -487,8 +509,9 @@ def _require_network_policy(
     *,
     require_brain: bool,
     require_dependencies: bool,
+    inspect_memo: dict[str, dict[str, dict]] | None = None,
 ) -> None:
-    containers = _controller._network_container_metadata(network)
+    containers = _controller._network_container_metadata(network, inspect_memo)
     if not network_policy.network_members_valid(
         network.attrs,
         containers,
