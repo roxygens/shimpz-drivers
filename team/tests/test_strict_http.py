@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import local_app
 from hosted_app_fixture import app
+from http_boundary import strict as strict_http
 
 
 class SharedStrictHttpTest(unittest.TestCase):
@@ -60,6 +61,36 @@ class SharedStrictHttpTest(unittest.TestCase):
             (hosted_error.exception.status, local_error.exception.status),
             (HTTPStatus.BAD_REQUEST, HTTPStatus.BAD_REQUEST),
         )
+
+    def test_hosted_and_local_wrappers_read_the_same_raw_file_contract(self) -> None:
+        body = b"Team private data"
+        headers = (
+            ("Content-Length", str(len(body))),
+            ("Content-Type", "text/plain"),
+            ("X-Shimpz-Filename", "brief%20%E2%9C%93.txt"),
+        )
+        hosted = self._handler(app.Handler, body, headers)
+        local = self._handler(local_app.Handler, body, headers)
+
+        expected = ("brief ✓.txt", body, "text/plain")
+        self.assertEqual(hosted._read_file_body(), expected)
+        self.assertEqual(local._file_body(), expected)
+
+    def test_file_size_is_rejected_from_content_length_before_body_read(self) -> None:
+        class Unreadable:
+            @staticmethod
+            def read(_length: int) -> bytes:
+                raise AssertionError("oversized body must not be read")
+
+        headers = Message()
+        headers.add_header("Content-Length", "11")
+        headers.add_header("Content-Type", "text/plain")
+        headers.add_header("X-Shimpz-Filename", "brief.txt")
+
+        with self.assertRaises(strict_http.HttpContractError) as error:
+            strict_http.read_file_upload(headers, Unreadable(), max_bytes=10)
+
+        self.assertEqual(error.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
 
 
 if __name__ == "__main__":

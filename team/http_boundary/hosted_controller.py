@@ -183,6 +183,16 @@ class Handler(BaseHTTPRequestHandler):
         except strict_http.HttpContractError as exc:
             raise _controller.ApiError(exc.status, exc.message) from exc
 
+    def _read_file_body(self) -> tuple[str, bytes, str]:
+        try:
+            return strict_http.read_file_upload(
+                self.headers,
+                self.rfile,
+                max_bytes=_controller.MAX_FILE_BODY_BYTES,
+            )
+        except strict_http.HttpContractError as exc:
+            raise _controller.ApiError(exc.status, exc.message) from exc
+
     def _read_driver_body(self, keys: set[str]) -> dict[str, object]:
         """Read one closed Driver mutation document; arbitrary scripts/shapes never cross the bridge."""
         body = self._read_body(max_bytes=_controller.MAX_DRIVER_JSON_BODY_BYTES)
@@ -408,20 +418,12 @@ class Handler(BaseHTTPRequestHandler):
             if not _controller._file_upload_slots.acquire(blocking=False):
                 raise _controller.ApiError(HTTPStatus.TOO_MANY_REQUESTS, "another Team file upload is in progress")
             try:
-                body = self._read_body(max_bytes=_controller.MAX_FILE_BODY_BYTES)
-                if not isinstance(body, dict) or set(body) not in (
-                    {"filename", "content_b64"},
-                    {"filename", "content_b64", "media_type"},
-                ):
-                    raise _controller.ApiError(
-                        HTTPStatus.UNPROCESSABLE_ENTITY,
-                        "file upload requires filename, content_b64, and optional media_type",
-                    )
+                filename, content, media_type = self._read_file_body()
                 result = _controller._put_inbox_file(
                     team_id,
-                    body["filename"],
-                    body["content_b64"],
-                    body.get("media_type"),
+                    filename,
+                    content,
+                    media_type,
                     lease,
                 )
             finally:

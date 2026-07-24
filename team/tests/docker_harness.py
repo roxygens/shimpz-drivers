@@ -63,14 +63,23 @@ class DockerHarnessMixin:
         credential: str | None,
         method: str,
         path: str,
-        body: dict[str, object] | None = None,
+        body: dict[str, object] | bytes | None = None,
+        *,
+        extra_headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, object]]:
-        encoded = None if body is None else json.dumps(body, separators=(",", ":")).encode()
+        encoded = (
+            body
+            if isinstance(body, bytes)
+            else None
+            if body is None
+            else json.dumps(body, separators=(",", ":")).encode()
+        )
         headers = {"Connection": "close"}
         if credential is not None:
             headers[self.credential_header] = f"{self.credential_prefix}{credential}"
-        if encoded is not None:
+        if body is not None and not isinstance(body, bytes):
             headers["Content-Type"] = "application/json"
+        headers.update(extra_headers or {})
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}{path}",
             data=encoded,

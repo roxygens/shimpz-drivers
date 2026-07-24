@@ -1,7 +1,5 @@
 """Bounded HTTP adapter for the local Team controller."""
 
-import base64
-import binascii
 import json
 import threading
 from http import HTTPStatus
@@ -25,7 +23,7 @@ MAX_CHAT_BODY_BYTES = 24 * 1024
 MAX_SECRET_BODY_BYTES = 512 * 1024
 MAX_API_RESPONSE_BYTES = 128 * 1024
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-MAX_FILE_BODY_BYTES = 4 * ((MAX_UPLOAD_BYTES + 2) // 3) + 8192
+MAX_FILE_BODY_BYTES = MAX_UPLOAD_BYTES
 MAX_PATH_BYTES = 512
 REQUEST_TIMEOUT_SECONDS = 10
 _FILE_UPLOAD_SLOTS = threading.BoundedSemaphore(1)
@@ -99,28 +97,15 @@ class Handler(BaseHTTPRequestHandler):
         except strict_http.HttpContractError as exc:
             raise ApiProblem(exc.status, exc.message, code=exc.code) from exc
 
-    def _file_body(self) -> tuple[object, bytes, object]:
-        body = self._body(max_bytes=MAX_FILE_BODY_BYTES)
-        if set(body) not in ({"filename", "content_b64"}, {"filename", "content_b64", "media_type"}):
-            raise ApiProblem(
-                HTTPStatus.UNPROCESSABLE_ENTITY,
-                "file upload requires filename, content_b64, and optional media_type",
-                code="invalid-body",
-            )
-        encoded = body["content_b64"]
-        if not isinstance(encoded, str):
-            raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid file content", code="invalid-file")
+    def _file_body(self) -> tuple[str, bytes, str]:
         try:
-            content = base64.b64decode(encoded, validate=True)
-        except (binascii.Error, UnicodeError, ValueError) as exc:
-            raise ApiProblem(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid file content", code="invalid-file") from exc
-        if not content or len(content) > MAX_UPLOAD_BYTES:
-            raise ApiProblem(
-                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                f"file must contain 1 to {MAX_UPLOAD_BYTES} bytes",
-                code="file-too-large",
+            return strict_http.read_file_upload(
+                self.headers,
+                self.rfile,
+                max_bytes=MAX_FILE_BODY_BYTES,
             )
-        return body["filename"], content, body.get("media_type")
+        except strict_http.HttpContractError as exc:
+            raise ApiProblem(exc.status, exc.message, code=exc.code) from exc
 
     def _team_create_body(self) -> str:
         body = self._body()

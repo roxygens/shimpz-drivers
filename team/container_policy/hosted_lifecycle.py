@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import http.client
 from http import HTTPStatus
 
@@ -29,18 +27,12 @@ _controller = controller_binding.current()
 def _put_inbox_file(
     team_id: str,
     filename: object,
-    content_b64: object,
+    data: object,
     media_type: object,
     lease: _controller._AuthorizationLease,
 ) -> dict:
     """Store an opaque object outside every Brain and Assistant filesystem."""
-    if not isinstance(content_b64, str):
-        raise _controller.ApiError(HTTPStatus.BAD_REQUEST, "invalid base64 content")
-    try:
-        data = base64.b64decode(content_b64 or "", validate=True)
-    except (binascii.Error, UnicodeError, ValueError) as exc:
-        raise _controller.ApiError(HTTPStatus.BAD_REQUEST, "invalid base64 content") from exc
-    if not data or len(data) > _controller.MAX_INBOX_FILE_BYTES:
+    if not isinstance(data, bytes) or not data or len(data) > _controller.MAX_INBOX_FILE_BYTES:
         raise _controller.ApiError(HTTPStatus.BAD_REQUEST, f"file must be 1..{_controller.MAX_INBOX_FILE_BYTES} bytes")
     with _controller._lock_for(team_id):
         _controller._require_current_authorization(team_id, lease, require_isolation=False)

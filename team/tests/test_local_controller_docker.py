@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import ipaddress
 import json
@@ -510,10 +509,10 @@ class DockerFlowTests(DockerHarnessMixin, unittest.TestCase):
             flow.token,
             "POST",
             "/v1/teams/demo_team/files",
-            {
-                "filename": "brief.txt",
-                "media_type": "text/plain",
-                "content_b64": base64.b64encode(b"Team private data").decode("ascii"),
+            b"Team private data",
+            extra_headers={
+                "Content-Type": "text/plain",
+                "X-Shimpz-Filename": "brief.txt",
             },
         )
         self.assertEqual(file_status, 200)
@@ -553,9 +552,10 @@ class DockerFlowTests(DockerHarnessMixin, unittest.TestCase):
             flow.token,
             "POST",
             "/v1/teams/orphan_team/files",
-            {
-                "filename": "stale.txt",
-                "content_b64": base64.b64encode(b"must not survive").decode("ascii"),
+            b"must not survive",
+            extra_headers={
+                "Content-Type": "application/octet-stream",
+                "X-Shimpz-Filename": "stale.txt",
             },
         )
         prefix = hashlib.sha256(flow.space_id.encode("ascii")).hexdigest()[:12]
@@ -836,9 +836,10 @@ class DockerFlowTests(DockerHarnessMixin, unittest.TestCase):
             flow.token,
             "POST",
             "/v1/teams/reset_team/files",
-            {
-                "filename": "reset.txt",
-                "content_b64": base64.b64encode(b"remove me").decode("ascii"),
+            b"remove me",
+            extra_headers={
+                "Content-Type": "application/octet-stream",
+                "X-Shimpz-Filename": "reset.txt",
             },
         )
         reset_status, reset = self._api(flow.port, flow.token, "DELETE", "/v1/space")

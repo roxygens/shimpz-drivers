@@ -40,8 +40,7 @@ _controller = controller_binding.current()
 # ── Controller-owned Assistant chat ─────────────────────────────────────────────────────────────
 CHAT_OUTPUT_CAP = 60000
 MAX_INBOX_FILE_BYTES = 25 * 1024 * 1024
-# Base64 expands by 4/3; leave a small fixed envelope for the JSON keys and filename.
-MAX_FILE_BODY_BYTES = 4 * ((MAX_INBOX_FILE_BYTES + 2) // 3) + 8192
+MAX_FILE_BODY_BYTES = MAX_INBOX_FILE_BYTES
 MAX_ASSISTANT_RPC_OUTPUT_BYTES = assistant_help.MAX_HELP_BYTES * 6 + 1024
 ASSISTANT_RPC_TIMEOUT_SECONDS = 8
 MAX_CHAT_FILES = 8

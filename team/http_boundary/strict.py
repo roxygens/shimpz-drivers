@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import BinaryIO
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote, unquote_to_bytes, urlsplit
 
 MAX_REQUEST_TARGET_BYTES = 512
+MAX_FILENAME_BYTES = 255
+MAX_MEDIA_TYPE_CHARS = 127
+FILE_NAME_HEADER = "X-Shimpz-Filename"
+_MEDIA_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+\-]*/[a-z0-9][a-z0-9!#$&^_.+\-]*$")
 
 
 class HttpContractError(ValueError):
@@ -109,6 +114,93 @@ def read_json_object(
             code="invalid-body",
         )
     return body
+
+
+def read_file_upload(
+    headers: object,
+    stream: BinaryIO,
+    *,
+    max_bytes: int,
+) -> tuple[str, bytes, str]:
+    """Read one length-delimited raw file with canonical metadata headers."""
+    if headers.get_all("Transfer-Encoding", failobj=[]):
+        raise HttpContractError(
+            HTTPStatus.BAD_REQUEST,
+            "chunked requests are not accepted",
+            code="chunked-request",
+        )
+    lengths = headers.get_all("Content-Length", failobj=[])
+    if len(lengths) != 1:
+        raise HttpContractError(
+            HTTPStatus.LENGTH_REQUIRED,
+            "one Content-Length is required",
+            code="content-length",
+        )
+    try:
+        length = int(lengths[0])
+    except ValueError as exc:
+        raise HttpContractError(
+            HTTPStatus.BAD_REQUEST,
+            "invalid Content-Length",
+            code="content-length",
+        ) from exc
+    if not 1 <= length <= max_bytes:
+        raise HttpContractError(
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            f"file must contain 1 to {max_bytes} bytes",
+            code="file-too-large",
+        )
+
+    content_types = headers.get_all("Content-Type", failobj=[])
+    media_type = content_types[0] if len(content_types) == 1 else ""
+    if (
+        not media_type
+        or media_type != media_type.lower()
+        or len(media_type) > MAX_MEDIA_TYPE_CHARS
+        or _MEDIA_TYPE_RE.fullmatch(media_type) is None
+    ):
+        raise HttpContractError(
+            HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+            "Content-Type must be a canonical media type",
+            code="content-type",
+        )
+
+    filenames = headers.get_all(FILE_NAME_HEADER, failobj=[])
+    encoded_filename = filenames[0] if len(filenames) == 1 else ""
+    try:
+        filename = unquote_to_bytes(encoded_filename).decode("utf-8")
+    except UnicodeError as exc:
+        raise HttpContractError(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "invalid file name",
+            code="invalid-file",
+        ) from exc
+    if (
+        not filename
+        or len(filename.encode("utf-8")) > MAX_FILENAME_BYTES
+        or quote(filename, safe="") != encoded_filename
+    ):
+        raise HttpContractError(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "invalid file name",
+            code="invalid-file",
+        )
+
+    try:
+        body = stream.read(length)
+    except OSError as exc:
+        raise HttpContractError(
+            HTTPStatus.BAD_REQUEST,
+            "invalid file body",
+            code="invalid-file",
+        ) from exc
+    if len(body) != length:
+        raise HttpContractError(
+            HTTPStatus.BAD_REQUEST,
+            "invalid file body",
+            code="invalid-file",
+        )
+    return filename, body, media_type
 
 
 def reject_body(headers: object) -> None:
