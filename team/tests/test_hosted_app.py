@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import importlib
 import json
 import os
 import tempfile
@@ -16,7 +15,7 @@ from unittest import mock
 
 from hosted_app_fixture import ANCHOR_ID, _patched, app
 
-hosted_apps = importlib.import_module("container_policy.hosted_apps")
+hosted_egress_policy = app._egress_store.__globals__["egress_policy"]
 
 
 class _RouteHarness:
@@ -277,9 +276,9 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
                     APP_EGRESS_POLICY_GID=os.getgid(),
                 ),
                 mock.patch.object(
-                    hosted_apps.egress_policy,
+                    hosted_egress_policy,
                     "EgressPolicyStore",
-                    wraps=hosted_apps.egress_policy.EgressPolicyStore,
+                    wraps=hosted_egress_policy.EgressPolicyStore,
                 ) as store_constructor,
             ):
                 token, environment = app._reserve_egress_environment("team_1", "shimpz-cloudflare", hosts)
