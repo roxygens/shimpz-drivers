@@ -138,6 +138,7 @@ hosted_resources = sys.modules["container_policy.hosted_resources"]
 hosted_apps = sys.modules["container_policy.hosted_apps"]
 hosted_lifecycle = sys.modules["container_policy.hosted_lifecycle"]
 hosted_assistants = sys.modules["assistant_human.hosted_assistants"]
+hosted_chat_segment = sys.modules["assistant_human.hosted_chat_segment"]
 
 # The loaded app keeps direct references to its fakes. Restore the process import table so discovery
 # order can never make unrelated tests import a partial Docker/client module.

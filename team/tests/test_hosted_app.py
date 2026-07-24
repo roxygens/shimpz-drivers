@@ -19,6 +19,7 @@ from hosted_app_fixture import (
     app,
     hosted_apps,
     hosted_assistants,
+    hosted_chat_segment,
     hosted_lifecycle,
     hosted_resources,
     runtime_state,
@@ -454,23 +455,39 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             )
         )
         environment.enter_context(
-            mock.patch.object(
+            mock.patch.multiple(
                 hosted_assistants,
-                "_installed_assistant",
-                side_effect=lambda _team_id, assistant_id, *_args: (
+                _active_team_assistants=lambda _team_id: (assistant,),
+                _chat_file_metadata=lambda _team_id, _files: [],
+                _installed_assistant=lambda _team_id, assistant_id, *_args: (
                     assistant_id,
                     contract,
                     assistant.container,
                 ),
+                _invoke_assistant_power=rpc,
+                _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
+                _require_model_credential_current=lambda *_args: None,
             )
         )
         environment.enter_context(
             mock.patch.multiple(
                 runtime_state,
+                _brain_runtime=runtime,
+                _commit_chat_terminal=lambda _team_id, _token: True,
+                _inference_store=types.SimpleNamespace(load=lambda _team_id: config),
+                _power_execution_journal=lambda: journal,
                 _assistant_secrets=secret_store,
                 _assistant_accounts=account_store,
             )
         )
+        environment.enter_context(
+            mock.patch.object(
+                hosted_apps,
+                "_require_assistant_genesis",
+                return_value="Use only the declared Cloudflare Powers.",
+            )
+        )
+        environment.enter_context(mock.patch.object(hosted_chat_segment, "_current_team_anchor", return_value=anchor))
         return anchor, environment
 
     def test_hosted_thread_identity_is_generation_scoped_and_closed(self) -> None:
@@ -637,7 +654,8 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                 raise app.ApiError(HTTPStatus.CONFLICT, "model credential changed or was revoked; retry")
 
         with (
-            _patched(
+            mock.patch.multiple(
+                hosted_assistants,
                 _active_team_assistants=lambda _team_id: (
                     app._ActiveAssistant(
                         "hello-pulse",
@@ -645,16 +663,24 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                         assistant_container,
                     ),
                 ),
-                _require_assistant_genesis=lambda _container: "Use only declared Powers.",
                 _chat_file_metadata=lambda _team_id, _files: [],
-                _inference_store=store,
                 _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
                 _require_model_credential_current=require_current,
+            ),
+            mock.patch.object(
+                hosted_apps,
+                "_require_assistant_genesis",
+                return_value="Use only declared Powers.",
+            ),
+            mock.patch.multiple(
+                runtime_state,
+                _inference_store=store,
                 _brain_runtime=object(),
                 _commit_chat_terminal=commit,
             ),
+            mock.patch.object(hosted_chat_segment, "_current_team_anchor", return_value=anchor),
             mock.patch.object(
-                app.chat_orchestrator,
+                hosted_chat_segment.chat_orchestrator,
                 "run_until_pause",
                 return_value=app.chat_orchestrator.ChatOutcome(reply="late reply", powers=()),
             ),
@@ -735,22 +761,31 @@ class HostedCredentialLeaseTests(unittest.TestCase):
             journal = app.power_journal.PowerJournal(Path(directory) / "journal.sqlite3")
             self.addCleanup(journal.close)
             with (
-                _patched(
+                mock.patch.multiple(
+                    hosted_assistants,
                     _active_team_assistants=lambda _team_id: (
                         app._ActiveAssistant("places", place_contract, place_container),
                         app._ActiveAssistant("weather", weather_contract, weather_container),
                     ),
-                    _require_assistant_genesis=lambda container: f"Compose Powers for {container.id}.",
                     _chat_file_metadata=lambda _team_id, _files: [],
-                    _inference_store=store,
                     _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
                     _require_model_credential_current=lambda *_args: None,
+                    _invoke_assistant_power=invoke,
+                ),
+                mock.patch.object(
+                    hosted_apps,
+                    "_require_assistant_genesis",
+                    side_effect=lambda container: f"Compose Powers for {container.id}.",
+                ),
+                mock.patch.multiple(
+                    runtime_state,
+                    _inference_store=store,
                     _brain_runtime=object(),
                     _power_execution_journal=lambda: journal,
-                    _invoke_assistant_power=invoke,
                     _commit_chat_terminal=lambda _team_id, _token: True,
                 ),
-                mock.patch.object(app.chat_orchestrator, "run_until_pause", side_effect=run),
+                mock.patch.object(hosted_chat_segment, "_current_team_anchor", return_value=anchor),
+                mock.patch.object(hosted_chat_segment.chat_orchestrator, "run_until_pause", side_effect=run),
             ):
                 result = app._chat_in_turn(
                     "team_1",

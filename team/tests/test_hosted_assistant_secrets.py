@@ -22,6 +22,7 @@ app = harness.app
 _patched = harness._patched
 hosted_apps = harness.hosted_apps
 hosted_assistants = harness.hosted_assistants
+hosted_chat_segment = harness.hosted_chat_segment
 hosted_resources = harness.hosted_resources
 runtime_state = harness.runtime_state
 
@@ -180,14 +181,30 @@ class HostedAssistantSecretTests(unittest.TestCase):
             ),
             mock.patch.multiple(
                 runtime_state,
+                _brain_runtime=self.runtime,
+                _commit_chat_terminal=lambda *_args: True,
+                _inference_store=types.SimpleNamespace(
+                    load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test")
+                ),
+                _power_execution_journal=lambda: self.journal,
                 _assistant_secrets=self.secret_store,
                 _assistant_secret_challenges=self.challenge_store,
             ),
             mock.patch.multiple(
                 hosted_assistants,
+                _active_team_assistants=lambda _team_id: (self.active,),
+                _chat_file_metadata=lambda _team_id, _files: [],
                 _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.assistant_container),
                 _assistant_rpc=self._rpc,
+                _model_credential=lambda _owner, _provider: ("model-secret-not-an-assistant-secret", 7),
+                _require_model_credential_current=lambda *_args: None,
             ),
+            mock.patch.object(
+                hosted_apps,
+                "_require_assistant_genesis",
+                return_value="Use only the declared Cloudflare Powers.",
+            ),
+            mock.patch.object(hosted_chat_segment, "_current_team_anchor", return_value=self.anchor),
         ):
             yield
 

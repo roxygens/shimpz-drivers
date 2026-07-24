@@ -323,12 +323,21 @@ class SharedChatTurnEngineTest(unittest.TestCase):
             )
 
         with (
-            hosted_harness._patched(
+            mock.patch.multiple(
+                hosted_harness.hosted_assistants,
                 _active_team_assistants=lambda _team_id: (),
-                _inference_store=SimpleNamespace(load=lambda _team_id: config),
                 _model_credential=lambda _owner, _provider: ("test-key", 7),
                 _require_model_credential_current=lambda *_args: None,
-                _current_team_anchor=lambda *_args: anchor,
+            ),
+            mock.patch.object(
+                hosted_harness.runtime_state,
+                "_inference_store",
+                SimpleNamespace(load=lambda _team_id: config),
+            ),
+            mock.patch.object(
+                hosted_harness.hosted_chat_segment,
+                "_current_team_anchor",
+                side_effect=lambda *_args: anchor,
             ),
             mock.patch.object(
                 hosted_harness.runtime_state,
@@ -336,11 +345,15 @@ class SharedChatTurnEngineTest(unittest.TestCase):
                 side_effect=lambda: SimpleNamespace(metadata=lambda _team_id, _files: []),
             ),
             mock.patch.object(
-                hosted_app,
+                hosted_harness.hosted_chat_segment,
                 "_hosted_chat_setup",
-                wraps=hosted_app._hosted_chat_setup,
+                wraps=hosted_harness.hosted_chat_segment._hosted_chat_setup,
             ) as setup,
-            mock.patch.object(hosted_app.chat_turn_engine, "run_segment", side_effect=run_with_validation),
+            mock.patch.object(
+                hosted_harness.hosted_chat_segment.chat_turn_engine,
+                "run_segment",
+                side_effect=run_with_validation,
+            ),
         ):
             result = hosted_app._run_hosted_chat_segment(
                 hosted_app.HostedChatSegmentRequest(
@@ -421,24 +434,41 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         hosted_anchor = SimpleNamespace(id="a" * 64, labels={"team.name": "Team"})
         hosted_token = "turn-token"
         with (
-            hosted_harness._patched(
+            mock.patch.multiple(
+                hosted_harness.hosted_assistants,
                 _active_team_assistants=lambda _team_id: (hosted_active,),
-                _inference_store=SimpleNamespace(load=lambda _team_id: config),
                 _model_credential=lambda _owner, _provider: ("test-key", 7),
                 _require_model_credential_current=lambda *_args: hosted_events.append("model"),
-                _require_assistant_genesis=lambda _container: "Use the declared Power.",
-                _hosted_private_requirements=lambda *_args: (("account-required",), ()),
                 _require_hosted_power_rpc_envelope=lambda *_args: hosted_events.append("preflight"),
                 _hosted_power_identity=lambda _active: (assistant_container.id, local_spec.image),
                 _power_secret_generations=lambda *_args: hosted_events.append("secrets") or (),
                 _power_account_generations=lambda *_args: hosted_events.append("accounts") or (),
             ),
             mock.patch.object(
+                hosted_harness.hosted_apps,
+                "_require_assistant_genesis",
+                return_value="Use the declared Power.",
+            ),
+            mock.patch.object(
+                hosted_harness.hosted_chat_segment,
+                "_hosted_private_requirements",
+                return_value=(("account-required",), ()),
+            ),
+            mock.patch.object(
+                hosted_harness.runtime_state,
+                "_inference_store",
+                SimpleNamespace(load=lambda _team_id: config),
+            ),
+            mock.patch.object(
                 hosted_harness.runtime_state,
                 "_storage",
                 side_effect=lambda: SimpleNamespace(metadata=lambda _team_id, _files: []),
             ),
-            mock.patch.object(hosted_app.chat_turn_engine, "run_segment", side_effect=capture("hosted")),
+            mock.patch.object(
+                hosted_harness.hosted_chat_segment.chat_turn_engine,
+                "run_segment",
+                side_effect=capture("hosted"),
+            ),
         ):
             hosted_app._run_hosted_chat_segment(
                 hosted_app.HostedChatSegmentRequest(

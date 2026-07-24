@@ -301,6 +301,12 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 ),
                 mock.patch.multiple(
                     runtime_state,
+                    _brain_runtime=runtime,
+                    _commit_chat_terminal=lambda *_args: True,
+                    _inference_store=types.SimpleNamespace(
+                        load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test")
+                    ),
+                    _power_execution_journal=lambda: journal,
                     _assistant_accounts=self.store,
                     _assistant_account_challenges=account_challenges,
                     _assistant_secrets=secret_store,
@@ -308,9 +314,19 @@ class HostedOAuthAccountTests(unittest.TestCase):
                 ),
                 mock.patch.multiple(
                     harness.hosted_assistants,
+                    _active_team_assistants=lambda _team_id: (active,),
+                    _chat_file_metadata=lambda _team_id, _files: [],
                     _installed_assistant=lambda *_args: (ASSISTANT_ID, private_contract, self.container),
                     _assistant_rpc=rpc,
+                    _model_credential=lambda _owner, _provider: ("model-key-value", 7),
+                    _require_model_credential_current=lambda *_args: None,
                 ),
+                mock.patch.object(
+                    harness.hosted_apps,
+                    "_require_assistant_genesis",
+                    return_value="Use only the declared X Power.",
+                ),
+                mock.patch.object(harness.hosted_chat_segment, "_current_team_anchor", return_value=anchor),
             ):
                 account_prompt = app._chat_in_turn(
                     TEAM_ID,
