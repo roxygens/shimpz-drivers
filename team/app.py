@@ -212,7 +212,13 @@ from runtime_state import (
     _power_journal_lock as _power_journal_lock,
 )
 from runtime_state import (
+    _raise_assistant_secret_error as _raise_assistant_secret_error,
+)
+from runtime_state import (
     _rate_limiters as _rate_limiters,
+)
+from runtime_state import (
+    _revoke_assistant_approval_grants as _revoke_assistant_approval_grants,
 )
 from runtime_state import (
     _serialize_against_team_chat as _serialize_against_team_chat,
@@ -225,6 +231,9 @@ from runtime_state import (
 )
 from runtime_state import (
     _storage_lock as _storage_lock,
+)
+from runtime_state import (
+    _teardown_team_approval_grants as _teardown_team_approval_grants,
 )
 from runtime_state import (
     _token as _token,
@@ -333,9 +342,6 @@ from assistant_human.hosted_assistants import (
     _ActiveAssistant as _ActiveAssistant,
 )
 from assistant_human.hosted_assistants import (
-    _admit_app_contract as _admit_app_contract,
-)
-from assistant_human.hosted_assistants import (
     _assistant_account_inventory as _assistant_account_inventory,
 )
 from assistant_human.hosted_assistants import (
@@ -408,9 +414,6 @@ from assistant_human.hosted_assistants import (
     _power_secret_generations as _power_secret_generations,
 )
 from assistant_human.hosted_assistants import (
-    _raise_assistant_secret_error as _raise_assistant_secret_error,
-)
-from assistant_human.hosted_assistants import (
     _raise_if_rpc_cancelled as _raise_if_rpc_cancelled,
 )
 from assistant_human.hosted_assistants import (
@@ -435,12 +438,6 @@ from assistant_human.hosted_assistants import (
     _replace_assistant_secrets as _replace_assistant_secrets,
 )
 from assistant_human.hosted_assistants import (
-    _require_assistant_allowed_hosts as _require_assistant_allowed_hosts,
-)
-from assistant_human.hosted_assistants import (
-    _require_assistant_genesis as _require_assistant_genesis,
-)
-from assistant_human.hosted_assistants import (
     _require_hosted_power_rpc_envelope as _require_hosted_power_rpc_envelope,
 )
 from assistant_human.hosted_assistants import (
@@ -453,16 +450,10 @@ from assistant_human.hosted_assistants import (
     _resolve_power_secrets as _resolve_power_secrets,
 )
 from assistant_human.hosted_assistants import (
-    _revoke_assistant_approval_grants as _revoke_assistant_approval_grants,
-)
-from assistant_human.hosted_assistants import (
     _secret_bindings as _secret_bindings,
 )
 from assistant_human.hosted_assistants import (
     _select_team_assistants as _select_team_assistants,
-)
-from assistant_human.hosted_assistants import (
-    _teardown_team_approval_grants as _teardown_team_approval_grants,
 )
 from assistant_human.hosted_assistants import (
     _validate_assistant_power_input as _validate_assistant_power_input,
@@ -558,6 +549,9 @@ from container_policy.hosted_apps import (
     _activate_admitted_egress as _activate_admitted_egress,
 )
 from container_policy.hosted_apps import (
+    _admit_app_contract as _admit_app_contract,
+)
+from container_policy.hosted_apps import (
     _app_egress_token as _app_egress_token,
 )
 from container_policy.hosted_apps import (
@@ -583,6 +577,12 @@ from container_policy.hosted_apps import (
 )
 from container_policy.hosted_apps import (
     _remove_egress_policy as _remove_egress_policy,
+)
+from container_policy.hosted_apps import (
+    _require_assistant_allowed_hosts as _require_assistant_allowed_hosts,
+)
+from container_policy.hosted_apps import (
+    _require_assistant_genesis as _require_assistant_genesis,
 )
 from container_policy.hosted_apps import (
     _reserve_egress_environment as _reserve_egress_environment,

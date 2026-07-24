@@ -20,7 +20,7 @@ sys.path.insert(0, str(TEAM))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import local_app
-from hosted_app_fixture import _patched, app
+from hosted_app_fixture import app, hosted_assistants, runtime_state
 from local_support import assistant_rpc as local_assistant_rpc
 
 
@@ -305,7 +305,8 @@ class PowerRpcFrameTests(unittest.TestCase):
             fail_stop = mock.Mock()
             container = SimpleNamespace(id="assistant-container")
             with (
-                _patched(_docker=SimpleNamespace(api=api), _fail_stop_power=fail_stop),
+                mock.patch.object(runtime_state, "_docker", SimpleNamespace(api=api)),
+                mock.patch.object(hosted_assistants, "_fail_stop_power", fail_stop),
                 mock.patch.object(app.assistant_secret_flow, "encode_private_rpc_envelope", return_value=b"request"),
                 self.assertRaises(app.ApiError) as caught,
             ):

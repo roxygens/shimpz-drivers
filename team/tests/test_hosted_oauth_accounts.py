@@ -109,7 +109,8 @@ class HostedOAuthAccountTests(unittest.TestCase):
         client_secret = "-".join(("hosted", "client", "secret", "value"))
         refresh_token = "-".join(("old", "refresh", "token", "value"))
 
-        with _patched(
+        with mock.patch.multiple(
+            runtime_state,
             _oauth_http=oauth_http,
             _cloudflare_oauth_client_id="client-id",
             _cloudflare_oauth_client_secret=client_secret,
@@ -140,10 +141,13 @@ class HostedOAuthAccountTests(unittest.TestCase):
             inspected.append(current_inspect_memo)
             return ASSISTANT_ID, self.contract, self.container
 
-        with _patched(
-            _assistant_accounts=self.store,
-            _installed_assistant=installed,
-            _assistant_rpc=rpc,
+        with (
+            mock.patch.object(runtime_state, "_assistant_accounts", self.store),
+            mock.patch.multiple(
+                harness.hosted_assistants,
+                _installed_assistant=installed,
+                _assistant_rpc=rpc,
+            ),
         ):
             result = app._invoke_assistant_power(
                 app.PowerInvocationRequest(
@@ -189,8 +193,9 @@ class HostedOAuthAccountTests(unittest.TestCase):
         self._connect()
         turn_token = "turn-token"
         with (
-            _patched(
-                _assistant_accounts=self.store,
+            mock.patch.object(runtime_state, "_assistant_accounts", self.store),
+            mock.patch.multiple(
+                harness.hosted_assistants,
                 _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.container),
                 _assistant_rpc=lambda *_args, **_kwargs: _zones(ACCESS_TOKEN),
             ),
@@ -274,25 +279,38 @@ class HostedOAuthAccountTests(unittest.TestCase):
             def exclusive(_team_id, _lease):
                 yield "resumed-turn", anchor
 
-            with _patched(
-                _active_team_assistants=lambda _team_id: (active,),
-                _require_assistant_genesis=lambda _container: "Use only the declared X Power.",
-                _chat_file_metadata=lambda _team_id, _files: [],
-                _inference_store=types.SimpleNamespace(
-                    load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test")
+            with (
+                _patched(
+                    _active_team_assistants=lambda _team_id: (active,),
+                    _installed_assistant=lambda *_args: (ASSISTANT_ID, private_contract, self.container),
+                    _require_assistant_genesis=lambda _container: "Use only the declared X Power.",
+                    _chat_file_metadata=lambda _team_id, _files: [],
+                    _inference_store=types.SimpleNamespace(
+                        load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test")
+                    ),
+                    _model_credential=lambda _owner, _provider: ("model-key-value", 7),
+                    _require_model_credential_current=lambda *_args: None,
+                    _current_team_anchor=lambda *_args: anchor,
+                    _brain_runtime=runtime,
+                    _power_execution_journal=lambda: journal,
+                    _assistant_accounts=self.store,
+                    _assistant_account_challenges=account_challenges,
+                    _assistant_secrets=secret_store,
+                    _assistant_secret_challenges=secret_challenges,
+                    _commit_chat_terminal=lambda *_args: True,
                 ),
-                _model_credential=lambda _owner, _provider: ("model-key-value", 7),
-                _require_model_credential_current=lambda *_args: None,
-                _current_team_anchor=lambda *_args: anchor,
-                _brain_runtime=runtime,
-                _power_execution_journal=lambda: journal,
-                _assistant_accounts=self.store,
-                _assistant_account_challenges=account_challenges,
-                _assistant_secrets=secret_store,
-                _assistant_secret_challenges=secret_challenges,
-                _installed_assistant=lambda *_args: (ASSISTANT_ID, private_contract, self.container),
-                _assistant_rpc=rpc,
-                _commit_chat_terminal=lambda *_args: True,
+                mock.patch.multiple(
+                    runtime_state,
+                    _assistant_accounts=self.store,
+                    _assistant_account_challenges=account_challenges,
+                    _assistant_secrets=secret_store,
+                    _assistant_secret_challenges=secret_challenges,
+                ),
+                mock.patch.multiple(
+                    harness.hosted_assistants,
+                    _installed_assistant=lambda *_args: (ASSISTANT_ID, private_contract, self.container),
+                    _assistant_rpc=rpc,
+                ),
             ):
                 account_prompt = app._chat_in_turn(
                     TEAM_ID,

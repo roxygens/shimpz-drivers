@@ -8,6 +8,8 @@ import time
 from http import HTTPStatus
 from typing import NoReturn
 
+import assistant_genesis
+import assistant_manifest
 import assistant_secret_store
 import docker
 import docker.errors
@@ -17,7 +19,6 @@ import marketplace
 import oauth_account_store
 import pgdriver_client
 import runtime_state
-from assistant_human import hosted_assistants
 
 from container_policy import hosted_resources
 from container_policy import network as network_policy
@@ -36,6 +37,45 @@ def _raise_egress_error(exc: egress_policy.EgressPolicyError) -> NoReturn:
         HTTPStatus.CONFLICT if isinstance(exc, egress_policy.EgressPolicyDriftError) else HTTPStatus.SERVICE_UNAVAILABLE
     )
     raise runtime_state.ApiError(status, "installed Assistant egress policy failed its contract") from exc
+
+
+def _require_assistant_genesis(container) -> str:
+    """Admit only one immutable, bounded Genesis file and hide package details on failure."""
+    try:
+        return runtime_state._assistant_genesis_cache.get(container)
+    except assistant_genesis.GenesisError as exc:
+        raise runtime_state.ApiError(
+            HTTPStatus.CONFLICT,
+            "installed Assistant Genesis failed its contract",
+        ) from exc
+
+
+def _require_assistant_allowed_hosts(spec: marketplace.AppSpec, container) -> tuple[str, ...]:
+    """Admit the complete security manifest and return its reviewed egress set."""
+    contract = spec.assistant
+    if contract is None:
+        raise runtime_state.ApiError(HTTPStatus.CONFLICT, "installed Assistant has no reviewed manifest contract")
+    try:
+        reviewed = assistant_manifest.reviewed_manifest_contract(
+            allowed_hosts=spec.allowed_hosts,
+            accounts=contract.accounts,
+        )
+        declared = runtime_state._assistant_allowed_hosts_cache.get(container, reviewed)
+        runtime_state._assistant_machine_contract_cache.get(container, declared.accounts, contract.machine_contract)
+    except assistant_manifest.ManifestError as exc:
+        raise runtime_state.ApiError(
+            HTTPStatus.CONFLICT,
+            "installed Assistant manifest failed its reviewed contract",
+        ) from exc
+    return declared.allowed_hosts
+
+
+def _admit_app_contract(spec: marketplace.AppSpec, container) -> tuple[str, ...]:
+    if spec.assistant is not None:
+        allowed_hosts = _require_assistant_allowed_hosts(spec, container)
+        _require_assistant_genesis(container)
+        return allowed_hosts
+    return spec.allowed_hosts
 
 
 def _team_app_containers(team_id: str) -> list:
@@ -323,7 +363,7 @@ def _retain_admitted_assistant_secrets(team_id: str, app_id: str, spec: marketpl
             tuple(sorted(spec.assistant.secrets)),
         )
     except assistant_secret_store.AssistantSecretError as exc:
-        hosted_assistants._raise_assistant_secret_error(exc)
+        runtime_state._raise_assistant_secret_error(exc)
     if pruned:
         # A paused turn may still reference a secret removed by this admitted release.
         runtime_state._assistant_secret_challenges.cancel_team(team_id)
@@ -405,7 +445,7 @@ def _admit_existing_app(
             HTTPStatus.CONFLICT,
             f"installed app {app_id!r} uses a different image; uninstall it before reinstalling",
         )
-    admitted_hosts = hosted_assistants._admit_app_contract(spec, existing)
+    admitted_hosts = _admit_app_contract(spec, existing)
     token = _validate_admitted_egress(team_id, app_id, admitted_hosts, egress_store)
     _validate_assistant_proxy_environment(existing, token, admitted_hosts, egress_store)
     ready, status = _app_ready_now(existing, spec.port, spec.health_path)
@@ -426,7 +466,7 @@ def _provision_app(
     team_name: str,
 ) -> dict[str, object]:
     if spec.assistant is not None:
-        hosted_assistants._revoke_assistant_approval_grants(team_id, app_id)
+        runtime_state._revoke_assistant_approval_grants(team_id, app_id)
     if len(_team_app_containers(team_id)) >= runtime_state.MAX_APPS_PER_TEAM:
         raise runtime_state.ApiError(
             HTTPStatus.TOO_MANY_REQUESTS, f"app limit reached for {team_id!r} ({runtime_state.MAX_APPS_PER_TEAM})"
@@ -471,7 +511,7 @@ def _provision_app_transaction(
         container = runtime_state._docker.containers.create(**kwargs)
         network.disconnect(container)
         network.connect(container, aliases=[app_id, f"{app_id}.team"])
-        admitted_hosts = hosted_assistants._admit_app_contract(spec, container)
+        admitted_hosts = _admit_app_contract(spec, container)
         _validate_assistant_proxy_environment(container, token, admitted_hosts, egress_store)
         _activate_admitted_egress(network, token, admitted_hosts, egress_store)
         hosted_resources._start_team_with_isolation(container)
@@ -523,14 +563,14 @@ def _uninstall_app(team_id: str, app_id: str, lease: hosted_resources._Authoriza
         try:
             runtime_state._assistant_secrets.delete_assistant(team_id, app_id)
         except assistant_secret_store.AssistantSecretError as exc:
-            hosted_assistants._raise_assistant_secret_error(exc)
+            runtime_state._raise_assistant_secret_error(exc)
         try:
             runtime_state._assistant_accounts.delete_assistant(team_id, app_id)
         except oauth_account_store.OAuthAccountStoreError as exc:
             raise runtime_state.ApiError(
                 HTTPStatus.SERVICE_UNAVAILABLE, "Assistant account state is unavailable"
             ) from exc
-        hosted_assistants._revoke_assistant_approval_grants(team_id, app_id)
+        runtime_state._revoke_assistant_approval_grants(team_id, app_id)
         return {"team_id": team_id, "app": app_id, "uninstalled": True, "db_dropped": cleanup.db_dropped}
 
 

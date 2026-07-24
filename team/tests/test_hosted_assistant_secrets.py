@@ -160,23 +160,34 @@ class HostedAssistantSecretTests(unittest.TestCase):
 
     @contextlib.contextmanager
     def _environment(self):
-        with _patched(
-            _active_team_assistants=lambda _team_id: (self.active,),
-            _require_assistant_genesis=lambda _container: "Use only the declared Cloudflare Powers.",
-            _chat_file_metadata=lambda _team_id, _files: [],
-            _inference_store=types.SimpleNamespace(
-                load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test")
+        with (
+            _patched(
+                _active_team_assistants=lambda _team_id: (self.active,),
+                _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.assistant_container),
+                _require_assistant_genesis=lambda _container: "Use only the declared Cloudflare Powers.",
+                _chat_file_metadata=lambda _team_id, _files: [],
+                _inference_store=types.SimpleNamespace(
+                    load=lambda _team_id: types.SimpleNamespace(provider="openai", model="gpt-test")
+                ),
+                _model_credential=lambda _owner, _provider: ("model-secret-not-an-assistant-secret", 7),
+                _require_model_credential_current=lambda *_args: None,
+                _current_team_anchor=lambda *_args: self.anchor,
+                _brain_runtime=self.runtime,
+                _power_execution_journal=lambda: self.journal,
+                _assistant_secrets=self.secret_store,
+                _assistant_secret_challenges=self.challenge_store,
+                _commit_chat_terminal=lambda *_args: True,
             ),
-            _model_credential=lambda _owner, _provider: ("model-secret-not-an-assistant-secret", 7),
-            _require_model_credential_current=lambda *_args: None,
-            _current_team_anchor=lambda *_args: self.anchor,
-            _brain_runtime=self.runtime,
-            _power_execution_journal=lambda: self.journal,
-            _assistant_secrets=self.secret_store,
-            _assistant_secret_challenges=self.challenge_store,
-            _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.assistant_container),
-            _assistant_rpc=self._rpc,
-            _commit_chat_terminal=lambda *_args: True,
+            mock.patch.multiple(
+                runtime_state,
+                _assistant_secrets=self.secret_store,
+                _assistant_secret_challenges=self.challenge_store,
+            ),
+            mock.patch.multiple(
+                hosted_assistants,
+                _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.assistant_container),
+                _assistant_rpc=self._rpc,
+            ),
         ):
             yield
 
@@ -373,8 +384,9 @@ class HostedAssistantSecretTests(unittest.TestCase):
         turn_token = "turn-token"
         self.secret_store.put_many(TEAM_ID, ASSISTANT_ID, {"x-bearer-token": secret})
         with (
-            _patched(
-                _assistant_secrets=self.secret_store,
+            mock.patch.object(runtime_state, "_assistant_secrets", self.secret_store),
+            mock.patch.multiple(
+                hosted_assistants,
                 _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.assistant_container),
                 _assistant_rpc=lambda *_args, **_kwargs: _zones(secret),
             ),
@@ -482,12 +494,18 @@ class HostedAssistantSecretTests(unittest.TestCase):
                 {"secret_id": "undeclared-token", "value": "attacker-controlled"},
             ],
         }
-        with _patched(
-            _require_current_authorization=lambda *_args, **_kwargs: self.anchor,
-            _installed_assistant=lambda *_args: (ASSISTANT_ID, contract, container),
-            _installed_assistant_secret_specs=lambda _team_id: (spec,),
-            _assistant_secrets=self.secret_store,
-            _assistant_secret_challenges=self.challenge_store,
+        with (
+            mock.patch.object(hosted_resources, "_require_current_authorization", return_value=self.anchor),
+            mock.patch.multiple(
+                hosted_assistants,
+                _installed_assistant=lambda *_args: (ASSISTANT_ID, contract, container),
+                _installed_assistant_secret_specs=lambda _team_id: (spec,),
+            ),
+            mock.patch.multiple(
+                runtime_state,
+                _assistant_secrets=self.secret_store,
+                _assistant_secret_challenges=self.challenge_store,
+            ),
         ):
             with self.assertRaises(app.ApiError) as rejected:
                 app._replace_assistant_secrets(TEAM_ID, invalid, lease)
@@ -610,7 +628,7 @@ class HostedAssistantSecretTests(unittest.TestCase):
             mock.patch.object(hosted_resources, "_prepare_marketplace_image", return_value=None),
             mock.patch.object(hosted_resources, "_get_container", return_value=container),
             mock.patch.object(hosted_resources, "_require_team_isolation", return_value=None),
-            mock.patch.object(hosted_assistants, "_admit_app_contract", return_value=()),
+            mock.patch.object(hosted_apps, "_admit_app_contract", return_value=()),
             mock.patch.object(hosted_apps, "_validate_admitted_egress", return_value="admitted-token"),
             mock.patch.object(hosted_apps, "_validate_assistant_proxy_environment", return_value=None),
             mock.patch.object(hosted_apps, "_app_ready_now", return_value=(True, "running")),

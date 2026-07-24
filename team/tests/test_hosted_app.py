@@ -136,10 +136,17 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             get=admit,
         )
         machine_cache = types.SimpleNamespace(get=lambda _container, _accounts, reviewed: reviewed)
-        with _patched(
-            _assistant_allowed_hosts_cache=cache,
-            _assistant_machine_contract_cache=machine_cache,
-            _require_assistant_genesis=lambda _container: "Use reviewed Powers.",
+        with (
+            mock.patch.multiple(
+                runtime_state,
+                _assistant_allowed_hosts_cache=cache,
+                _assistant_machine_contract_cache=machine_cache,
+            ),
+            mock.patch.object(
+                hosted_apps,
+                "_require_assistant_genesis",
+                return_value="Use reviewed Powers.",
+            ),
         ):
             self.assertEqual(app._admit_app_contract(spec, container), tuple(sorted(spec.allowed_hosts)))
         self.assertEqual(len(reviewed_contracts), 1)
@@ -157,7 +164,8 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             replace(exact, accounts=(replace(account, scopes=("tweet.read",)),)),
         )
         with (
-            _patched(
+            mock.patch.multiple(
+                runtime_state,
                 _assistant_allowed_hosts_cache=app.assistant_manifest.ManifestContractCache(),
                 _assistant_machine_contract_cache=machine_cache,
             ),
@@ -167,7 +175,8 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
         for declared in drifted:
             with (
                 self.subTest(declared=declared),
-                _patched(
+                mock.patch.multiple(
+                    runtime_state,
                     _assistant_allowed_hosts_cache=app.assistant_manifest.ManifestContractCache(),
                     _assistant_machine_contract_cache=machine_cache,
                 ),
@@ -185,7 +194,8 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             raise app.assistant_manifest.ManifestError("mismatch")
 
         with (
-            _patched(
+            mock.patch.multiple(
+                runtime_state,
                 _assistant_allowed_hosts_cache=types.SimpleNamespace(get=reject),
                 _assistant_machine_contract_cache=machine_cache,
             ),
@@ -244,7 +254,7 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
                     _start_team_with_isolation=lambda _container: events.append("start"),
                     _remove_team_container=lambda target: events.append(("remove-container", target.id)) or True,
                 ),
-                mock.patch.object(hosted_assistants, "_admit_app_contract", side_effect=reject),
+                mock.patch.object(hosted_apps, "_admit_app_contract", side_effect=reject),
                 mock.patch.object(
                     hosted_apps,
                     "_write_egress_policy",
@@ -420,26 +430,48 @@ class HostedCredentialLeaseTests(unittest.TestCase):
                     3600,
                 ),
             )
-        return anchor, _patched(
-            _active_team_assistants=lambda _team_id: (assistant,),
-            _installed_assistant=lambda _team_id, assistant_id, *_args: (
-                assistant_id,
-                contract,
-                assistant.container,
-            ),
-            _require_assistant_genesis=lambda _container: "Use only the declared Cloudflare Powers.",
-            _chat_file_metadata=lambda _team_id, _files: [],
-            _inference_store=types.SimpleNamespace(load=lambda _team_id: config),
-            _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
-            _require_model_credential_current=lambda *_args: None,
-            _current_team_anchor=lambda *_args: anchor,
-            _brain_runtime=runtime,
-            _power_execution_journal=lambda: journal,
-            _assistant_secrets=secret_store,
-            _assistant_accounts=account_store,
-            _invoke_assistant_power=rpc,
-            _commit_chat_terminal=lambda _team_id, _token: True,
+        environment = contextlib.ExitStack()
+        environment.enter_context(
+            _patched(
+                _active_team_assistants=lambda _team_id: (assistant,),
+                _installed_assistant=lambda _team_id, assistant_id, *_args: (
+                    assistant_id,
+                    contract,
+                    assistant.container,
+                ),
+                _require_assistant_genesis=lambda _container: "Use only the declared Cloudflare Powers.",
+                _chat_file_metadata=lambda _team_id, _files: [],
+                _inference_store=types.SimpleNamespace(load=lambda _team_id: config),
+                _model_credential=lambda _owner, _provider: ("secret-in-memory", 7),
+                _require_model_credential_current=lambda *_args: None,
+                _current_team_anchor=lambda *_args: anchor,
+                _brain_runtime=runtime,
+                _power_execution_journal=lambda: journal,
+                _assistant_secrets=secret_store,
+                _assistant_accounts=account_store,
+                _invoke_assistant_power=rpc,
+                _commit_chat_terminal=lambda _team_id, _token: True,
+            )
         )
+        environment.enter_context(
+            mock.patch.object(
+                hosted_assistants,
+                "_installed_assistant",
+                side_effect=lambda _team_id, assistant_id, *_args: (
+                    assistant_id,
+                    contract,
+                    assistant.container,
+                ),
+            )
+        )
+        environment.enter_context(
+            mock.patch.multiple(
+                runtime_state,
+                _assistant_secrets=secret_store,
+                _assistant_accounts=account_store,
+            )
+        )
+        return anchor, environment
 
     def test_hosted_thread_identity_is_generation_scoped_and_closed(self) -> None:
         first = app._brain_thread_id("team_1", ANCHOR_ID)

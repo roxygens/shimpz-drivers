@@ -325,11 +325,15 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         with (
             hosted_harness._patched(
                 _active_team_assistants=lambda _team_id: (),
-                _storage=lambda: SimpleNamespace(metadata=lambda _team_id, _files: []),
                 _inference_store=SimpleNamespace(load=lambda _team_id: config),
                 _model_credential=lambda _owner, _provider: ("test-key", 7),
                 _require_model_credential_current=lambda *_args: None,
                 _current_team_anchor=lambda *_args: anchor,
+            ),
+            mock.patch.object(
+                hosted_harness.runtime_state,
+                "_storage",
+                side_effect=lambda: SimpleNamespace(metadata=lambda _team_id, _files: []),
             ),
             mock.patch.object(
                 hosted_app,
@@ -419,7 +423,6 @@ class SharedChatTurnEngineTest(unittest.TestCase):
         with (
             hosted_harness._patched(
                 _active_team_assistants=lambda _team_id: (hosted_active,),
-                _storage=lambda: SimpleNamespace(metadata=lambda _team_id, _files: []),
                 _inference_store=SimpleNamespace(load=lambda _team_id: config),
                 _model_credential=lambda _owner, _provider: ("test-key", 7),
                 _require_model_credential_current=lambda *_args: hosted_events.append("model"),
@@ -429,6 +432,11 @@ class SharedChatTurnEngineTest(unittest.TestCase):
                 _hosted_power_identity=lambda _active: (assistant_container.id, local_spec.image),
                 _power_secret_generations=lambda *_args: hosted_events.append("secrets") or (),
                 _power_account_generations=lambda *_args: hosted_events.append("accounts") or (),
+            ),
+            mock.patch.object(
+                hosted_harness.runtime_state,
+                "_storage",
+                side_effect=lambda: SimpleNamespace(metadata=lambda _team_id, _files: []),
             ),
             mock.patch.object(hosted_app.chat_turn_engine, "run_segment", side_effect=capture("hosted")),
         ):

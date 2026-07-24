@@ -12,6 +12,7 @@ import weakref
 from collections.abc import Callable
 from http import HTTPStatus
 from pathlib import Path
+from typing import NoReturn
 
 import assistant_account_challenges
 import assistant_genesis
@@ -305,3 +306,26 @@ def _commit_chat_terminal(team_id: str, token: str) -> bool:
             _active_chat_tokens.pop(team_id, None)
             _active_chat_container_ids.pop(team_id, None)
         return True
+
+
+def _raise_assistant_secret_error(exc: assistant_secret_store.AssistantSecretError) -> NoReturn:
+    if isinstance(exc, assistant_secret_store.AssistantSecretMissingError):
+        raise ApiError(HTTPStatus.PRECONDITION_REQUIRED, "Assistant secrets are required") from exc
+    if isinstance(exc, assistant_secret_store.AssistantSecretValidationError):
+        raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, "Assistant secret values are invalid") from exc
+    raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant secret state is unavailable") from exc
+
+
+def _revoke_assistant_approval_grants(team_id: str, assistant_id: str) -> None:
+    try:
+        _assistant_approval_grants.revoke_assistant(team_id, assistant_id)
+    except assistant_approval_grants.ApprovalGrantError as exc:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Assistant approval state is unavailable") from exc
+
+
+def _teardown_team_approval_grants(team_id: str) -> bool:
+    try:
+        _assistant_approval_grants.revoke_team(team_id)
+    except assistant_approval_grants.ApprovalGrantError:
+        return False
+    return True

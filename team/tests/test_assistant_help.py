@@ -16,6 +16,8 @@ import hosted_app_fixture as harness
 
 app = harness.app
 _patched = harness._patched
+hosted_assistants = harness.hosted_assistants
+hosted_resources = harness.hosted_resources
 
 
 class AssistantHelpContractTests(unittest.TestCase):
@@ -63,12 +65,17 @@ class HostedAssistantHelpTests(unittest.TestCase):
             calls.append(request)
             return {"markdown": "# Shimpz Cloudflare\n\nAsk about weather."}
 
-        with _patched(
-            _require_current_authorization=lambda team_id, current_lease: calls.append(
-                ("authorize", team_id, current_lease)
+        with (
+            mock.patch.object(
+                hosted_resources,
+                "_require_current_authorization",
+                side_effect=lambda team_id, current_lease: calls.append(("authorize", team_id, current_lease)),
             ),
-            _installed_assistant=lambda _team_id, _assistant_id: ("shimpz-cloudflare", contract, container),
-            _assistant_rpc_exchange=rpc,
+            mock.patch.multiple(
+                hosted_assistants,
+                _installed_assistant=lambda _team_id, _assistant_id: ("shimpz-cloudflare", contract, container),
+                _assistant_rpc_exchange=rpc,
+            ),
         ):
             result = app._assistant_help("team_1", "shimpz-cloudflare", lease, "pt")
 
@@ -96,8 +103,9 @@ class HostedAssistantHelpTests(unittest.TestCase):
         )
 
         with (
-            _patched(
-                _require_current_authorization=lambda *_args: None,
+            mock.patch.object(hosted_resources, "_require_current_authorization", return_value=None),
+            mock.patch.multiple(
+                hosted_assistants,
                 _installed_assistant=lambda *_args: ("shimpz-cloudflare", contract, container),
                 _assistant_rpc_exchange=lambda *_args, **_kwargs: {"markdown": "x" * (32 * 1024 + 1)},
             ),
@@ -126,10 +134,13 @@ class HostedAssistantHelpTests(unittest.TestCase):
             self.assertFalse(request.detect_unsupported_path)
             return {"markdown": "# English fallback"}
 
-        with _patched(
-            _require_current_authorization=lambda *_args: None,
-            _installed_assistant=lambda *_args: ("shimpz-cloudflare", contract, container),
-            _assistant_rpc_exchange=rpc,
+        with (
+            mock.patch.object(hosted_resources, "_require_current_authorization", return_value=None),
+            mock.patch.multiple(
+                hosted_assistants,
+                _installed_assistant=lambda *_args: ("shimpz-cloudflare", contract, container),
+                _assistant_rpc_exchange=rpc,
+            ),
         ):
             result = app._assistant_help("team_1", "shimpz-cloudflare", lease, "pt")
 
@@ -143,8 +154,9 @@ class HostedAssistantHelpTests(unittest.TestCase):
             raise app.ApiError(HTTPStatus.BAD_GATEWAY, "Assistant Help failed")
 
         with (
-            _patched(
-                _require_current_authorization=lambda *_args: None,
+            mock.patch.object(hosted_resources, "_require_current_authorization", return_value=None),
+            mock.patch.multiple(
+                hosted_assistants,
                 _installed_assistant=lambda *_args: ("shimpz-cloudflare", contract, container),
                 _assistant_rpc_exchange=fail_rpc,
             ),
