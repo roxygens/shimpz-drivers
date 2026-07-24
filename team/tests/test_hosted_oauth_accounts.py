@@ -102,6 +102,29 @@ class HostedOAuthAccountTests(unittest.TestCase):
             app.oauth_http_client.OAuthTokenSet(ACCESS_TOKEN, "refresh-token-value-123456789", SCOPES, 3600),
         )
 
+    def test_refresh_uses_the_configured_hosted_oauth_client(self) -> None:
+        token_set = app.oauth_http_client.OAuthTokenSet(ACCESS_TOKEN, "new-refresh-token", SCOPES, 3600)
+        oauth_http = mock.Mock()
+        oauth_http.refresh.return_value = token_set
+        client_secret = "-".join(("hosted", "client", "secret", "value"))
+        refresh_token = "-".join(("old", "refresh", "token", "value"))
+
+        with _patched(
+            _oauth_http=oauth_http,
+            _cloudflare_oauth_client_id="client-id",
+            _cloudflare_oauth_client_secret=client_secret,
+        ):
+            result = app._refresh_oauth_account("cloudflare", SCOPES, refresh_token, None)
+
+        self.assertIs(result, token_set)
+        oauth_http.refresh.assert_called_once_with(
+            provider_id="cloudflare",
+            client_id="client-id",
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+            scopes=SCOPES,
+        )
+
     def test_inventory_is_status_only_and_private_token_reaches_only_declared_power(self) -> None:
         self._connect()
         captured: list[dict[str, object]] = []

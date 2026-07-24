@@ -167,6 +167,12 @@ from runtime_state import (
     _clear_team_id_runtime_state as _clear_team_id_runtime_state,
 )
 from runtime_state import (
+    _cloudflare_oauth_client_id as _cloudflare_oauth_client_id,
+)
+from runtime_state import (
+    _cloudflare_oauth_client_secret as _cloudflare_oauth_client_secret,
+)
+from runtime_state import (
     _commit_chat_terminal as _commit_chat_terminal,
 )
 from runtime_state import (
@@ -192,6 +198,9 @@ from runtime_state import (
 )
 from runtime_state import (
     _oauth_accounts as _oauth_accounts,
+)
+from runtime_state import (
+    _oauth_http as _oauth_http,
 )
 from runtime_state import (
     _power_execution_journal as _power_execution_journal,
