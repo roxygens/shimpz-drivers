@@ -12,18 +12,16 @@ import base64
 import json
 import os
 import re
-import secrets
-import stat
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 import oauth_providers
+import private_state
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -64,6 +62,14 @@ class OAuthAccountMissingError(OAuthAccountStoreError):
 
 class OAuthAccountReauthorizationError(OAuthAccountStoreError):
     """A new provider authorization is required before this account can run."""
+
+
+_PRIVATE_STATE = private_state.PrivateState(
+    OAuthAccountStoreError,
+    "OAuth account state is malformed",
+    "OAuth account envelope is malformed",
+    (MAX_PLAINTEXT_BYTES * 2) + 128,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,14 +218,6 @@ def _token_set(
     )
 
 
-def _timestamp() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def _empty_state() -> dict[str, object]:
-    return {"schema": 1, "teams": {}}
-
-
 def _strict_json(payload: bytes) -> object:
     def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -233,102 +231,6 @@ def _strict_json(payload: bytes) -> object:
         return json.loads(payload, object_pairs_hook=reject_duplicates)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise OAuthAccountStoreError("OAuth account state is not valid JSON") from exc
-
-
-def _decode_part(
-    value: object,
-    *,
-    expected: int | None = None,
-    minimum: int | None = None,
-    maximum: int | None = None,
-) -> bytes:
-    if not isinstance(value, str) or len(value) > (MAX_PLAINTEXT_BYTES * 2) + 128:
-        raise OAuthAccountStoreError("OAuth account envelope is malformed")
-    try:
-        decoded = base64.b64decode(value, validate=True)
-    except (ValueError, TypeError) as exc:
-        raise OAuthAccountStoreError("OAuth account envelope is malformed") from exc
-    if (
-        (expected is not None and len(decoded) != expected)
-        or (minimum is not None and len(decoded) < minimum)
-        or (maximum is not None and len(decoded) > maximum)
-    ):
-        raise OAuthAccountStoreError("OAuth account envelope is malformed")
-    return decoded
-
-
-def _read_private_file(path: Path, maximum: int, label: str) -> bytes | None:
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise OAuthAccountStoreError(f"{label} is unavailable") from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.geteuid()
-            or metadata.st_nlink != 1
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-            or metadata.st_size > maximum
-        ):
-            raise OAuthAccountStoreError(f"{label} failed its ownership contract")
-        payload = bytearray()
-        while len(payload) <= maximum:
-            chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - len(payload)))
-            if not chunk:
-                break
-            payload.extend(chunk)
-        if len(payload) > maximum:
-            raise OAuthAccountStoreError(f"{label} exceeds its fixed byte limit")
-        return bytes(payload)
-    finally:
-        os.close(descriptor)
-
-
-def _require_private_parent(path: Path, label: str) -> None:
-    try:
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        metadata = path.stat(follow_symlinks=False)
-    except OSError as exc:
-        raise OAuthAccountStoreError(f"{label} directory is unavailable") from exc
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
-        raise OAuthAccountStoreError(f"{label} directory failed its ownership contract")
-
-
-def _atomic_write(path: Path, payload: bytes, label: str) -> None:
-    _require_private_parent(path.parent, label)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    descriptor = -1
-    try:
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-        )
-        view = memoryview(payload)
-        while view:
-            written = os.write(descriptor, view)
-            if written < 1:
-                raise OSError("short private write")
-            view = view[written:]
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = -1
-        temporary.replace(path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except OSError as exc:
-        raise OAuthAccountStoreError(f"{label} could not be persisted") from exc
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        with suppress(FileNotFoundError):
-            temporary.unlink()
 
 
 def _record_metadata(
@@ -378,8 +280,8 @@ def _validate_record(value: object) -> dict[str, object]:
         or envelope.get("algorithm") != "AES-256-GCM"
     ):
         raise OAuthAccountStoreError("OAuth account state record is malformed")
-    _decode_part(envelope.get("nonce"), expected=12)
-    _decode_part(envelope.get("ciphertext"), minimum=17, maximum=MAX_PLAINTEXT_BYTES + 16)
+    _PRIVATE_STATE.decode_part(envelope.get("nonce"), expected=12)
+    _PRIVATE_STATE.decode_part(envelope.get("ciphertext"), minimum=17, maximum=MAX_PLAINTEXT_BYTES + 16)
     return value
 
 
@@ -414,19 +316,6 @@ def _validate_state(value: object) -> dict[str, object]:
                 if total > MAX_TOTAL_RECORDS:
                     raise OAuthAccountStoreError("OAuth account state exceeds its record limit")
     return value
-
-
-def _has_records(state: Mapping[str, object]) -> bool:
-    teams = state.get("teams")
-    if not isinstance(teams, dict):
-        raise OAuthAccountStoreError("OAuth account state is malformed")
-    return any(
-        bool(accounts)
-        for assistants in teams.values()
-        if isinstance(assistants, dict)
-        for accounts in assistants.values()
-        if isinstance(accounts, dict)
-    )
 
 
 def _aad(
@@ -541,55 +430,18 @@ class OAuthAccountStore:
         return int(now)
 
     def _read_state(self) -> dict[str, object]:
-        payload = _read_private_file(self.state_path, MAX_STATE_BYTES, "OAuth account state")
-        return _empty_state() if payload is None else _validate_state(_strict_json(payload))
+        payload = _PRIVATE_STATE.read_private_file(self.state_path, MAX_STATE_BYTES, "OAuth account state")
+        return private_state.empty_state() if payload is None else _validate_state(_strict_json(payload))
 
     def _write_state(self, state: Mapping[str, object]) -> None:
         validated = _validate_state(dict(state))
         payload = json.dumps(validated, sort_keys=True, separators=(",", ":")).encode("utf-8")
         if len(payload) > MAX_STATE_BYTES:
             raise OAuthAccountStoreError("OAuth account state exceeds its fixed byte limit")
-        _atomic_write(self.state_path, payload, "OAuth account state")
+        _PRIVATE_STATE.atomic_write(self.state_path, payload, "OAuth account state")
 
     def _key(self, *, allow_create: bool = False) -> bytes:
-        payload = _read_private_file(self.key_path, 32, "OAuth account keyring")
-        if payload is None:
-            if not allow_create:
-                raise OAuthAccountStoreError("OAuth account keyring is unavailable")
-            payload = AESGCM.generate_key(bit_length=256)
-            _atomic_write(self.key_path, payload, "OAuth account keyring")
-        if len(payload) != 32:
-            raise OAuthAccountStoreError("OAuth account keyring is invalid")
-        return payload
-
-    @staticmethod
-    def _records(
-        state: dict[str, object],
-        team_id: str,
-        assistant_id: str,
-        *,
-        create: bool,
-    ) -> dict[str, object]:
-        teams = state["teams"]
-        if not isinstance(teams, dict):
-            raise OAuthAccountStoreError("OAuth account state is malformed")
-        assistants = teams.get(team_id)
-        if assistants is None:
-            if not create:
-                return {}
-            assistants = {}
-            teams[team_id] = assistants
-        elif not isinstance(assistants, dict):
-            raise OAuthAccountStoreError("OAuth account state is malformed")
-        records = assistants.get(assistant_id)
-        if records is None:
-            if not create:
-                return {}
-            records = {}
-            assistants[assistant_id] = records
-        elif not isinstance(records, dict):
-            raise OAuthAccountStoreError("OAuth account state is malformed")
-        return records
+        return _PRIVATE_STATE.key(self.key_path, "OAuth account keyring", allow_create=allow_create)
 
     @staticmethod
     def _plaintext(grant: _TokenGrant) -> bytes:
@@ -664,8 +516,8 @@ class OAuthAccountStore:
             raise OAuthAccountStoreError("OAuth account envelope is malformed")
         try:
             plaintext = AESGCM(self._key()).decrypt(
-                _decode_part(envelope.get("nonce"), expected=12),
-                _decode_part(envelope.get("ciphertext")),
+                _PRIVATE_STATE.decode_part(envelope.get("nonce"), expected=12),
+                _PRIVATE_STATE.decode_part(envelope.get("ciphertext")),
                 _aad(team, assistant, account, validated),
             )
         except InvalidTag as exc:
@@ -681,7 +533,7 @@ class OAuthAccountStore:
         scopes: tuple[str, ...],
     ) -> _TokenGrant:
         state = self._read_state()
-        records = self._records(state, team, assistant, create=False)
+        records = _PRIVATE_STATE.records(state, team, assistant, create=False)
         if account not in records:
             raise OAuthAccountMissingError("OAuth account is not configured")
         record = _validate_record(records[account])
@@ -712,8 +564,8 @@ class OAuthAccountStore:
         plaintext = self._plaintext(canonical)
         with self._lock:
             state = self._read_state()
-            key = self._key(allow_create=not _has_records(state))
-            records = self._records(state, team, assistant, create=True)
+            key = self._key(allow_create=not _PRIVATE_STATE.has_records(state))
+            records = _PRIVATE_STATE.records(state, team, assistant, create=True)
             if account not in records and len(records) >= MAX_ACCOUNTS_PER_ASSISTANT:
                 raise OAuthAccountStoreError("OAuth account capacity reached")
             previous = records.get(account)
@@ -724,7 +576,7 @@ class OAuthAccountStore:
                 "expires_at": canonical.expires_at,
                 "status": canonical.status,
                 "generation": generation,
-                "updated_at": _timestamp(),
+                "updated_at": private_state.timestamp(),
                 "envelope": {},
             }
             nonce = os.urandom(12)
@@ -814,7 +666,7 @@ class OAuthAccountStore:
         declared = _declarations(declarations)
         with self._lock:
             state = self._read_state()
-            records = self._records(state, team, assistant, create=False)
+            records = _PRIVATE_STATE.records(state, team, assistant, create=False)
             now = self._now()
             result: list[OAuthAccountMetadata] = []
             for account, (provider, scopes) in declared.items():
@@ -875,20 +727,13 @@ class OAuthAccountStore:
         declared = set(_declared_ids(declared_ids))
         with self._lock:
             state = self._read_state()
-            teams = state["teams"]
-            if not isinstance(teams, dict) or not isinstance(teams.get(team), dict):
-                return False
-            assistants = teams[team]
-            records = self._records(state, team, assistant, create=False)
+            records = _PRIVATE_STATE.records(state, team, assistant, create=False)
             obsolete = set(records) - declared
             if not obsolete:
                 return False
             for account in obsolete:
                 records.pop(account)
-            if not records:
-                assistants.pop(assistant, None)
-            if not assistants:
-                teams.pop(team, None)
+            _PRIVATE_STATE.prune_empty_records(state, team, assistant)
             self._write_state(state)
             return True
 
@@ -903,17 +748,10 @@ class OAuthAccountStore:
         account = _component_id(account_id, "account id")
         with self._lock:
             state = self._read_state()
-            teams = state["teams"]
-            if not isinstance(teams, dict) or not isinstance(teams.get(team), dict):
-                return False
-            assistants = teams[team]
-            records = self._records(state, team, assistant, create=False)
+            records = _PRIVATE_STATE.records(state, team, assistant, create=False)
             removed = records.pop(account, None) is not None
-            if removed and not records:
-                assistants.pop(assistant, None)
-            if removed and not assistants:
-                teams.pop(team, None)
             if removed:
+                _PRIVATE_STATE.prune_empty_records(state, team, assistant)
                 self._write_state(state)
             return removed
 
@@ -933,10 +771,7 @@ class OAuthAccountStore:
         with self._account_flight(team, assistant, account):
             with self._lock:
                 state = self._read_state()
-                teams = state["teams"]
-                if not isinstance(teams, dict) or not isinstance(teams.get(team), dict):
-                    return False
-                records = self._records(state, team, assistant, create=False)
+                records = _PRIVATE_STATE.records(state, team, assistant, create=False)
                 raw_record = records.get(account)
                 if raw_record is None:
                     return False
@@ -946,19 +781,12 @@ class OAuthAccountStore:
             revoke_callback(provider, grant.access_token, grant.refresh_token, grant.broker_lease)
             with self._lock:
                 state = self._read_state()
-                teams = state["teams"]
-                if not isinstance(teams, dict) or not isinstance(teams.get(team), dict):
-                    raise OAuthAccountStoreError("OAuth account changed during revocation")
-                assistants = teams[team]
-                records = self._records(state, team, assistant, create=False)
+                records = _PRIVATE_STATE.records(state, team, assistant, create=False)
                 current = records.get(account)
                 if current is None or _record_metadata(_validate_record(current))[4] != generation:
                     raise OAuthAccountStoreError("OAuth account changed during revocation")
                 records.pop(account)
-                if not records:
-                    assistants.pop(assistant, None)
-                if not assistants:
-                    teams.pop(team, None)
+                _PRIVATE_STATE.prune_empty_records(state, team, assistant)
                 self._write_state(state)
                 return True
 
@@ -967,13 +795,7 @@ class OAuthAccountStore:
         assistant = _component_id(assistant_id, "Assistant id")
         with self._lock:
             state = self._read_state()
-            teams = state["teams"]
-            if not isinstance(teams, dict) or not isinstance(teams.get(team), dict):
-                return False
-            assistants = teams[team]
-            removed = assistants.pop(assistant, None) is not None
-            if removed and not assistants:
-                teams.pop(team, None)
+            removed = _PRIVATE_STATE.delete_assistant(state, team, assistant)
             if removed:
                 self._write_state(state)
             return removed
@@ -982,10 +804,7 @@ class OAuthAccountStore:
         team = _team_id(team_id)
         with self._lock:
             state = self._read_state()
-            teams = state["teams"]
-            if not isinstance(teams, dict):
-                raise OAuthAccountStoreError("OAuth account state is malformed")
-            removed = teams.pop(team, None) is not None
+            removed = _PRIVATE_STATE.delete_team(state, team)
             if removed:
                 self._write_state(state)
             return removed
@@ -994,7 +813,7 @@ class OAuthAccountStore:
         """Atomically purge all account material during an owned Space reset."""
         with self._lock:
             state = self._read_state()
-            if not _has_records(state):
+            if not _PRIVATE_STATE.has_records(state):
                 return False
-            self._write_state(_empty_state())
+            self._write_state(private_state.empty_state())
             return True
