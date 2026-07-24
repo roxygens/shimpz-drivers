@@ -188,12 +188,15 @@ def _installed_assistant(
     team_id: str,
     assistant_id: object,
     inspect_memo: dict[str, dict[str, dict]] | None = None,
+    candidate=None,
 ):
     assistant_id, spec = marketplace.resolve(assistant_id)
     contract = spec.assistant
     if contract is None:
         raise _controller.ApiError(HTTPStatus.NOT_FOUND, f"{assistant_id!r} is not an Assistant")
-    container = _controller._get_container(manifests.team_app_container_name(team_id, assistant_id))
+    container = candidate
+    if container is None:
+        container = _controller._get_container(manifests.team_app_container_name(team_id, assistant_id))
     if container is None:
         raise _controller.ApiError(HTTPStatus.CONFLICT, f"Assistant {assistant_id!r} is not installed in this Team")
     with _controller._active_chat_guard:
@@ -202,10 +205,13 @@ def _installed_assistant(
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 "Assistant Power execution is blocked until this Assistant is reinstalled",
             )
-    try:
-        container.reload()
-    except docker.errors.DockerException as exc:
-        raise _controller.ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "installed Assistant could not be verified") from exc
+    if candidate is None:
+        try:
+            container.reload()
+        except docker.errors.DockerException as exc:
+            raise _controller.ApiError(
+                HTTPStatus.SERVICE_UNAVAILABLE, "installed Assistant could not be verified"
+            ) from exc
     if (
         not network_policy.app_identity_valid(container.attrs, team_id, assistant_id)
         or str(container.attrs.get("Config", {}).get("Image", "")) != spec.image
@@ -242,7 +248,12 @@ def _active_team_assistants(team_id: str) -> tuple[_ActiveAssistant, ...]:
             continue
         if assistant_id in seen:
             raise _controller.ApiError(HTTPStatus.CONFLICT, "duplicate installed Assistant identity")
-        current_id, contract, container = _controller._installed_assistant(team_id, assistant_id, inspect_memo)
+        current_id, contract, container = _controller._installed_assistant(
+            team_id,
+            assistant_id,
+            inspect_memo,
+            candidate,
+        )
         seen.add(current_id)
         active.append(_controller._ActiveAssistant(current_id, contract, container))
     active.sort(key=lambda item: item.assistant_id)
@@ -716,6 +727,7 @@ class PowerInvocationRequest:
     power: object
     payload: object
     answers: tuple[object, ...] = ()
+    inspect_memo: dict[str, dict[str, dict]] | None = None
 
 
 def _invoke_assistant_power(request: PowerInvocationRequest) -> dict[str, object]:
@@ -735,7 +747,11 @@ def _invoke_assistant_power(request: PowerInvocationRequest) -> dict[str, object
         safe_input = marketplace.validate_power_input(assistant_id, power, request.payload)
     except ValueError as exc:
         raise _controller.ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(exc)) from exc
-    _current_id, _current_contract, current_container = _controller._installed_assistant(team_id, assistant_id)
+    _current_id, _current_contract, current_container = _controller._installed_assistant(
+        team_id,
+        assistant_id,
+        request.inspect_memo,
+    )
     if current_container.id != container.id:
         raise _controller.ApiError(HTTPStatus.CONFLICT, "installed Assistant changed during the chat turn")
     power_spec = contract.powers[power]

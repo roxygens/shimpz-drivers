@@ -208,10 +208,10 @@ def _hosted_chat_current_identity(
     assistants: tuple[_controller._ActiveAssistant, ...],
     config: inference_config.InferenceConfig | None,
     generation: int,
+    inspect_memo: dict[str, dict[str, dict]],
 ) -> tuple[object, ...]:
     if config is None:
         raise AssertionError("hosted chat segment was not prepared")
-    inspect_memo: dict[str, dict[str, dict]] = {}
     current_anchor = _controller._current_team_anchor(
         request.team_id,
         request.container.id,
@@ -242,6 +242,35 @@ def _hosted_chat_current_identity(
     )
 
 
+def _execute_hosted_power(
+    team_id: str,
+    token: str,
+    bindings: dict[str, _controller._ActiveAssistant],
+    answers_by_interrupt: dict[str, tuple[object, ...]],
+    inspect_memo: dict[str, dict[str, dict]],
+    request: brain_runtime_client.PowerRequest,
+) -> object:
+    active = bindings.get(request.assistant_id)
+    if active is None:
+        raise _controller.ApiError(HTTPStatus.CONFLICT, "Brain requested an unavailable Assistant")
+    invocation = _controller._invoke_assistant_power(
+        _controller.PowerInvocationRequest(
+            team_id=team_id,
+            token=token,
+            assistant_id=request.assistant_id,
+            contract=active.contract,
+            container=active.container,
+            power=request.power,
+            payload=request.input,
+            answers=answers_by_interrupt.get(request.interrupt_id, ()),
+            inspect_memo=inspect_memo,
+        )
+    )
+    if "suspend" in invocation:
+        return power_execution.RpcSuspension(invocation["suspend"])
+    return invocation["result"]
+
+
 def _run_hosted_chat_segment(request: HostedChatSegmentRequest) -> chat_turn_engine.SegmentResult:
     team_id, assistant_ids, token, container, owner = (
         request.team_id,
@@ -256,6 +285,7 @@ def _run_hosted_chat_segment(request: HostedChatSegmentRequest) -> chat_turn_eng
     config: inference_config.InferenceConfig | None = None
     generation = 0
     prepared_assistants: tuple[_controller._ActiveAssistant, ...] = ()
+    inspect_memo: dict[str, dict[str, dict]] = {}
 
     def require_current_credential() -> None:
         if config is None:
@@ -267,24 +297,7 @@ def _run_hosted_chat_segment(request: HostedChatSegmentRequest) -> chat_turn_eng
 
     def execute_power(request: brain_runtime_client.PowerRequest) -> object:
         require_current_credential()
-        active = bindings.get(request.assistant_id)
-        if active is None:
-            raise _controller.ApiError(HTTPStatus.CONFLICT, "Brain requested an unavailable Assistant")
-        invocation = _controller._invoke_assistant_power(
-            _controller.PowerInvocationRequest(
-                team_id=team_id,
-                token=token,
-                assistant_id=request.assistant_id,
-                contract=active.contract,
-                container=active.container,
-                power=request.power,
-                payload=request.input,
-                answers=answers_by_interrupt.get(request.interrupt_id, ()),
-            )
-        )
-        if "suspend" in invocation:
-            return power_execution.RpcSuspension(invocation["suspend"])
-        return invocation["result"]
+        return _execute_hosted_power(team_id, token, bindings, answers_by_interrupt, inspect_memo, request)
 
     def prepare() -> chat_turn_engine.PreparedSegment:
         nonlocal bindings, config, generation, initial_identity, prepared_assistants
@@ -360,11 +373,14 @@ def _run_hosted_chat_segment(request: HostedChatSegmentRequest) -> chat_turn_eng
         return bool(requirements.accounts or requirements.secrets)
 
     def validate_context() -> None:
+        nonlocal inspect_memo
+        inspect_memo = {}
         current_identity = _controller._hosted_chat_current_identity(
             request,
             prepared_assistants,
             config,
             generation,
+            inspect_memo,
         )
         if current_identity != initial_identity:
             raise _controller.ApiError(HTTPStatus.CONFLICT, "Team capabilities changed; retry")

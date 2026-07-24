@@ -15,6 +15,7 @@ class HostedAssistantInventoryTests(unittest.TestCase):
         candidate_ids = (first_id, second_id)
         candidates = [
             types.SimpleNamespace(
+                id=f"container-{assistant_id}",
                 labels={"team.app": assistant_id},
                 status="running",
                 reload=mock.Mock(),
@@ -31,9 +32,12 @@ class HostedAssistantInventoryTests(unittest.TestCase):
             reload=mock.Mock(),
         )
 
-        def installed(_team_id: str, assistant_id: str, inspect_memo):
+        admitted_candidates = []
+
+        def installed(_team_id: str, assistant_id: str, inspect_memo, candidate):
+            admitted_candidates.append(candidate)
             app._network_container_metadata(network, inspect_memo)
-            return assistant_id, spec.assistant, candidates[candidate_ids.index(assistant_id)]
+            return assistant_id, spec.assistant, candidate
 
         engine = types.SimpleNamespace(
             containers=types.SimpleNamespace(get=lambda member_id: members[member_id]),
@@ -49,9 +53,10 @@ class HostedAssistantInventoryTests(unittest.TestCase):
             active = app._active_team_assistants("team_1")
 
         self.assertEqual(tuple(item.assistant_id for item in active), (second_id, first_id))
+        self.assertEqual(admitted_candidates, candidates)
         network.reload.assert_called_once_with()
         for member in members.values():
-            member.reload.assert_called_once_with()
+            member.reload.assert_not_called()
 
 
 if __name__ == "__main__":

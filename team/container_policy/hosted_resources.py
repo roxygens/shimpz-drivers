@@ -481,7 +481,6 @@ def _network_container_metadata(
         containers: dict[str, dict] = {}
         for container_id in member_ids:
             container = _controller._docker.containers.get(container_id)
-            container.reload()
             metadata = dict(container.attrs)
             metadata.setdefault("Id", container.id)
             metadata.setdefault("Name", f"/{container.name}")

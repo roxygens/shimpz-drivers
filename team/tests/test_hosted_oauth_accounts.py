@@ -103,15 +103,21 @@ class HostedOAuthAccountTests(unittest.TestCase):
     def test_inventory_is_status_only_and_private_token_reaches_only_declared_power(self) -> None:
         self._connect()
         captured: list[dict[str, object]] = []
+        inspected = []
+        inspect_memo: dict[str, dict[str, dict]] = {}
         turn_token = "turn-token"
 
         def rpc(_team_id, _token, _container, _command, _method, _path, payload):
             captured.append(payload)
             return _zones()
 
+        def installed(_team_id, _assistant_id, current_inspect_memo=None):
+            inspected.append(current_inspect_memo)
+            return ASSISTANT_ID, self.contract, self.container
+
         with _patched(
             _assistant_accounts=self.store,
-            _installed_assistant=lambda *_args: (ASSISTANT_ID, self.contract, self.container),
+            _installed_assistant=installed,
             _assistant_rpc=rpc,
         ):
             result = app._invoke_assistant_power(
@@ -123,6 +129,7 @@ class HostedOAuthAccountTests(unittest.TestCase):
                     container=self.container,
                     power="list-zones",
                     payload=ZONE_INPUT,
+                    inspect_memo=inspect_memo,
                 )
             )
             payload = app.assistant_account_flow.inventory_payload(
@@ -132,6 +139,8 @@ class HostedOAuthAccountTests(unittest.TestCase):
             )
 
         self.assertEqual(result["result"]["zones"][0]["name"], "example.com")
+        self.assertEqual(len(inspected), 1)
+        self.assertIs(inspected[0], inspect_memo)
         self.assertEqual(
             captured,
             [
