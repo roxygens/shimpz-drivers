@@ -626,28 +626,29 @@ class LocalController(
                 assistant=assistant_id,
                 detail=f"started:{power}",
             )
-            try:
-                raw_result = self._rpc(
-                    container,
-                    spec,
-                    power_spec.method,
-                    power_spec.path,
-                    {
-                        "input": safe_payload,
-                        "secrets": secret_values,
-                        "accounts": account_values,
-                        "answers": list(answers),
-                    },
-                )
-            except ApiProblem:
-                local_audit.record(
-                    "assistant-power",
-                    result="error",
-                    team_id=team_id,
-                    assistant=assistant_id,
-                    detail=f"failed:{power}",
-                )
-                raise
+            rpc_payload = {
+                "input": safe_payload,
+                "secrets": secret_values,
+                "accounts": account_values,
+                "answers": list(answers),
+            }
+        try:
+            raw_result = self._rpc(
+                container,
+                spec,
+                power_spec.method,
+                power_spec.path,
+                rpc_payload,
+            )
+        except ApiProblem:
+            local_audit.record(
+                "assistant-power",
+                result="error",
+                team_id=team_id,
+                assistant=assistant_id,
+                detail=f"failed:{power}",
+            )
+            raise
         try:
             projected = power_execution.project_rpc_result(
                 raw_result,

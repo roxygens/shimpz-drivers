@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import sys
 import tempfile
+import threading
 from dataclasses import replace
 from http import HTTPStatus
 from pathlib import Path
@@ -41,6 +43,52 @@ OUTDATED_ASSISTANT_IMAGE = "ghcr.io/theshimpz/shimpz-space@sha256:" + "a" * 64
 
 
 class LocalChatScopeTests(LocalContractCase):
+    def test_blocking_power_rpc_does_not_hold_a_colliding_team_stripe(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = self._chat_controller(directory, object())
+            first_team = "team_1"
+            token = "turn-token"
+            frozen_container_id = controller._assistant_container(first_team, "shimpz-cloudflare").id
+            controller._active_chat_tokens[first_team] = token
+            colliding_team = next(
+                f"team_{index}"
+                for index in range(2, 10_000)
+                if controller._lock(f"team_{index}") is controller._lock(first_team)
+            )
+
+            def rpc(*_args):
+                started.set()
+                release.wait(timeout=2)
+                return LOOKUP_RESULT
+
+            controller._rpc = rpc
+            with (
+                mock.patch.object(local_app.local_audit, "record", return_value="trace"),
+                concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor,
+            ):
+                future = executor.submit(
+                    controller._invoke_chat_power,
+                    first_team,
+                    token,
+                    "shimpz-cloudflare",
+                    frozen_container_id,
+                    "list-zones",
+                    LOOKUP_INPUT,
+                )
+                try:
+                    self.assertTrue(started.wait(timeout=1))
+                    stripe = controller._lock(colliding_team)
+                    self.assertTrue(stripe.acquire(blocking=False))
+                    stripe.release()
+                finally:
+                    release.set()
+                result = future.result(timeout=2)
+
+        self.assertEqual(result, LOOKUP_RESULT)
+
     def test_chat_setup_validates_the_network_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             controller = self._chat_controller(directory, object())

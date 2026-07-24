@@ -50,23 +50,23 @@ class LocalChatExecutionMixin:
                 ):
                     raise chat_orchestrator.ChatStoppedError("chat turn stopped")
                 self._active_power_containers[team_id] = (token, container)
-            try:
-                invocation = (
-                    self.invoke(team_id, assistant_id, power, payload, answers=answers)
-                    if answers
-                    else self.invoke(team_id, assistant_id, power, payload)
-                )
-            except ApiProblem:
-                if self._chat_cancelled(token):
-                    raise chat_orchestrator.ChatStoppedError("chat turn stopped") from None
-                raise
-            finally:
-                with self._active_chat_guard:
-                    active = self._active_power_containers.get(team_id)
-                    if active is not None and active[0] == token:
-                        self._active_power_containers.pop(team_id, None)
+        try:
+            invocation = (
+                self.invoke(team_id, assistant_id, power, payload, answers=answers)
+                if answers
+                else self.invoke(team_id, assistant_id, power, payload)
+            )
+        except ApiProblem:
             if self._chat_cancelled(token):
-                raise chat_orchestrator.ChatStoppedError("chat turn stopped")
+                raise chat_orchestrator.ChatStoppedError("chat turn stopped") from None
+            raise
+        finally:
+            with self._active_chat_guard:
+                active = self._active_power_containers.get(team_id)
+                if active is not None and active[0] == token:
+                    self._active_power_containers.pop(team_id, None)
+        if self._chat_cancelled(token):
+            raise chat_orchestrator.ChatStoppedError("chat turn stopped")
         if "suspend" in invocation:
             return power_execution.RpcSuspension(invocation["suspend"])
         return invocation["result"]
