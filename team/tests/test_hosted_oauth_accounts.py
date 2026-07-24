@@ -8,6 +8,7 @@ import types
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS))
@@ -16,6 +17,7 @@ import hosted_app_fixture as harness
 
 app = harness.app
 _patched = harness._patched
+runtime_state = harness.runtime_state
 
 TEAM_ID = "team_1"
 ASSISTANT_ID = "shimpz-cloudflare"
@@ -201,9 +203,9 @@ class HostedOAuthAccountTests(unittest.TestCase):
             assistant=replace(self.contract, accounts={}),
         )
 
-        with _patched(
-            _assistant_accounts=self.store,
-            _assistant_account_challenges=challenge_store,
+        with (
+            mock.patch.object(runtime_state, "_assistant_accounts", self.store),
+            mock.patch.object(runtime_state, "_assistant_account_challenges", challenge_store),
         ):
             app._retain_admitted_assistant_accounts(TEAM_ID, ASSISTANT_ID, without_accounts)
 

@@ -13,7 +13,15 @@ from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
-from hosted_app_fixture import ANCHOR_ID, _patched, app
+from hosted_app_fixture import (
+    ANCHOR_ID,
+    _patched,
+    app,
+    hosted_apps,
+    hosted_assistants,
+    hosted_resources,
+    runtime_state,
+)
 
 hosted_egress_policy = app._egress_store.__globals__["egress_policy"]
 
@@ -214,26 +222,34 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory).chmod(0o770)
             with (
-                _patched(
+                mock.patch.multiple(
+                    runtime_state,
                     _lock_for=lambda _team_id: contextlib.nullcontext(),
+                    _docker=engine,
+                    APP_EGRESS_POLICY_DIR=Path(directory),
+                    APP_EGRESS_POLICY_GID=os.getgid(),
+                ),
+                mock.patch.multiple(
+                    hosted_resources,
                     _require_current_authorization=lambda *_args, **_kwargs: types.SimpleNamespace(
                         labels={"team.name": "Marketing"}
                     ),
                     _prepare_marketplace_image=lambda _spec: None,
                     _get_container=lambda _name: container if state["created"] else None,
-                    _team_app_containers=lambda _team_id: [],
                     _reserve_capacity=lambda *_args, **_kwargs: contextlib.nullcontext(),
                     _require_team_runtime=lambda: None,
                     _ensure_team_network=lambda _team_id: network,
-                    _docker=engine,
-                    _admit_app_contract=reject,
-                    _write_egress_policy=lambda *_args: events.append("write-policy"),
                     _safe_connect=lambda *_args, **_kwargs: events.append("connect-proxy"),
                     _start_team_with_isolation=lambda _container: events.append("start"),
                     _remove_team_container=lambda target: events.append(("remove-container", target.id)) or True,
-                    APP_EGRESS_POLICY_DIR=Path(directory),
-                    APP_EGRESS_POLICY_GID=os.getgid(),
                 ),
+                mock.patch.object(hosted_assistants, "_admit_app_contract", side_effect=reject),
+                mock.patch.object(
+                    hosted_apps,
+                    "_write_egress_policy",
+                    side_effect=lambda *_args: events.append("write-policy"),
+                ),
+                mock.patch.object(hosted_apps, "_team_app_containers", return_value=[]),
                 mock.patch.object(app.manifests, "build_team_app_kwargs", return_value={}),
                 mock.patch.object(app.network_policy, "app_identity_valid", return_value=True),
                 self.assertRaises(app.ApiError) as caught,
@@ -263,7 +279,8 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
         hosts = ("api.open-meteo.com", "geocoding-api.open-meteo.com")
         with tempfile.TemporaryDirectory() as directory:
             Path(directory).chmod(0o770)
-            with _patched(
+            with mock.patch.multiple(
+                runtime_state,
                 APP_EGRESS_POLICY_DIR=Path(directory),
                 APP_EGRESS_POLICY_GID=os.getgid(),
             ):
@@ -286,7 +303,8 @@ class HostedAllowedHostsAdmissionTests(unittest.TestCase):
             policy_root = Path(directory)
             policy_root.chmod(0o770)
             with (
-                _patched(
+                mock.patch.multiple(
+                    runtime_state,
                     APP_EGRESS_POLICY_DIR=policy_root,
                     APP_EGRESS_POLICY_GID=os.getgid(),
                 ),

@@ -20,6 +20,10 @@ import hosted_app_fixture as harness
 
 app = harness.app
 _patched = harness._patched
+hosted_apps = harness.hosted_apps
+hosted_assistants = harness.hosted_assistants
+hosted_resources = harness.hosted_resources
+runtime_state = harness.runtime_state
 
 TEAM_ID = "team_1"
 ANCHOR_ID = "a" * 64
@@ -427,11 +431,15 @@ class HostedAssistantSecretTests(unittest.TestCase):
             ),
             object(),
         )
-        with _patched(
-            _assistant_secrets=self.secret_store,
-            _assistant_secret_challenges=self.challenge_store,
-            _require_current_authorization=lambda *_args, **_kwargs: None,
-            _teardown_app=lambda *_args, **_kwargs: app._CleanupResult(True, True),
+        with (
+            mock.patch.object(runtime_state, "_assistant_secrets", self.secret_store),
+            mock.patch.object(runtime_state, "_assistant_secret_challenges", self.challenge_store),
+            mock.patch.object(hosted_resources, "_require_current_authorization", return_value=None),
+            mock.patch.object(
+                hosted_apps,
+                "_teardown_app",
+                return_value=app._CleanupResult(True, True),
+            ),
         ):
             result = app._uninstall_app(TEAM_ID, ASSISTANT_ID, object())
         self.assertTrue(result["uninstalled"])
@@ -590,20 +598,22 @@ class HostedAssistantSecretTests(unittest.TestCase):
             ),
             object(),
         )
-        with _patched(
-            _lock_for=lambda _team_id: contextlib.nullcontext(),
-            _require_current_authorization=lambda *_args, **_kwargs: types.SimpleNamespace(
-                labels={"team.name": "Marketing"}
+        with (
+            mock.patch.object(runtime_state, "_lock_for", side_effect=lambda _team_id: contextlib.nullcontext()),
+            mock.patch.object(runtime_state, "_assistant_secrets", self.secret_store),
+            mock.patch.object(runtime_state, "_assistant_secret_challenges", self.challenge_store),
+            mock.patch.object(
+                hosted_resources,
+                "_require_current_authorization",
+                return_value=types.SimpleNamespace(labels={"team.name": "Marketing"}),
             ),
-            _prepare_marketplace_image=lambda _spec: None,
-            _get_container=lambda _name: container,
-            _require_team_isolation=lambda _container: None,
-            _admit_app_contract=lambda *_args: (),
-            _validate_admitted_egress=lambda *_args: "admitted-token",
-            _validate_assistant_proxy_environment=lambda *_args: None,
-            _app_ready_now=lambda *_args: (True, "running"),
-            _assistant_secrets=self.secret_store,
-            _assistant_secret_challenges=self.challenge_store,
+            mock.patch.object(hosted_resources, "_prepare_marketplace_image", return_value=None),
+            mock.patch.object(hosted_resources, "_get_container", return_value=container),
+            mock.patch.object(hosted_resources, "_require_team_isolation", return_value=None),
+            mock.patch.object(hosted_assistants, "_admit_app_contract", return_value=()),
+            mock.patch.object(hosted_apps, "_validate_admitted_egress", return_value="admitted-token"),
+            mock.patch.object(hosted_apps, "_validate_assistant_proxy_environment", return_value=None),
+            mock.patch.object(hosted_apps, "_app_ready_now", return_value=(True, "running")),
         ):
             result = app._install_app(
                 TEAM_ID,

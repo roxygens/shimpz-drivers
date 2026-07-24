@@ -11,11 +11,8 @@ A compromised caller can only ever request what validate.py permits.
 from __future__ import annotations
 
 import contextlib
-import functools
 import secrets
 import sys
-import threading
-from collections.abc import Callable
 from http import HTTPStatus
 
 import assistant_account_challenges as assistant_account_challenges
@@ -159,6 +156,9 @@ from runtime_state import (
     _capacity_reservations as _capacity_reservations,
 )
 from runtime_state import (
+    _chat_lock_for as _chat_lock_for,
+)
+from runtime_state import (
     _chat_locks as _chat_locks,
 )
 from runtime_state import (
@@ -177,6 +177,9 @@ from runtime_state import (
     _inference_store as _inference_store,
 )
 from runtime_state import (
+    _lock_for as _lock_for,
+)
+from runtime_state import (
     _locks as _locks,
 )
 from runtime_state import (
@@ -193,6 +196,9 @@ from runtime_state import (
 )
 from runtime_state import (
     _rate_limiters as _rate_limiters,
+)
+from runtime_state import (
+    _serialize_against_team_chat as _serialize_against_team_chat,
 )
 from runtime_state import (
     _storage_instance as _storage_instance,
@@ -254,15 +260,6 @@ def _power_execution_journal() -> power_journal.PowerJournal:
         return _power_journal_instance
 
 
-def _lock_for(team_id: str) -> threading.Lock:
-    with _locks_guard:
-        lock = _locks.get(team_id)
-        if lock is None:
-            lock = threading.Lock()
-            _locks[team_id] = lock
-        return lock
-
-
 def _brain_thread_id(team_id: str, anchor_id: str) -> str:
     """Bind hosted conversation state to one immutable Team lifecycle."""
     if (
@@ -288,31 +285,6 @@ def _enforce_rate(operation: str, principal: tuple[str, str | None]) -> None:
             HTTPStatus.TOO_MANY_REQUESTS,
             f"{operation} rate limit exceeded; retry in {retry_after}s",
         )
-
-
-def _chat_lock_for(team_id: str) -> threading.Lock:
-    with _chat_locks_guard:
-        lock = _chat_locks.get(team_id)
-        if lock is None:
-            lock = threading.Lock()
-            _chat_locks[team_id] = lock
-        return lock
-
-
-def _serialize_against_team_chat(operation: Callable[..., dict]) -> Callable[..., dict]:
-    """Reject lifecycle mutation before its first side effect while a Team turn owns the slot."""
-
-    @functools.wraps(operation)
-    def guarded(team_id: str, *args, **kwargs) -> dict:
-        lock = _chat_lock_for(team_id)
-        if not lock.acquire(blocking=False):
-            raise ApiError(HTTPStatus.CONFLICT, "Team lifecycle cannot change during an active chat turn")
-        try:
-            return operation(team_id, *args, **kwargs)
-        finally:
-            lock.release()
-
-    return guarded
 
 
 def _clear_team_id_runtime_state(team_id: str) -> None:

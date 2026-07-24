@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 import math
 import os
 import threading
 import time
 import weakref
+from collections.abc import Callable
 from http import HTTPStatus
 from pathlib import Path
 
@@ -221,3 +223,37 @@ _rate_limiters = {
     "file_upload": _FixedWindowRateLimiter(FILE_UPLOAD_RATE_LIMIT, FILE_UPLOAD_RATE_WINDOW_SECONDS),
 }
 _file_upload_slots = threading.BoundedSemaphore(2)
+
+
+def _lock_for(team_id: str) -> threading.Lock:
+    with _locks_guard:
+        lock = _locks.get(team_id)
+        if lock is None:
+            lock = threading.Lock()
+            _locks[team_id] = lock
+        return lock
+
+
+def _chat_lock_for(team_id: str) -> threading.Lock:
+    with _chat_locks_guard:
+        lock = _chat_locks.get(team_id)
+        if lock is None:
+            lock = threading.Lock()
+            _chat_locks[team_id] = lock
+        return lock
+
+
+def _serialize_against_team_chat(operation: Callable[..., dict]) -> Callable[..., dict]:
+    """Reject lifecycle mutation before its first side effect while a Team turn owns the slot."""
+
+    @functools.wraps(operation)
+    def guarded(team_id: str, *args, **kwargs) -> dict:
+        lock = _chat_lock_for(team_id)
+        if not lock.acquire(blocking=False):
+            raise ApiError(HTTPStatus.CONFLICT, "Team lifecycle cannot change during an active chat turn")
+        try:
+            return operation(team_id, *args, **kwargs)
+        finally:
+            lock.release()
+
+    return guarded

@@ -186,9 +186,9 @@ class HostedAuthorizationTests(unittest.TestCase):
             mock.patch.object(hosted_resources, "_get_container", return_value=container),
             mock.patch.object(hosted_resources, "_cleanup_record", return_value=None),
             mock.patch.object(
-                app,
+                hosted_resources,
                 "_require_current_authorization",
-                wraps=app._require_current_authorization,
+                wraps=hosted_resources._require_current_authorization,
             ) as require_current,
         ):
             handler._route("GET", ("account", "account_1"))
