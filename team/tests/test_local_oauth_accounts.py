@@ -14,6 +14,8 @@ from unittest import mock
 TEAM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TEAM))
 
+from local_controller_harness import CURRENT_ASSISTANT_IMAGE, LocalContractCase
+
 import assistant_account_challenges
 import brain_runtime_client
 import chat_orchestrator
@@ -29,6 +31,65 @@ from local_support.chat_types import ActiveAssistant, PendingLocalChat
 
 TEST_ACCESS_TOKEN = "oauth-access-test-token-123456789"
 TEST_REFRESH_TOKEN = "oauth-refresh-test-token-123456789"
+
+
+class LocalOAuthArtifactCurrencyTests(LocalContractCase):
+    def test_callback_requires_the_target_assistant_to_run_its_current_artifact(self) -> None:
+        controller, container, inspections = self._lifecycle_controller()
+        spec = controller.registry["shimpz-cloudflare"]
+        declaration = SimpleNamespace(
+            provider="cloudflare",
+            scopes=("dns.read", "offline_access", "zone.read"),
+        )
+        spec.accounts = {"cloudflare": declaration}
+
+        class Service:
+            @staticmethod
+            def complete(_state, _claim, _session_binding, resolver):
+                try:
+                    current = resolver("team_1", spec.assistant_id, "cloudflare")
+                except oauth_account_service.OAuthAccountDeclarationError as exc:
+                    raise oauth_account_service.OAuthAccountServiceError(
+                        "OAuth account declaration is unavailable"
+                    ) from exc
+                if current is not declaration:
+                    raise AssertionError("callback resolved an unexpected declaration")
+                return oauth_account_service.OAuthAccountCompletion(
+                    "team_1",
+                    spec.assistant_id,
+                    "cloudflare",
+                    declaration.provider,
+                    declaration.scopes,
+                    1,
+                )
+
+        controller.oauth_service = Service()
+        callback = {
+            "state": "s" * 43,
+            "claim": "a" * 64,
+            "session_binding": "browser-session-private-123456789",
+        }
+
+        with self.assertRaises(local_app.ApiProblem) as outdated:
+            controller.complete_cloudflare_oauth_callback(**callback)
+        self.assertEqual(
+            (outdated.exception.status, outdated.exception.code),
+            (HTTPStatus.BAD_GATEWAY, "assistant-account-oauth-unavailable"),
+        )
+
+        config = container.attrs["Config"]
+        config["Image"] = CURRENT_ASSISTANT_IMAGE
+        config["Labels"][local_app.IMAGE_LABEL] = CURRENT_ASSISTANT_IMAGE
+        self.assertEqual(
+            controller.complete_cloudflare_oauth_callback(**callback),
+            {
+                "connected": True,
+                "team_id": "team_1",
+                "assistant_id": spec.assistant_id,
+                "account_id": "cloudflare",
+            },
+        )
+        self.assertEqual(inspections, ["reload", "reload"])
 
 
 class LocalOAuthAccountTests(unittest.TestCase):

@@ -3,6 +3,8 @@
 from http import HTTPStatus
 from typing import NoReturn
 
+from docker.errors import DockerException
+
 import assistant_account_challenges
 import assistant_account_flow
 import assistant_secret_challenges
@@ -17,7 +19,6 @@ from assistant_human import approval_challenges as assistant_approval_challenges
 from assistant_human import approval_flow as assistant_approval_flow
 from assistant_human import approval_grants as assistant_approval_grants
 from local_registry import AssistantSpec
-
 from local_support.chat_types import ActiveAssistant as _ActiveAssistant
 from local_support.chat_types import required_active_assistant as _required_active_assistant
 from local_support.errors import ApiProblemError as ApiProblem
@@ -210,6 +211,17 @@ class LocalChatPrivateMixin:
             spec = self._resolve(assistant_id)
             declaration = spec.accounts.get(account_id)
             if assistant_id not in self._assistant_ids(team_id, running_only=True) or declaration is None:
+                raise oauth_account_service.OAuthAccountDeclarationError("OAuth account declaration is unavailable")
+            try:
+                container = self._assistant_container(team_id, assistant_id)
+                container.reload()
+            except (ApiProblem, DockerException) as exc:
+                raise oauth_account_service.OAuthAccountDeclarationError(
+                    "OAuth account declaration is unavailable"
+                ) from exc
+            attrs = container.attrs if isinstance(container.attrs, dict) else {}
+            config = attrs.get("Config")
+            if not isinstance(config, dict) or not self._has_current_assistant_artifact(config, spec):
                 raise oauth_account_service.OAuthAccountDeclarationError("OAuth account declaration is unavailable")
             return declaration
 
