@@ -7,6 +7,7 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import chat_turn_engine
 from docker.errors import DockerException
 from http_boundary import local
 from http_boundary import strict as strict_http
@@ -27,7 +28,6 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_FILE_BODY_BYTES = 4 * ((MAX_UPLOAD_BYTES + 2) // 3) + 8192
 MAX_PATH_BYTES = 512
 REQUEST_TIMEOUT_SECONDS = 10
-CHAT_PAUSED_STATUSES = frozenset({"accounts-required", "secrets-required", "input-required", "approval-required"})
 _FILE_UPLOAD_SLOTS = threading.BoundedSemaphore(1)
 
 
@@ -255,7 +255,11 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _chat_status(payload: dict[str, object]) -> HTTPStatus:
-        return HTTPStatus.PRECONDITION_REQUIRED if payload.get("status") in CHAT_PAUSED_STATUSES else HTTPStatus.OK
+        return (
+            HTTPStatus.PRECONDITION_REQUIRED
+            if payload.get("status") in chat_turn_engine.CHAT_PAUSED_STATUSES
+            else HTTPStatus.OK
+        )
 
     def _chat_start(
         self,

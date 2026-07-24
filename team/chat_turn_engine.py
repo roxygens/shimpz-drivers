@@ -14,6 +14,8 @@ import chat_orchestrator
 import oauth_account_store
 import power_journal
 
+CHAT_PAUSED_STATUSES = frozenset({"accounts-required", "secrets-required", "input-required", "approval-required"})
+
 
 @dataclass(slots=True)
 class SegmentRequirements:

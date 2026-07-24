@@ -19,6 +19,7 @@ import audit
 import brain_credentials_client
 import brain_runtime_client
 import chat_orchestrator
+import chat_turn_engine
 import docker
 import docker.errors
 import manifests
@@ -45,7 +46,7 @@ MAX_ASSISTANT_RPC_OUTPUT_BYTES = assistant_help.MAX_HELP_BYTES * 6 + 1024
 ASSISTANT_RPC_TIMEOUT_SECONDS = 8
 MAX_CHAT_FILES = 8
 MAX_CHAT_ASSISTANTS = 16
-CHAT_PAUSED_STATUSES = frozenset({"accounts-required", "secrets-required", "input-required", "approval-required"})
+CHAT_PAUSED_STATUSES = chat_turn_engine.CHAT_PAUSED_STATUSES
 
 
 @dataclass(frozen=True, slots=True)
